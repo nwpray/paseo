@@ -1,0 +1,85 @@
+From 28a2b321da89c3a6375e25293bd156bca930ade3 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickpray@numetric.com>
+Date: Tue, 27 Oct 2026 12:57:58 -0600
+Subject: [PATCH] fork: disable desktop auto-update unless
+ PASEO_FORK_ENABLE_UPDATES=1
+
+The fork build carries local patches. Upstream's updater (provider: github,
+getpaseo/paseo) would download and install an upstream release over it on
+quit. The update service already short-circuits every check, download and
+install-on-quit path when the app is not packaged, so report the app as not
+packaged for update purposes. Checks return "no update" with no error, so
+the UI shows up to date.
+
+Set PASEO_FORK_ENABLE_UPDATES=1 in the app's environment to turn the
+updater back on (e.g. for a self-hosted generic provider).
+---
+ .../desktop/src/features/auto-updater.test.ts | 28 ++++++++++++++++++-
+ packages/desktop/src/features/auto-updater.ts |  5 +++-
+ 2 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/packages/desktop/src/features/auto-updater.test.ts b/packages/desktop/src/features/auto-updater.test.ts
+index 6cd6da2c7..92bf48bc3 100644
+--- a/packages/desktop/src/features/auto-updater.test.ts
++++ b/packages/desktop/src/features/auto-updater.test.ts
+@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { UUID } from "builder-util-runtime";
+-import { describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ const { autoUpdaterMock } = vi.hoisted(() => {
+   const handlers = new Map<string, (value: unknown) => void>();
+@@ -46,6 +46,32 @@ import {
+   shouldInstallAppUpdateOnQuit,
+ } from "./auto-updater";
+ 
++// Fork: updates are off unless PASEO_FORK_ENABLE_UPDATES=1. Upstream's tests
++// exercise the enabled updater, so turn it on for them.
++beforeEach(() => {
++  process.env.PASEO_FORK_ENABLE_UPDATES = "1";
++});
++
++afterEach(() => {
++  delete process.env.PASEO_FORK_ENABLE_UPDATES;
++});
++
++describe("fork update gate", () => {
++  it("reports no update and never calls the updater when updates are not enabled", async () => {
++    delete process.env.PASEO_FORK_ENABLE_UPDATES;
++    autoUpdaterMock.checkForUpdates.mockClear();
++
++    const result = await checkForAppUpdate({
++      currentVersion: "1.2.3",
++      releaseChannel: "stable",
++      intent: "automatic",
++    });
++
++    expect(result).toMatchObject({ hasUpdate: false, readyToInstall: false, errorMessage: null });
++    expect(autoUpdaterMock.checkForUpdates).not.toHaveBeenCalled();
++  });
++});
++
+ describe("checkForAppUpdate", () => {
+   it("treats an unpublished channel manifest as an unavailable update", async () => {
+     const error = Object.assign(new Error("Cannot find latest-mac.yml"), {
+diff --git a/packages/desktop/src/features/auto-updater.ts b/packages/desktop/src/features/auto-updater.ts
+index ef71dc25b..66dd33623 100644
+--- a/packages/desktop/src/features/auto-updater.ts
++++ b/packages/desktop/src/features/auto-updater.ts
+@@ -224,7 +224,10 @@ class ElectronAppUpdateRuntime implements AppUpdateRuntime {
+ 
+ const appUpdateService = createAppUpdateService({
+   runtime: new ElectronAppUpdateRuntime(),
+-  isPackaged: () => app.isPackaged,
++  // Fork: this build carries local patches, and upstream's updater would replace
++  // it. Updates stay off unless PASEO_FORK_ENABLE_UPDATES=1, so checks report "no
++  // update" and nothing is downloaded or installed.
++  isPackaged: () => app.isPackaged && process.env.PASEO_FORK_ENABLE_UPDATES === "1",
+   now: () => Date.now(),
+   bucket: async () => bucketFromStagingUserId(await getStagingUserId()),
+   reportCheckError: (error) => {
+-- 
+2.52.0
+

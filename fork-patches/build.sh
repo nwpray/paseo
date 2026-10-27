@@ -33,10 +33,12 @@
 #   Nothing is installed or published.
 #
 # NOTES
-#   - The built app still contains upstream's auto-updater config
-#     (provider: github, getpaseo/paseo). If you install it, an upstream update
-#     will replace it and drop the patches. Add a patch that changes `publish:`
-#     in packages/desktop/electron-builder.yml before relying on it day to day.
+#   - Patch 0002 turns the desktop auto-updater off: it never checks, downloads
+#     or installs. The bundled app-update.yml still names upstream
+#     (provider: github, getpaseo/paseo). Launching the app with
+#     PASEO_FORK_ENABLE_UPDATES=1 turns the updater back on, and it would then
+#     pull upstream releases unless `publish:` in electron-builder.yml is
+#     changed too.
 #   - Adding a patch: commit the change on top of TAG in the worktree, then
 #     `git format-patch -1 HEAD -o fork-patches/` and rename to NNNN-slug.patch.
 #   - Patch commits in the scratch worktree are made with commit.gpgsign=false;
