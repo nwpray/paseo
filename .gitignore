@@ -98,3 +98,6 @@ app.json
 
 # Project-local Serena configuration and memories.
 .serena/
+
+# Fork patch-stack build worktrees (fork-patches/build.sh).
+.fork-build/

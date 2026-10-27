@@ -1,0 +1,232 @@
+From ff07f73721fa2aa60e0fe3fd194eb13797d89f3c Mon Sep 17 00:00:00 2001
+From: "paseo-bot[bot]" <266920839+paseo-bot[bot]@users.noreply.github.com>
+Date: Wed, 14 Oct 2026 19:16:38 +0200
+Subject: [PATCH] fix(claude): allow Auto mode on hosted providers
+
+Claude Code supports Auto mode on Bedrock and Vertex, but Paseo removed it from the catalog and rejected explicit selections before reaching Claude Code. Remove that obsolete eligibility gate while preserving the existing default modes and SDK error handling.
+
+Fork-patch: upstream PR getpaseo/paseo#6904 (fixes #5076), commit
+26dd2c5a902655a74d4162ee0f9c322f9d08ddd1, rebased onto v0.13.2. Only the
+diff context changed; the +/- lines are identical to the PR. Drop this
+patch once #6904 is in a release tag.
+---
+ .../claude/agent.mode-catalog.test.ts         | 54 +++++++++++++++++++
+ .../providers/claude/agent.redesign.test.ts   | 51 ------------------
+ .../server/agent/providers/claude/agent.ts    | 44 +++------------
+ 3 files changed, 62 insertions(+), 87 deletions(-)
+ create mode 100644 packages/server/src/server/agent/providers/claude/agent.mode-catalog.test.ts
+
+diff --git a/packages/server/src/server/agent/providers/claude/agent.mode-catalog.test.ts b/packages/server/src/server/agent/providers/claude/agent.mode-catalog.test.ts
+new file mode 100644
+index 000000000..1c6d175b6
+--- /dev/null
++++ b/packages/server/src/server/agent/providers/claude/agent.mode-catalog.test.ts
+@@ -0,0 +1,54 @@
++import { expect, test } from "vitest";
++
++import { createTestLogger } from "../../../../test-utils/test-logger.js";
++import { ClaudeAgentClient } from "./agent.js";
++
++const hostedEnvironments = [
++  { transport: "Bedrock", env: { CLAUDE_CODE_USE_BEDROCK: "1" } },
++  { transport: "Vertex", env: { CLAUDE_CODE_USE_VERTEX: "true" } },
++];
++
++test.each(hostedEnvironments)(
++  "offers Auto mode on $transport while preserving its default mode",
++  async ({ env }) => {
++    const client = new ClaudeAgentClient({
++      logger: createTestLogger(),
++      runtimeSettings: { env },
++      resolveVersion: async () => "2.1.263",
++      discoverModels: async () => [],
++    });
++
++    const catalog = await client.fetchCatalog({ cwd: process.cwd() });
++
++    expect(catalog.modes?.map((mode) => mode.id)).toContain("auto");
++    expect(catalog.defaultModeId).toBe("default");
++  },
++);
++
++test.each(hostedEnvironments)(
++  "passes an explicit Auto selection on $transport to Claude Code",
++  async ({ env }) => {
++    const sdkError = new Error("Claude Code rejected this request");
++    let requestedMode: string | undefined;
++    let requestedEnv: NodeJS.ProcessEnv | undefined;
++    const client = new ClaudeAgentClient({
++      logger: createTestLogger(),
++      runtimeSettings: { env },
++      resolveBinary: async () => "/test/claude",
++      queryFactory: ({ options }) => {
++        requestedMode = options.permissionMode;
++        requestedEnv = options.env;
++        throw sdkError;
++      },
++    });
++    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
++
++    try {
++      await expect(session.setMode("auto")).rejects.toBe(sdkError);
++      expect(requestedMode).toBe("auto");
++      expect(requestedEnv).toMatchObject(env);
++    } finally {
++      await session.close();
++    }
++  },
++);
+diff --git a/packages/server/src/server/agent/providers/claude/agent.redesign.test.ts b/packages/server/src/server/agent/providers/claude/agent.redesign.test.ts
+index 539392652..3d88f7d15 100644
+--- a/packages/server/src/server/agent/providers/claude/agent.redesign.test.ts
++++ b/packages/server/src/server/agent/providers/claude/agent.redesign.test.ts
+@@ -201,23 +201,6 @@ test("exposes and applies auto permission mode", async () => {
+   }
+ });
+ 
+-test("rejects auto mode when Claude Code uses Bedrock", async () => {
+-  const previousBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
+-  process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+-
+-  const session = await createSession();
+-
+-  try {
+-    await expect(session.setMode("auto")).rejects.toThrow(
+-      "Claude Auto mode requires the Anthropic API and is not supported when Claude Code uses Bedrock",
+-    );
+-    expect(sdkQueryFactory).not.toHaveBeenCalled();
+-  } finally {
+-    restoreEnvValue("CLAUDE_CODE_USE_BEDROCK", previousBedrock);
+-    await session.close();
+-  }
+-});
+-
+ test.each([
+   { env: {}, expected: "auto" },
+   { env: { CLAUDE_CODE_USE_BEDROCK: "1" }, expected: "default" },
+@@ -293,40 +276,6 @@ test("allows launch env to disable inherited Bedrock transport for auto mode", a
+   }
+ });
+ 
+-test("fails an auto mode turn when Claude Code uses Vertex", async () => {
+-  const previousVertex = process.env.CLAUDE_CODE_USE_VERTEX;
+-  process.env.CLAUDE_CODE_USE_VERTEX = "true";
+-  sdkQueryFactory.mockImplementation(() => {
+-    throw new Error("query should not start");
+-  });
+-  const client = new ClaudeAgentClient({
+-    logger: createTestLogger(),
+-    queryFactory: sdkQueryFactory,
+-    resolveBinary: async () => "/test/claude/bin",
+-  });
+-  const session = await client.createSession({
+-    provider: "claude",
+-    cwd: process.cwd(),
+-    modeId: "auto",
+-  });
+-
+-  try {
+-    const events = await collectUntilTerminal(streamSession(session, "hello"));
+-    const failure = events.find(
+-      (event): event is Extract<AgentStreamEvent, { type: "turn_failed" }> =>
+-        event.type === "turn_failed",
+-    );
+-
+-    expect(failure?.error).toContain(
+-      "Claude Auto mode requires the Anthropic API and is not supported when Claude Code uses Vertex",
+-    );
+-    expect(sdkQueryFactory).not.toHaveBeenCalled();
+-  } finally {
+-    restoreEnvValue("CLAUDE_CODE_USE_VERTEX", previousVertex);
+-    await session.close();
+-  }
+-});
+-
+ test("switches an auto mode session to another mode when Claude Code uses Bedrock", async () => {
+   const previousBedrock = process.env.CLAUDE_CODE_USE_BEDROCK;
+   process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+diff --git a/packages/server/src/server/agent/providers/claude/agent.ts b/packages/server/src/server/agent/providers/claude/agent.ts
+index a00f504f1..9c944c43a 100644
+--- a/packages/server/src/server/agent/providers/claude/agent.ts
++++ b/packages/server/src/server/agent/providers/claude/agent.ts
+@@ -991,37 +991,11 @@ function isTruthyEnvValue(value: string | undefined): boolean {
+   );
+ }
+ 
+-function claudeAutoModeUnavailableOn(env: NodeJS.ProcessEnv): "Bedrock" | "Vertex" | null {
+-  if (isTruthyEnvValue(env.CLAUDE_CODE_USE_BEDROCK)) {
+-    return "Bedrock";
+-  }
+-  if (isTruthyEnvValue(env.CLAUDE_CODE_USE_VERTEX)) {
+-    return "Vertex";
+-  }
+-  return null;
+-}
+-
+-function assertClaudeModeCanRun(mode: PermissionMode, env: NodeJS.ProcessEnv): void {
+-  if (mode !== "auto") {
+-    return;
+-  }
+-  const transport = claudeAutoModeUnavailableOn(env);
+-  if (transport === null) {
+-    return;
+-  }
+-  throw new Error(
+-    `Claude Auto mode requires the Anthropic API and is not supported when Claude Code uses ${transport}. Select another permission mode or unset the ${transport === "Bedrock" ? "CLAUDE_CODE_USE_BEDROCK" : "CLAUDE_CODE_USE_VERTEX"} environment variable.`,
+-  );
+-}
+-
+-function claudeModeCatalog(env: NodeJS.ProcessEnv): {
+-  modes: AgentMode[];
+-  defaultModeId: PermissionMode;
+-} {
+-  if (claudeAutoModeUnavailableOn(env)) {
+-    return { modes: DEFAULT_MODES.filter((mode) => mode.id !== "auto"), defaultModeId: "default" };
+-  }
+-  return { modes: DEFAULT_MODES, defaultModeId: "auto" };
++function claudeDefaultMode(env: NodeJS.ProcessEnv): PermissionMode {
++  return isTruthyEnvValue(env.CLAUDE_CODE_USE_BEDROCK) ||
++    isTruthyEnvValue(env.CLAUDE_CODE_USE_VERTEX)
++    ? "default"
++    : "auto";
+ }
+ 
+ function coerceSessionMetadata(metadata: AgentMetadata | undefined): Partial<AgentSessionConfig> {
+@@ -1695,15 +1669,15 @@ export class ClaudeAgentClient implements AgentClient {
+         discoveredModelIds,
+       ),
+     );
+-    const modeCatalog = claudeModeCatalog(env);
+     return {
+       models,
+-      ...modeCatalog,
++      modes: DEFAULT_MODES,
++      defaultModeId: claudeDefaultMode(env),
+     };
+   }
+ 
+   async resolveDefaultModeId({ env: launchEnv }: ResolveAgentDefaultModeInput): Promise<string> {
+-    return claudeModeCatalog(this.buildProviderEnv(launchEnv)).defaultModeId;
++    return claudeDefaultMode(this.buildProviderEnv(launchEnv));
+   }
+ 
+   private buildProviderEnv(launchEnv?: Record<string, string>): NodeJS.ProcessEnv {
+@@ -2668,7 +2642,6 @@ class ClaudeAgentSession implements AgentSession {
+     }
+ 
+     const normalized = isPermissionMode(modeId) ? modeId : "default";
+-    assertClaudeModeCanRun(normalized, this.harnessEnvironment);
+     const previousMode = this.currentMode;
+     const previousQuery = this.query;
+     const activeQuery = await this.ensureQuery(normalized);
+@@ -3562,7 +3535,6 @@ class ClaudeAgentSession implements AgentSession {
+     );
+     const settingsOptions = this.buildSettingsOptions(providerOptions, { ultracode });
+     const sdkEnv = this.harnessEnvironment;
+-    assertClaudeModeCanRun(permissionMode, sdkEnv);
+ 
+     const claudeBinary = await this.resolveBinary();
+     this.logger.debug(
+-- 
+2.52.0
+
