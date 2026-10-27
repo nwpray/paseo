@@ -107,9 +107,25 @@ git -C "$WORKTREE" log --oneline "$TAG_SHA..HEAD"
 cd "$WORKTREE"
 
 log "Installing dependencies (npm ci)"
-# LEFTHOOK=0 keeps the root `prepare` script from installing git hooks into the
-# shared .git/hooks of the parent clone.
-LEFTHOOK=0 npm ci
+# The root `prepare` script runs `lefthook install --force`, which writes into
+# the hooks dir shared with the parent clone (LEFTHOOK=0 does not stop it).
+# Snapshot that dir and remove anything the install adds.
+GIT_COMMON_DIR="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+hooks_before="$(ls -A "$GIT_COMMON_DIR/hooks" 2>/dev/null || true)"
+info_before="$(ls -A "$GIT_COMMON_DIR/info" 2>/dev/null || true)"
+restore_hooks() {
+  local f
+  for f in $(ls -A "$GIT_COMMON_DIR/hooks" 2>/dev/null); do
+    grep -qxF "$f" <<<"$hooks_before" || rm -f "$GIT_COMMON_DIR/hooks/$f"
+  done
+  for f in $(ls -A "$GIT_COMMON_DIR/info" 2>/dev/null); do
+    [[ "$f" == lefthook* ]] && ! grep -qxF "$f" <<<"$info_before" && rm -f "$GIT_COMMON_DIR/info/$f"
+  done
+  return 0
+}
+trap restore_hooks EXIT
+npm ci
+restore_hooks
 
 log "Building desktop app (macOS $ARCH, ad-hoc signed, not notarized)"
 start=$SECONDS
