@@ -1,0 +1,1663 @@
+From 7fb296381e217700cfa20065ab1557a2eb29d06a Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 17:03:51 -0600
+Subject: [PATCH] fork: keep the composer usable during voice mode
+
+The text box stays editable in realtime voice mode (typing, paste, drafts
+survive), and the full-card overlay is replaced by a voice strip at the
+top of the composer card: mini volume meter, status label (Connecting,
+Listening, Thinking, Speaking, Muted, Ending), Mute and End. On desktop
+Mute is a labeled pill with a Space-bar hint while the text box is not
+focused; on compact it is an icon button so every locale fits at 375px.
+The toolbar mic is hidden in voice mode, and starting voice from the
+AudioLines button exits fullscreen so the strip is visible. Adds a
+voice-strip design to the design frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../src/components/realtime-voice-overlay.tsx | 142 ---------
+ .../src/components/realtime-voice-strip.tsx   | 240 ++++++++++++++++
+ packages/app/src/components/volume-meter.tsx  |   8 +-
+ packages/app/src/composer/index.tsx           |  12 +-
+ packages/app/src/composer/input/input.tsx     |  99 ++++---
+ .../app/src/composer/input/labels.test.ts     |  35 +++
+ packages/app/src/composer/input/labels.ts     |  29 ++
+ .../app/src/composer/input/presentation.tsx   |   4 +
+ packages/app/src/composer/input/state.test.ts |  20 +-
+ packages/app/src/composer/input/state.ts      |   3 +-
+ packages/app/src/contexts/voice-context.tsx   |  10 +
+ .../app/src/design/designs/voice-strip.tsx    | 269 ++++++++++++++++++
+ .../app/src/design/designs/volume-meter.tsx   |  65 +----
+ packages/app/src/design/registry.ts           |   2 +
+ packages/app/src/design/simulated-volume.ts   |  63 ++++
+ packages/app/src/i18n/resources/ar.ts         |  14 +
+ packages/app/src/i18n/resources/en.ts         |  14 +
+ packages/app/src/i18n/resources/es.ts         |  14 +
+ packages/app/src/i18n/resources/fr.ts         |  14 +
+ packages/app/src/i18n/resources/ja.ts         |  14 +
+ packages/app/src/i18n/resources/ko.ts         |  14 +
+ packages/app/src/i18n/resources/pt-BR.ts      |  14 +
+ packages/app/src/i18n/resources/ru.ts         |  14 +
+ packages/app/src/i18n/resources/zh-CN.ts      |  14 +
+ 24 files changed, 863 insertions(+), 264 deletions(-)
+ delete mode 100644 packages/app/src/components/realtime-voice-overlay.tsx
+ create mode 100644 packages/app/src/components/realtime-voice-strip.tsx
+ create mode 100644 packages/app/src/design/designs/voice-strip.tsx
+ create mode 100644 packages/app/src/design/simulated-volume.ts
+
+diff --git a/packages/app/src/components/realtime-voice-overlay.tsx b/packages/app/src/components/realtime-voice-overlay.tsx
+deleted file mode 100644
+index 88b2e378b..000000000
+--- a/packages/app/src/components/realtime-voice-overlay.tsx
++++ /dev/null
+@@ -1,142 +0,0 @@
+-import { LoadingSpinner } from "@/components/ui/loading-spinner";
+-import { useMemo } from "react";
+-import { useTranslation } from "react-i18next";
+-import { Pressable, View } from "react-native";
+-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+-import { Mic, MicOff, Square } from "lucide-react-native";
+-import { FOOTER_HEIGHT } from "@/constants/layout";
+-import { useVoiceTelemetry } from "@/contexts/voice-context";
+-import { VolumeMeter } from "./volume-meter";
+-
+-interface RealtimeVoiceOverlayProps {
+-  isMuted: boolean;
+-  isSwitching: boolean;
+-  onToggleMute: () => void;
+-  onStop: () => void;
+-}
+-
+-const OVERLAY_BUTTON_SIZE = 44;
+-const OVERLAY_VERTICAL_PADDING = (FOOTER_HEIGHT - OVERLAY_BUTTON_SIZE) / 2;
+-
+-export function RealtimeVoiceOverlay({
+-  isMuted,
+-  isSwitching,
+-  onToggleMute,
+-  onStop,
+-}: RealtimeVoiceOverlayProps) {
+-  const { theme } = useUnistyles();
+-  const { t } = useTranslation();
+-  const { volume, isSpeaking } = useVoiceTelemetry();
+-  const muteButtonStyle = useMemo(
+-    () => [
+-      styles.actionButton,
+-      styles.muteButton,
+-      isMuted ? styles.muteButtonMuted : undefined,
+-      isSwitching ? styles.buttonDisabled : undefined,
+-    ],
+-    [isMuted, isSwitching],
+-  );
+-  const stopButtonStyle = useMemo(
+-    () => [styles.actionButton, styles.stopButton, isSwitching ? styles.buttonDisabled : undefined],
+-    [isSwitching],
+-  );
+-  return (
+-    <View style={styles.container}>
+-      <View style={styles.meterContainer}>
+-        <VolumeMeter
+-          volume={volume}
+-          isMuted={isMuted}
+-          isSpeaking={isSpeaking}
+-          orientation="horizontal"
+-        />
+-      </View>
+-
+-      <View style={styles.actionsContainer}>
+-        <Pressable
+-          onPress={onToggleMute}
+-          disabled={isSwitching}
+-          accessibilityRole="button"
+-          accessibilityLabel={
+-            isMuted ? t("realtimeVoice.actions.unmute") : t("realtimeVoice.actions.mute")
+-          }
+-          style={muteButtonStyle}
+-        >
+-          {isMuted ? (
+-            <MicOff size={theme.iconSize.lg} color={theme.colors.palette.white} strokeWidth={2.5} />
+-          ) : (
+-            <Mic size={theme.iconSize.lg} color={theme.colors.foreground} strokeWidth={2.5} />
+-          )}
+-        </Pressable>
+-
+-        <Pressable
+-          onPress={onStop}
+-          disabled={isSwitching}
+-          accessibilityRole="button"
+-          accessibilityLabel={t("realtimeVoice.actions.stop")}
+-          style={stopButtonStyle}
+-        >
+-          {isSwitching ? (
+-            <LoadingSpinner size="small" color={theme.colors.palette.white} />
+-          ) : (
+-            <Square
+-              size={theme.iconSize.lg}
+-              color={theme.colors.palette.white}
+-              fill={theme.colors.palette.white}
+-              strokeWidth={2.5}
+-            />
+-          )}
+-        </Pressable>
+-      </View>
+-    </View>
+-  );
+-}
+-
+-const styles = StyleSheet.create((theme) => ({
+-  container: {
+-    flexDirection: "row",
+-    alignItems: "center",
+-    width: "100%",
+-    height: FOOTER_HEIGHT,
+-    borderRadius: theme.borderRadius["2xl"],
+-    justifyContent: "space-between",
+-    paddingHorizontal: theme.spacing[4],
+-    paddingVertical: OVERLAY_VERTICAL_PADDING,
+-    backgroundColor: theme.colors.surface1,
+-    borderWidth: theme.borderWidth[1],
+-    borderColor: theme.colors.border,
+-  },
+-  meterContainer: {
+-    flex: 1,
+-    alignItems: "center",
+-    justifyContent: "center",
+-  },
+-  actionsContainer: {
+-    flexDirection: "row",
+-    alignItems: "center",
+-    gap: theme.spacing[2],
+-  },
+-  actionButton: {
+-    width: OVERLAY_BUTTON_SIZE,
+-    height: OVERLAY_BUTTON_SIZE,
+-    borderRadius: theme.borderRadius.full,
+-    alignItems: "center",
+-    justifyContent: "center",
+-  },
+-  muteButton: {
+-    backgroundColor: theme.colors.surface0,
+-    borderWidth: theme.borderWidth[1],
+-    borderColor: theme.colors.border,
+-  },
+-  muteButtonMuted: {
+-    backgroundColor: theme.colors.palette.red[600],
+-    borderColor: theme.colors.palette.red[800],
+-  },
+-  stopButton: {
+-    backgroundColor: theme.colors.palette.red[600],
+-    borderWidth: theme.borderWidth[1],
+-    borderColor: theme.colors.palette.red[800],
+-  },
+-  buttonDisabled: {
+-    opacity: 0.5,
+-  },
+-}));
+diff --git a/packages/app/src/components/realtime-voice-strip.tsx b/packages/app/src/components/realtime-voice-strip.tsx
+new file mode 100644
+index 000000000..c9f26b320
+--- /dev/null
++++ b/packages/app/src/components/realtime-voice-strip.tsx
+@@ -0,0 +1,240 @@
++import { useCallback, useMemo } from "react";
++import { useTranslation } from "react-i18next";
++import { Text, View } from "react-native";
++import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
++import { StyleSheet, withUnistyles } from "react-native-unistyles";
++import { Mic, MicOff, Space, X } from "lucide-react-native";
++import { Button } from "@/components/ui/button";
++import { buttonControlHeight, type ButtonControlSize } from "@/components/ui/control-geometry";
++import { LoadingSpinner } from "@/components/ui/loading-spinner";
++import { Shortcut } from "@/components/ui/shortcut";
++import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
++import { resolveRealtimeVoiceStatusKey } from "@/composer/input/labels";
++import { isWeb } from "@/constants/platform";
++import { useVoiceTelemetry } from "@/contexts/voice-context";
++import { useKeyboardShortcutsAvailable } from "@/keyboard/availability";
++import { ICON_SIZE, type Theme } from "@/styles/theme";
++import type { VoiceRuntimePhase } from "@/voice/voice-runtime";
++import { VolumeMeter } from "./volume-meter";
++
++type ShortcutChord = NonNullable<React.ComponentProps<typeof Shortcut>["chord"]>;
++
++interface RealtimeVoiceStripProps {
++  isMuted: boolean;
++  isSwitching: boolean;
++  phase: VoiceRuntimePhase;
++  compact: boolean;
++  /** The Space keycap on Mute, for desktop when the text box isn't focused (Space types there). */
++  showMuteHint: boolean;
++  muteKeys: ShortcutChord | null | undefined;
++  onToggleMute: () => void;
++  onStop: () => void;
++}
++
++// Desktop sits in the toolbar's xs tier. Compact takes the next tier up, and hit slop
++// brings it to a 44px target.
++const DESKTOP_SIZE: ButtonControlSize = "xs";
++const COMPACT_SIZE: ButtonControlSize = "sm";
++const DESKTOP_HIT_SLOP = 8;
++const COMPACT_HIT_SLOP = (44 - buttonControlHeight[COMPACT_SIZE]) / 2;
++// The Space keycap trails the Mute label. xs is the smallest step on the icon scale, the
++// same step as the label's mic on desktop.
++const SPACE_GLYPH_SIZE = ICON_SIZE.xs;
++// Compact Mute is icon-only so the status fits at 375px in every locale. Its glyph
++// replaces the toolbar mic, so it keeps the toolbar's glyph size.
++const COMPACT_MUTE_GLYPH_SIZE = isWeb ? ICON_SIZE.md : ICON_SIZE.lg;
++const COMPACT_MUTE_BUTTON = {
++  width: buttonControlHeight[COMPACT_SIZE],
++  height: buttonControlHeight[COMPACT_SIZE],
++};
++
++/**
++ * Voice mode controls, the first row inside the composer card. The text box stays live
++ * underneath, so voice and typing share one composer.
++ */
++export function RealtimeVoiceStrip({
++  isMuted,
++  isSwitching,
++  phase,
++  compact,
++  showMuteHint,
++  muteKeys,
++  onToggleMute,
++  onStop,
++}: RealtimeVoiceStripProps) {
++  const { t } = useTranslation();
++  const { volume, isSpeaking } = useVoiceTelemetry();
++  const size = compact ? COMPACT_SIZE : DESKTOP_SIZE;
++  const hitSlop = compact ? COMPACT_HIT_SLOP : DESKTOP_HIT_SLOP;
++  const statusKey = resolveRealtimeVoiceStatusKey({ phase, isMuted });
++  const muteA11yLabel = isMuted
++    ? t("realtimeVoice.actions.unmute")
++    : t("realtimeVoice.actions.mute");
++  const muteText = isMuted ? t("realtimeVoice.strip.unmute") : t("realtimeVoice.strip.mute");
++  // Same gate the Shortcut badge uses: the keycap only shows where keyboard shortcuts work.
++  const shortcutsAvailable = useKeyboardShortcutsAvailable();
++  const showSpaceHint = Boolean(showMuteHint && muteKeys && shortcutsAvailable);
++  const spaceHint = useMemo(
++    () =>
++      showSpaceHint ? (
++        <View
++          style={isMuted ? styles.spaceHintOnDestructive : null}
++          testID="realtime-voice-mute-hint"
++        >
++          <ThemedSpace
++            size={SPACE_GLYPH_SIZE}
++            uniProps={isMuted ? destructiveForegroundColorMapping : mutedColorMapping}
++          />
++        </View>
++      ) : null,
++    [isMuted, showSpaceHint],
++  );
++
++  const pillMuteIcon = isMuted ? MicOff : Mic;
++  const compactMuteIcon = useCallback(
++    (color: string) =>
++      isMuted ? (
++        <MicOff color={color} size={COMPACT_MUTE_GLYPH_SIZE} />
++      ) : (
++        <Mic color={color} size={COMPACT_MUTE_GLYPH_SIZE} />
++      ),
++    [isMuted],
++  );
++
++  return (
++    <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(120)}>
++      <View
++        role="toolbar"
++        accessibilityLabel={t("realtimeVoice.strip.label")}
++        style={styles.row}
++        testID="realtime-voice-strip"
++      >
++        {isSwitching ? (
++          <ThemedLoadingSpinner size="small" uniProps={mutedColorMapping} />
++        ) : (
++          <VolumeMeter
++            volume={volume}
++            isMuted={isMuted}
++            isSpeaking={isSpeaking}
++            orientation="horizontal"
++            variant="mini"
++          />
++        )}
++        <Text style={isMuted ? styles.statusMuted : styles.status} numberOfLines={1}>
++          {t(statusKey)}
++        </Text>
++        <View style={compact ? styles.actionsCompact : styles.actions}>
++          <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
++            <TooltipTrigger asChild>
++              <Button
++                variant={isMuted ? "destructive" : "secondary"}
++                size={size}
++                leftIcon={compact ? compactMuteIcon : pillMuteIcon}
++                trailing={compact ? null : spaceHint}
++                onPress={onToggleMute}
++                disabled={isSwitching}
++                accessibilityLabel={muteA11yLabel}
++                aria-checked={isMuted}
++                hitSlop={hitSlop}
++                style={compact ? styles.compactMuteButton : undefined}
++                testID="realtime-voice-mute"
++              >
++                {compact ? null : muteText}
++              </Button>
++            </TooltipTrigger>
++            <TooltipContent side="top" align="center" offset={8}>
++              <View style={styles.tooltipRow}>
++                <Text style={styles.tooltipText}>{muteA11yLabel}</Text>
++                {muteKeys ? <Shortcut chord={muteKeys} /> : null}
++              </View>
++            </TooltipContent>
++          </Tooltip>
++          <Button
++            variant="secondary"
++            size={size}
++            leftIcon={X}
++            onPress={onStop}
++            disabled={isSwitching}
++            accessibilityLabel={t("realtimeVoice.actions.stop")}
++            hitSlop={hitSlop}
++            testID="realtime-voice-end"
++          >
++            {t("realtimeVoice.actions.end")}
++          </Button>
++        </View>
++      </View>
++    </Animated.View>
++  );
++}
++
++const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
++const ThemedSpace = withUnistyles(Space);
++const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
++const destructiveForegroundColorMapping = (theme: Theme) => ({
++  color: theme.colors.destructiveForeground,
++});
++
++const styles = StyleSheet.create((theme) => ({
++  row: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++    // No bleed on the left: the meter's first bar sits on the text's rail. The right
++    // bleeds like the toolbar row so End's edge lands on Send's.
++    marginRight: -6,
++    // Tighter than the card's rhythm so the row reads as a header, not a floating band:
++    // desktop's 16px top padding drops to 12 (the card's bottom inset), and the 12px card
++    // gap under the hairline drops to 8.
++    marginTop: {
++      xs: 0,
++      md: -theme.spacing[1],
++    },
++    marginBottom: -theme.spacing[1],
++    paddingBottom: theme.spacing[2],
++    borderBottomWidth: theme.borderWidth[1],
++    borderBottomColor: theme.colors.border,
++  },
++  status: {
++    flex: 1,
++    minWidth: 0,
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++    color: theme.colors.foregroundMuted,
++  },
++  // statusDanger, not destructive: destructive text fails contrast at this size.
++  statusMuted: {
++    flex: 1,
++    minWidth: 0,
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++    color: theme.colors.statusDanger,
++  },
++  actions: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++  },
++  actionsCompact: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[3],
++  },
++  // destructiveForeground has no muted step, so the keycap fades to read as secondary.
++  spaceHintOnDestructive: {
++    opacity: 0.7,
++  },
++  compactMuteButton: {
++    ...COMPACT_MUTE_BUTTON,
++    paddingHorizontal: 0,
++    borderRadius: theme.borderRadius.full,
++  },
++  tooltipRow: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++  },
++  tooltipText: {
++    fontSize: theme.fontSize.base,
++    color: theme.colors.popoverForeground,
++  },
++}));
+diff --git a/packages/app/src/components/volume-meter.tsx b/packages/app/src/components/volume-meter.tsx
+index 4d2667d7c..2383acc29 100644
+--- a/packages/app/src/components/volume-meter.tsx
++++ b/packages/app/src/components/volume-meter.tsx
+@@ -40,13 +40,15 @@ interface MeterSize {
+ 
+ // default and compact keep their original geometry. Their ceiling is the
+ // container height, which the original unclamped formula never reached.
++// mini's floor stays at least twice the bar width, so a silent bar reads as a short bar
++// rather than a dot.
+ const MINI_SIZE: MeterSize = {
+   lineWidth: 3,
+   lineSpacing: 3,
+-  minHeight: 4,
++  minHeight: 7,
+   volumeRange: 10,
+-  maxHeight: 14,
+-  containerHeight: 16,
++  maxHeight: 16,
++  containerHeight: 18,
+ };
+ 
+ const SIZES: Record<VolumeMeterVariant, Record<VolumeMeterOrientation, MeterSize>> = {
+diff --git a/packages/app/src/composer/index.tsx b/packages/app/src/composer/index.tsx
+index ed9ccca4f..74d49bce6 100644
+--- a/packages/app/src/composer/index.tsx
++++ b/packages/app/src/composer/index.tsx
+@@ -253,7 +253,7 @@ function resolveCheckoutRemoteUrl(
+   return checkoutStatus?.remoteUrl ?? null;
+ }
+ 
+-function buildCancelButtonStyle(isConnected: boolean, isCancellingAgent: boolean): object[] {
++export function buildCancelButtonStyle(isConnected: boolean, isCancellingAgent: boolean): object[] {
+   const disabled = !isConnected || isCancellingAgent ? styles.buttonDisabled : undefined;
+   return [styles.cancelButton, disabled].filter((value): value is object => Boolean(value));
+ }
+@@ -496,13 +496,16 @@ interface AttemptStartRealtimeVoiceArgs {
+   serverId: string;
+   agentId: string;
+   toastErrorRef: { current: (message: string) => void };
++  /** The voice strip isn't drawn in fullscreen, so starting voice leaves it first. */
++  exitFullscreen: () => void;
+ }
+ 
+ function attemptStartRealtimeVoice(args: AttemptStartRealtimeVoiceArgs): void {
+-  const { voice, isConnected, hasAgent, serverId, agentId, toastErrorRef } = args;
++  const { voice, isConnected, hasAgent, serverId, agentId, toastErrorRef, exitFullscreen } = args;
+   if (!voice || !isConnected || !hasAgent) return;
+   if (voice.isVoiceSwitching) return;
+   if (voice.isVoiceModeForAgent(serverId, agentId)) return;
++  exitFullscreen();
+   void voice.startVoice(serverId, agentId).catch((error) => {
+     console.error("[Composer] Failed to start voice mode", error);
+     const message = resolveErrorMessage(error);
+@@ -1076,7 +1079,7 @@ interface ComposerCancelButtonProps {
+   t: TFunction;
+ }
+ 
+-function ComposerCancelButton({
++export function ComposerCancelButton({
+   buttonIconSize,
+   cancelButtonStyle,
+   handleCancelAgent,
+@@ -1915,8 +1918,9 @@ function ComposerContentImpl({
+       serverId,
+       agentId,
+       toastErrorRef,
++      exitFullscreen: () => editingSession.setFullscreen(false),
+     });
+-  }, [agentId, hasAgent, isConnected, serverId, voice]);
++  }, [agentId, editingSession, hasAgent, isConnected, serverId, voice]);
+ 
+   const handleEditQueuedMessage = useCallback(
+     (id: string) => {
+diff --git a/packages/app/src/composer/input/input.tsx b/packages/app/src/composer/input/input.tsx
+index 2c104924c..78605519f 100644
+--- a/packages/app/src/composer/input/input.tsx
++++ b/packages/app/src/composer/input/input.tsx
+@@ -30,7 +30,7 @@ import { ArrowUp, Mic, MicOff, CornerDownLeft, Plus, Square } from "lucide-react
+ import { useDictation } from "@/hooks/use-dictation";
+ import { hasFinePointer } from "@/hooks/use-fine-pointer";
+ import { DictationOverlay } from "@/components/dictation-controls";
+-import { RealtimeVoiceOverlay } from "@/components/realtime-voice-overlay";
++import { RealtimeVoiceStrip } from "@/components/realtime-voice-strip";
+ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+ import { useSessionStore } from "@/stores/session-store";
+ import { useVoiceOptional } from "@/contexts/voice-context";
+@@ -449,19 +449,11 @@ interface PasteImagesEffectArgs {
+   isConnected: boolean;
+   disabled: boolean;
+   isDictating: boolean;
+-  isRealtimeVoiceForCurrentAgent: boolean;
+   onAddImages: ((images: ImageAttachment[]) => void) | undefined;
+ }
+ 
+ function usePasteImagesEffect(args: PasteImagesEffectArgs): void {
+-  const {
+-    textarea,
+-    isConnected,
+-    disabled,
+-    isDictating,
+-    isRealtimeVoiceForCurrentAgent,
+-    onAddImages,
+-  } = args;
++  const { textarea, isConnected, disabled, isDictating, onAddImages } = args;
+ 
+   useEffect(() => {
+     if (!isWeb || !onAddImages) return;
+@@ -470,7 +462,7 @@ function usePasteImagesEffect(args: PasteImagesEffectArgs): void {
+ 
+     let disposed = false;
+     const handlePaste = (event: ClipboardEvent) => {
+-      if (!isConnected || disabled || isDictating || isRealtimeVoiceForCurrentAgent) return;
++      if (!isConnected || disabled || isDictating) return;
+ 
+       const imageFiles = collectImageFilesFromClipboardData(event.clipboardData);
+       if (imageFiles.length === 0) return;
+@@ -493,7 +485,7 @@ function usePasteImagesEffect(args: PasteImagesEffectArgs): void {
+       disposed = true;
+       textarea.removeEventListener?.("paste", handlePaste);
+     };
+-  }, [disabled, textarea, isConnected, isDictating, isRealtimeVoiceForCurrentAgent, onAddImages]);
++  }, [disabled, textarea, isConnected, isDictating, onAddImages]);
+ }
+ 
+ function useAutoFocusOnWebEffect(
+@@ -532,8 +524,6 @@ function MessageInputAutoFocus({
+ 
+ function MessageInputOverlay({
+   showDictationOverlay,
+-  showRealtimeOverlay,
+-  voice,
+   dictationVolume,
+   dictationDuration,
+   isDictating,
+@@ -545,18 +535,8 @@ function MessageInputOverlay({
+   onAcceptAndSendRecording,
+   onRetryFailedRecording,
+   onDiscardFailedRecording,
+-  onRealtimeVoiceStop,
+ }: {
+   showDictationOverlay: boolean;
+-  showRealtimeOverlay: boolean;
+-  voice:
+-    | {
+-        isMuted: boolean;
+-        isVoiceSwitching: boolean;
+-        toggleMute: () => void;
+-      }
+-    | null
+-    | undefined;
+   dictationVolume: number;
+   dictationDuration: number;
+   isDictating: boolean;
+@@ -568,7 +548,6 @@ function MessageInputOverlay({
+   onAcceptAndSendRecording: () => Promise<void>;
+   onRetryFailedRecording: () => void;
+   onDiscardFailedRecording: () => void;
+-  onRealtimeVoiceStop: () => void;
+ }) {
+   if (showDictationOverlay) {
+     return (
+@@ -587,16 +566,6 @@ function MessageInputOverlay({
+       />
+     );
+   }
+-  if (showRealtimeOverlay && voice) {
+-    return (
+-      <RealtimeVoiceOverlay
+-        isMuted={voice.isMuted}
+-        isSwitching={voice.isVoiceSwitching}
+-        onToggleMute={voice.toggleMute}
+-        onStop={onRealtimeVoiceStop}
+-      />
+-    );
+-  }
+   return null;
+ }
+ 
+@@ -894,6 +863,7 @@ function toggleRealtimeVoiceImpl(ctx: ToggleRealtimeVoiceContext): void {
+ }
+ 
+ interface StartDictationContext {
++  isRealtimeVoiceActive: boolean;
+   dictationUnavailableMessage: string | null | undefined;
+   canStartDictation: () => boolean;
+   toast: { error: (msg: string) => void };
+@@ -902,6 +872,7 @@ interface StartDictationContext {
+ }
+ 
+ async function startDictationIfAvailableImpl(ctx: StartDictationContext): Promise<void> {
++  if (ctx.isRealtimeVoiceActive) return;
+   if (ctx.dictationUnavailableMessage) {
+     ctx.toast.error(ctx.dictationUnavailableMessage);
+     return;
+@@ -1526,9 +1497,10 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+       isDictationProcessing,
+       dictationStatus,
+     );
+-    const showRealtimeOverlay = isRealtimeVoiceForCurrentAgent;
+-    const showOverlay = showDictationOverlay || showRealtimeOverlay;
+-    const surfacePresentation = resolveComposerSurfacePresentation(showOverlay);
++    // The voice strip has no fullscreen layout, so voice mode hides the fullscreen glyph.
++    const hidesFullscreenControl = showDictationOverlay || isRealtimeVoiceForCurrentAgent;
++    // Only dictation takes over the input surface; voice mode leaves the draft editable.
++    const surfacePresentation = resolveComposerSurfacePresentation(showDictationOverlay);
+ 
+     useEffect(() => {
+       if (isDictating || isDictationProcessing) {
+@@ -1540,13 +1512,21 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+     const startDictationIfAvailable = useCallback(
+       () =>
+         startDictationIfAvailableImpl({
++          isRealtimeVoiceActive: isRealtimeVoiceForCurrentAgent,
+           dictationUnavailableMessage,
+           canStartDictation,
+           toast,
+           startDictation,
+           exitFullscreen,
+         }),
+-      [canStartDictation, dictationUnavailableMessage, startDictation, toast, exitFullscreen],
++      [
++        canStartDictation,
++        dictationUnavailableMessage,
++        isRealtimeVoiceForCurrentAgent,
++        startDictation,
++        toast,
++        exitFullscreen,
++      ],
+     );
+ 
+     const handleVoicePress = useCallback(
+@@ -1706,7 +1686,6 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+       isConnected,
+       disabled,
+       isDictating,
+-      isRealtimeVoiceForCurrentAgent,
+       onAddImages,
+     });
+ 
+@@ -1862,7 +1841,10 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+ 
+     const handleRealtimeVoiceStop = useCallback(() => {
+       void handleStopRealtimeVoice();
+-    }, [handleStopRealtimeVoice]);
++      // End unmounts with the strip; on desktop web, focus would otherwise fall to <body>.
++      // Compact skips it so ending voice doesn't raise the soft keyboard.
++      if (isWeb && !isCompact) textInputRef.current?.focus();
++    }, [handleStopRealtimeVoice, isCompact]);
+ 
+     const inputWrapperCombinedStyle = useMemo(
+       () => [
+@@ -2001,7 +1983,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+             onChangeText={handleInputChange}
+             onFocus={handleInputFocus}
+             onBlur={handleInputBlur}
+-            editable={!isDictating && !isRealtimeVoiceForCurrentAgent && !disabled}
++            editable={!isDictating && !disabled}
+             scrollEnabled={isComposerScrollEnabled}
+             autoFocus={false}
+             onKeyPress={shouldHandleWebKeyPress ? handleDesktopKeyPress : undefined}
+@@ -2032,7 +2014,6 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+         handleInputFocus,
+         handleInputBlur,
+         isDictating,
+-        isRealtimeVoiceForCurrentAgent,
+         disabled,
+         isComposerScrollEnabled,
+         shouldHandleWebKeyPress,
+@@ -2068,7 +2049,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+           <View style={styles.rightButtonGroup}>
+             {beforeVoiceContent}
+             <VoiceButtonTooltip
+-              visible={mode.showVoice}
++              visible={mode.showVoice && !isRealtimeVoiceForCurrentAgent}
+               onVoicePress={handleVoicePress}
+               isDictationStartEnabled={isDictationStartEnabled}
+               voiceButtonAccessibilityLabel={voiceButtonAccessibilityLabel}
+@@ -2116,8 +2097,6 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+         >
+           <MessageInputOverlay
+             showDictationOverlay={showDictationOverlay}
+-            showRealtimeOverlay={showRealtimeOverlay}
+-            voice={voice}
+             dictationVolume={dictationVolume}
+             dictationDuration={dictationDuration}
+             isDictating={isDictating}
+@@ -2129,7 +2108,6 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+             onAcceptAndSendRecording={handleAcceptAndSendRecording}
+             onRetryFailedRecording={handleRetryFailedRecording}
+             onDiscardFailedRecording={handleDiscardFailedRecording}
+-            onRealtimeVoiceStop={handleRealtimeVoiceStop}
+           />
+         </View>
+       ),
+@@ -2137,8 +2115,6 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+         overlayContainerStyle,
+         surfacePresentation.overlay.pointerEvents,
+         showDictationOverlay,
+-        showRealtimeOverlay,
+-        voice,
+         dictationVolume,
+         dictationDuration,
+         isDictating,
+@@ -2150,6 +2126,28 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+         handleAcceptAndSendRecording,
+         handleRetryFailedRecording,
+         handleDiscardFailedRecording,
++      ],
++    );
++    const voiceStrip = useMemo(
++      () =>
++        isRealtimeVoiceForCurrentAgent && voice ? (
++          <RealtimeVoiceStrip
++            isMuted={voice.isMuted}
++            isSwitching={voice.isVoiceSwitching}
++            phase={voice.phase}
++            compact={isCompact}
++            showMuteHint={!isCompact && !isInputFocused}
++            muteKeys={voiceMuteToggleKeys}
++            onToggleMute={voice.toggleMute}
++            onStop={handleRealtimeVoiceStop}
++          />
++        ) : null,
++      [
++        isRealtimeVoiceForCurrentAgent,
++        voice,
++        isCompact,
++        isInputFocused,
++        voiceMuteToggleKeys,
+         handleRealtimeVoiceStop,
+       ],
+     );
+@@ -2176,11 +2174,12 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+           inputWrapperRef={inputWrapperRef}
+           inputWrapperStyle={inputWrapperCombinedStyle}
+           inputPointerEvents={surfacePresentation.input.pointerEvents}
++          voiceStrip={voiceStrip}
+           attachmentSlot={attachmentSlot}
+           showFullscreenButton={shouldShowFullscreenControl(
+             isCompact,
+             readOnly,
+-            showOverlay,
++            hidesFullscreenControl,
+             renderedLines,
+           )}
+           onEnter={enterFullscreen}
+diff --git a/packages/app/src/composer/input/labels.test.ts b/packages/app/src/composer/input/labels.test.ts
+index 15aa16b8e..2e267c5e1 100644
+--- a/packages/app/src/composer/input/labels.test.ts
++++ b/packages/app/src/composer/input/labels.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, it } from "vitest";
+ import {
++  resolveRealtimeVoiceStatusKey,
+   resolveSendTooltipLabel,
+   resolveSubmitAccessibilityLabel,
+   resolveVoiceAccessibilityLabel,
+@@ -151,3 +152,37 @@ describe("composer input labels", () => {
+     ).toBe("Send");
+   });
+ });
++
++describe("realtime voice status", () => {
++  it("maps each voice phase to a status label", () => {
++    const phases = [
++      "starting",
++      "listening",
++      "submitting",
++      "waiting",
++      "playing",
++      "stopping",
++      "disabled",
++    ] as const;
++    const keys = phases.map((phase) => resolveRealtimeVoiceStatusKey({ phase, isMuted: false }));
++
++    expect(keys).toEqual([
++      "realtimeVoice.status.connecting",
++      "realtimeVoice.status.listening",
++      "realtimeVoice.status.thinking",
++      "realtimeVoice.status.thinking",
++      "realtimeVoice.status.speaking",
++      "realtimeVoice.status.ending",
++      "realtimeVoice.status.listening",
++    ]);
++  });
++
++  it("shows muted over any phase", () => {
++    expect(resolveRealtimeVoiceStatusKey({ phase: "playing", isMuted: true })).toBe(
++      "realtimeVoice.status.muted",
++    );
++    expect(resolveRealtimeVoiceStatusKey({ phase: "starting", isMuted: true })).toBe(
++      "realtimeVoice.status.muted",
++    );
++  });
++});
+diff --git a/packages/app/src/composer/input/labels.ts b/packages/app/src/composer/input/labels.ts
+index 0820cd7ec..8c92b8fd5 100644
+--- a/packages/app/src/composer/input/labels.ts
++++ b/packages/app/src/composer/input/labels.ts
+@@ -1,5 +1,6 @@
+ import type { TFunction } from "i18next";
+ import type { SendBehavior } from "@/hooks/use-settings/storage";
++import type { VoiceRuntimePhase } from "@/voice/voice-runtime";
+ 
+ export function resolveSubmitAccessibilityLabel(input: {
+   submitButtonAccessibilityLabel: string | undefined;
+@@ -60,3 +61,31 @@ export function resolveSendTooltipLabel(input: {
+     ? input.t("composer.input.queue")
+     : input.t("composer.input.send");
+ }
++
++export type RealtimeVoiceStatusKey =
++  | "realtimeVoice.status.connecting"
++  | "realtimeVoice.status.listening"
++  | "realtimeVoice.status.thinking"
++  | "realtimeVoice.status.speaking"
++  | "realtimeVoice.status.muted"
++  | "realtimeVoice.status.ending";
++
++const REALTIME_VOICE_STATUS_BY_PHASE: Record<VoiceRuntimePhase, RealtimeVoiceStatusKey> = {
++  // The strip only mounts in voice mode; disabled is the one-frame gap before the snapshot lands.
++  disabled: "realtimeVoice.status.listening",
++  starting: "realtimeVoice.status.connecting",
++  listening: "realtimeVoice.status.listening",
++  submitting: "realtimeVoice.status.thinking",
++  waiting: "realtimeVoice.status.thinking",
++  playing: "realtimeVoice.status.speaking",
++  stopping: "realtimeVoice.status.ending",
++};
++
++/** Muted wins over every phase: it is the one state where the user is not being heard. */
++export function resolveRealtimeVoiceStatusKey(input: {
++  phase: VoiceRuntimePhase;
++  isMuted: boolean;
++}): RealtimeVoiceStatusKey {
++  if (input.isMuted) return "realtimeVoice.status.muted";
++  return REALTIME_VOICE_STATUS_BY_PHASE[input.phase];
++}
+diff --git a/packages/app/src/composer/input/presentation.tsx b/packages/app/src/composer/input/presentation.tsx
+index 64697999f..22ea5a728 100644
+--- a/packages/app/src/composer/input/presentation.tsx
++++ b/packages/app/src/composer/input/presentation.tsx
+@@ -36,6 +36,7 @@ export function ComposerInputPresentation({
+   inputWrapperRef,
+   inputWrapperStyle,
+   inputPointerEvents,
++  voiceStrip,
+   attachmentSlot,
+   showFullscreenButton,
+   onEnter,
+@@ -51,6 +52,8 @@ export function ComposerInputPresentation({
+   inputWrapperRef: Ref<View>;
+   inputWrapperStyle: ViewProps["style"];
+   inputPointerEvents: ViewProps["pointerEvents"];
++  /** Voice mode controls, the first row of the card. Not drawn in fullscreen. */
++  voiceStrip: ReactNode;
+   attachmentSlot: ReactNode;
+   showFullscreenButton: boolean;
+   onEnter: () => void;
+@@ -105,6 +108,7 @@ export function ComposerInputPresentation({
+           style={fullscreen ? styles.fullscreenInputWrapper : inputWrapperStyle}
+           pointerEvents={inputPointerEvents}
+         >
++          {fullscreen ? null : voiceStrip}
+           {fullscreen ? null : attachmentSlot}
+           <View style={fullscreen ? styles.fullscreenTextSurface : styles.inlineTextSurface}>
+             {surface}
+diff --git a/packages/app/src/composer/input/state.test.ts b/packages/app/src/composer/input/state.test.ts
+index 6f2cdef74..ec5d12068 100644
+--- a/packages/app/src/composer/input/state.test.ts
++++ b/packages/app/src/composer/input/state.test.ts
+@@ -16,7 +16,13 @@ import {
+ const connected = { isConnected: true } as never;
+ const disconnected = { isConnected: false } as never;
+ 
+-function createDictationKeyboard({ startsRecording }: { startsRecording: boolean }) {
++function createDictationKeyboard({
++  startsRecording,
++  isRealtimeVoiceActive = false,
++}: {
++  startsRecording: boolean;
++  isRealtimeVoiceActive?: boolean;
++}) {
+   let isRecording = false;
+   const actions: string[] = [];
+ 
+@@ -37,7 +43,7 @@ function createDictationKeyboard({ startsRecording }: { startsRecording: boolean
+         },
+         cancelDictation: () => undefined,
+         toggleRealtimeVoice: () => undefined,
+-        isRealtimeVoiceActive: false,
++        isRealtimeVoiceActive,
+         toggleRealtimeVoiceMute: () => undefined,
+       }),
+   };
+@@ -166,6 +172,16 @@ describe("dictation keyboard behavior", () => {
+ 
+     expect(keyboard.actions).toEqual(["start", "start"]);
+   });
++
++  it("does not open a second mic capture while voice mode owns the mic", () => {
++    const keyboard = createDictationKeyboard({
++      startsRecording: true,
++      isRealtimeVoiceActive: true,
++    });
++
++    expect(keyboard.pressDictationShortcut()).toBe(true);
++    expect(keyboard.actions).toEqual([]);
++  });
+ });
+ 
+ describe("dictation transcript behavior", () => {
+diff --git a/packages/app/src/composer/input/state.ts b/packages/app/src/composer/input/state.ts
+index 698965b5a..fcc41978b 100644
+--- a/packages/app/src/composer/input/state.ts
++++ b/packages/app/src/composer/input/state.ts
+@@ -172,7 +172,8 @@ export function runMessageInputKeyboardAction(
+     if (actions.isDictationRecording()) {
+       actions.markTranscriptForSend();
+       void actions.confirmDictation();
+-    } else {
++    } else if (!actions.isRealtimeVoiceActive) {
++      // Voice mode already owns the mic; a second capture would fight it.
+       void actions.startDictation();
+     }
+     return true;
+diff --git a/packages/app/src/contexts/voice-context.tsx b/packages/app/src/contexts/voice-context.tsx
+index 4c8d04e2f..b3fc1b582 100644
+--- a/packages/app/src/contexts/voice-context.tsx
++++ b/packages/app/src/contexts/voice-context.tsx
+@@ -112,6 +112,16 @@ interface VoiceProviderProps {
+   children: ReactNode;
+ }
+ 
++interface VoiceRuntimeProviderProps {
++  runtime: VoiceRuntime;
++  children: ReactNode;
++}
++
++/** Supplies a runtime with no audio engine. The design frame uses it to stage voice states. */
++export function VoiceRuntimeProvider({ runtime, children }: VoiceRuntimeProviderProps) {
++  return <VoiceRuntimeContext.Provider value={runtime}>{children}</VoiceRuntimeContext.Provider>;
++}
++
+ export function VoiceProvider({ children }: VoiceProviderProps) {
+   const engineRef = useRef<AudioEngine | null>(null);
+   const runtimeRef = useRef<VoiceRuntime | null>(null);
+diff --git a/packages/app/src/design/designs/voice-strip.tsx b/packages/app/src/design/designs/voice-strip.tsx
+new file mode 100644
+index 000000000..0d49d8f36
+--- /dev/null
++++ b/packages/app/src/design/designs/voice-strip.tsx
+@@ -0,0 +1,269 @@
++import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
++import { useTranslation } from "react-i18next";
++import { View } from "react-native";
++import { StyleSheet, withUnistyles } from "react-native-unistyles";
++import { FileText } from "lucide-react-native";
++import { AttachmentFrame, AttachmentLabel } from "@/components/attachment-pill";
++import { buildCancelButtonStyle, ComposerCancelButton } from "@/composer/index";
++import { MessageInput } from "@/composer/input/input";
++import { isWeb } from "@/constants/platform";
++import { useIsCompactFormFactor } from "@/constants/layout";
++import { VoiceRuntimeProvider } from "@/contexts/voice-context";
++import { useSimulatedVolume } from "@/design/simulated-volume";
++import type { DesignDefinition } from "@/design/types";
++import { ICON_SIZE, type Theme } from "@/styles/theme";
++import type {
++  VoiceRuntime,
++  VoiceRuntimePhase,
++  VoiceRuntimeSnapshot,
++  VoiceRuntimeTelemetrySnapshot,
++} from "@/voice/voice-runtime";
++
++// The real MessageInput in voice mode, so the strip sits in the real card above the
++// real text box and toolbar. A staged runtime stands in for the voice runtime: it
++// reports the state's phase and feeds the meter the simulated speech level. The model
++// chips and context meter come from the full Composer and are absent here.
++
++const SERVER_ID = "design-server";
++const AGENT_ID = "design-agent";
++
++interface StagedVoiceRuntime extends VoiceRuntime {
++  setTelemetry(telemetry: VoiceRuntimeTelemetrySnapshot): void;
++}
++
++function noop(): void {}
++async function resolved(): Promise<void> {}
++
++function createStagedVoiceRuntime(initial: VoiceRuntimeSnapshot): StagedVoiceRuntime {
++  let snapshot = initial;
++  let telemetry: VoiceRuntimeTelemetrySnapshot = {
++    volume: 0,
++    isSpeaking: false,
++    segmentDuration: 0,
++  };
++  const listeners = new Set<() => void>();
++  const telemetryListeners = new Set<() => void>();
++  function subscribeTo(set: Set<() => void>, listener: () => void) {
++    set.add(listener);
++    return () => {
++      set.delete(listener);
++    };
++  }
++  return {
++    subscribe: (listener) => subscribeTo(listeners, listener),
++    getSnapshot: () => snapshot,
++    subscribeTelemetry: (listener) => subscribeTo(telemetryListeners, listener),
++    getTelemetrySnapshot: () => telemetry,
++    setTelemetry(next) {
++      telemetry = next;
++      for (const listener of telemetryListeners) listener();
++    },
++    toggleMute() {
++      snapshot = { ...snapshot, isMuted: !snapshot.isMuted };
++      for (const listener of listeners) listener();
++    },
++    isVoiceModeForAgent: (serverId, agentId) => serverId === SERVER_ID && agentId === AGENT_ID,
++    registerSession: () => noop,
++    updateSessionConnection: noop,
++    handleCapturePcm: noop,
++    handleCaptureVolume: noop,
++    handleAudioOutput: noop,
++    startVoice: resolved,
++    stopVoice: resolved,
++    destroy: resolved,
++    shouldPlayVoiceAudio: () => false,
++    onAssistantAudioStarted: noop,
++    onAssistantAudioFinished: noop,
++    onTranscriptionResult: noop,
++    onServerSpeechStateChanged: noop,
++    onTurnEvent: noop,
++  };
++}
++
++interface StageInput {
++  phase: VoiceRuntimePhase;
++  isMuted?: boolean;
++  isSwitching?: boolean;
++  /** Mic level fed to the meter; 0 is silence. */
++  level?: number;
++  draft?: string;
++  isAgentRunning?: boolean;
++  attachment?: boolean;
++}
++
++function VoiceStage({ runtime, children }: { runtime: StagedVoiceRuntime; children: ReactNode }) {
++  return (
++    <View style={styles.page}>
++      <View style={styles.chat} />
++      <View style={styles.composer}>
++        <VoiceRuntimeProvider runtime={runtime}>{children}</VoiceRuntimeProvider>
++      </View>
++    </View>
++  );
++}
++
++const ThemedFileText = withUnistyles(FileText);
++const fileIconMapping = (theme: Theme) => ({
++  color: theme.colors.foregroundMuted,
++  size: theme.iconSize.md,
++});
++const fileIcon = <ThemedFileText uniProps={fileIconMapping} />;
++
++function StagedComposer({
++  phase,
++  isMuted = false,
++  isSwitching = false,
++  level = 0,
++  draft = "",
++  isAgentRunning = false,
++  attachment = false,
++}: StageInput) {
++  const { t } = useTranslation();
++  const isCompact = useIsCompactFormFactor();
++  const runtime = useMemo(
++    () =>
++      createStagedVoiceRuntime({
++        phase,
++        isVoiceMode: true,
++        isVoiceSwitching: isSwitching,
++        isMuted,
++        activeServerId: SERVER_ID,
++        activeAgentId: AGENT_ID,
++      }),
++    [phase, isMuted, isSwitching],
++  );
++  const volume = useSimulatedVolume(level);
++  useEffect(() => {
++    runtime.setTelemetry({ volume, isSpeaking: level > 0, segmentDuration: 0 });
++  }, [runtime, volume, level]);
++
++  const [value, setValue] = useState(draft);
++  const textReplacement = useMemo(
++    () => ({ kind: "initial" as const, key: "design", text: draft }),
++    [draft],
++  );
++  const cancelButtonStyle = useMemo(() => buildCancelButtonStyle(true, false), []);
++  const activeActionContent = useMemo(
++    () => (
++      <ComposerCancelButton
++        buttonIconSize={isWeb ? ICON_SIZE.md : ICON_SIZE.lg}
++        cancelButtonStyle={cancelButtonStyle}
++        handleCancelAgent={noop}
++        isConnected
++        isCancellingAgent={false}
++        agentInterruptKeys={null}
++        t={t}
++      />
++    ),
++    [cancelButtonStyle, t],
++  );
++  const attachmentSlot = useMemo(
++    () =>
++      attachment ? (
++        <View style={styles.attachmentTray}>
++          <AttachmentFrame testID="design-attachment">
++            <AttachmentLabel icon={fileIcon} title="voice-strip-notes.md" subtitle="Markdown" />
++          </AttachmentFrame>
++        </View>
++      ) : undefined,
++    [attachment],
++  );
++  const handleSubmit = useCallback(() => setValue(""), []);
++
++  return (
++    <VoiceStage runtime={runtime}>
++      <MessageInput
++        value={value}
++        onChangeText={setValue}
++        onSubmit={handleSubmit}
++        attachments={[]}
++        cwd="/"
++        attachmentMenuItems={[]}
++        client={null}
++        placeholder={
++          isCompact ? t("composer.placeholders.mobile") : t("composer.placeholders.desktop")
++        }
++        defaultSendBehavior="interrupt"
++        textReplacement={textReplacement}
++        voiceServerId={SERVER_ID}
++        voiceAgentId={AGENT_ID}
++        isAgentRunning={isAgentRunning}
++        activeActionContent={activeActionContent}
++        attachmentSlot={attachmentSlot}
++        submitButtonTestID="design-send"
++      />
++    </VoiceStage>
++  );
++}
++
++const DRAFT = [
++  "Also rename the strip's test IDs once this lands,",
++  "and check the light theme hairline against the card border.",
++].join("\n");
++
++const design: DesignDefinition = {
++  title: "Voice strip",
++  states: [
++    {
++      id: "connecting",
++      label: "Connecting",
++      render: () => <StagedComposer phase="starting" isSwitching />,
++    },
++    {
++      id: "listening",
++      label: "Listening (silent)",
++      render: () => <StagedComposer phase="listening" />,
++    },
++    {
++      id: "user-speaking",
++      label: "Listening (user speaking)",
++      render: () => <StagedComposer phase="listening" level={0.35} />,
++    },
++    { id: "thinking", label: "Thinking", render: () => <StagedComposer phase="waiting" /> },
++    { id: "speaking", label: "Speaking", render: () => <StagedComposer phase="playing" /> },
++    { id: "muted", label: "Muted", render: () => <StagedComposer phase="listening" isMuted /> },
++    {
++      id: "ending",
++      label: "Ending",
++      render: () => <StagedComposer phase="stopping" isSwitching />,
++    },
++    {
++      id: "draft",
++      label: "With typed draft",
++      render: () => <StagedComposer phase="listening" draft={DRAFT} />,
++    },
++    {
++      id: "attachment",
++      label: "With attachment",
++      render: () => <StagedComposer phase="listening" attachment draft="See the notes." />,
++    },
++    {
++      id: "agent-running",
++      label: "Agent running",
++      render: () => <StagedComposer phase="waiting" isAgentRunning />,
++    },
++  ],
++};
++
++export default design;
++
++const styles = StyleSheet.create((theme) => ({
++  page: {
++    flex: 1,
++    backgroundColor: theme.colors.surface0,
++  },
++  chat: {
++    flex: 1,
++  },
++  composer: {
++    width: "100%",
++    maxWidth: theme.contentMaxWidth,
++    alignSelf: "center",
++    padding: theme.spacing[4],
++  },
++  attachmentTray: {
++    flexDirection: "row",
++    gap: theme.spacing[2],
++    flexWrap: "wrap",
++  },
++}));
+diff --git a/packages/app/src/design/designs/volume-meter.tsx b/packages/app/src/design/designs/volume-meter.tsx
+index 8045d9258..1fb849008 100644
+--- a/packages/app/src/design/designs/volume-meter.tsx
++++ b/packages/app/src/design/designs/volume-meter.tsx
+@@ -1,12 +1,11 @@
+-import { useEffect, useState } from "react";
+ import { VolumeMeter } from "@/components/volume-meter";
+ import { DesignPage, DesignRow, DesignSection, DesignSpecimen } from "@/design/kit";
++import { useSimulatedVolume } from "@/design/simulated-volume";
+ import type { DesignDefinition } from "@/design/types";
+ 
+ // The VolumeMeter as it ships today, in every variant and orientation.
+-// Speaking and loud feed it a speech-like level: syllable bursts with short
+-// dips between them and longer pauses between words, so the bars move like
+-// live mic input.
++// Speaking and loud feed it the simulated speech level from
++// `@/design/simulated-volume`.
+ 
+ interface MeterInput {
+   level: number;
+@@ -14,64 +13,6 @@ interface MeterInput {
+   isMuted: boolean;
+ }
+ 
+-const SAMPLE_INTERVAL_MS = 50;
+-
+-interface Syllable {
+-  startedAt: number;
+-  duration: number;
+-  peak: number;
+-  /** Silence after this syllable: a short dip, or a word gap. */
+-  gap: number;
+-}
+-
+-function randomBetween(min: number, max: number): number {
+-  return min + Math.random() * (max - min);
+-}
+-
+-function nextSyllable(startedAt: number, level: number): Syllable {
+-  const endsWord = Math.random() < 0.3;
+-  return {
+-    startedAt,
+-    duration: randomBetween(110, 260),
+-    peak: level * randomBetween(0.55, 1.35),
+-    gap: endsWord ? randomBetween(220, 520) : randomBetween(30, 90),
+-  };
+-}
+-
+-// Fast attack, slower decay, like a voiced syllable.
+-function syllableEnvelope(progress: number): number {
+-  if (progress < 0.2) return progress / 0.2;
+-  return Math.max(0, 1 - (progress - 0.2) / 0.8) ** 0.7;
+-}
+-
+-function speechLevel(syllable: Syllable, now: number, level: number): number {
+-  const elapsed = now - syllable.startedAt;
+-  const floor = level * 0.06;
+-  if (elapsed >= syllable.duration) return floor;
+-  const flutter = 1 + (Math.random() - 0.5) * 0.25;
+-  return floor + syllable.peak * syllableEnvelope(elapsed / syllable.duration) * flutter;
+-}
+-
+-function useSimulatedVolume(level: number): number {
+-  const [volume, setVolume] = useState(level);
+-  useEffect(() => {
+-    if (level === 0) {
+-      setVolume(0);
+-      return;
+-    }
+-    let syllable = nextSyllable(Date.now(), level);
+-    const handle = setInterval(() => {
+-      const now = Date.now();
+-      if (now - syllable.startedAt >= syllable.duration + syllable.gap) {
+-        syllable = nextSyllable(now, level);
+-      }
+-      setVolume(Math.min(1, Math.max(0, speechLevel(syllable, now, level))));
+-    }, SAMPLE_INTERVAL_MS);
+-    return () => clearInterval(handle);
+-  }, [level]);
+-  return volume;
+-}
+-
+ function MeterVariants({ level, isSpeaking, isMuted }: MeterInput) {
+   const volume = useSimulatedVolume(level);
+   return (
+diff --git a/packages/app/src/design/registry.ts b/packages/app/src/design/registry.ts
+index d0b0d7cc8..f47d9a64d 100644
+--- a/packages/app/src/design/registry.ts
++++ b/packages/app/src/design/registry.ts
+@@ -1,4 +1,5 @@
+ import catalog from "@/design/designs/catalog";
++import voiceStrip from "@/design/designs/voice-strip";
+ import volumeMeter from "@/design/designs/volume-meter";
+ import type { DesignDefinition } from "@/design/types";
+ 
+@@ -8,5 +9,6 @@ import type { DesignDefinition } from "@/design/types";
+  */
+ export const DESIGNS: Record<string, DesignDefinition> = {
+   catalog,
++  "voice-strip": voiceStrip,
+   "volume-meter": volumeMeter,
+ };
+diff --git a/packages/app/src/design/simulated-volume.ts b/packages/app/src/design/simulated-volume.ts
+new file mode 100644
+index 000000000..32fbe2c7a
+--- /dev/null
++++ b/packages/app/src/design/simulated-volume.ts
+@@ -0,0 +1,63 @@
++import { useEffect, useState } from "react";
++
++// A speech-like mic level for design states: syllable bursts with short dips
++// between them and longer pauses between words, so meters move like live input.
++
++const SAMPLE_INTERVAL_MS = 50;
++
++interface Syllable {
++  startedAt: number;
++  duration: number;
++  peak: number;
++  /** Silence after this syllable: a short dip, or a word gap. */
++  gap: number;
++}
++
++function randomBetween(min: number, max: number): number {
++  return min + Math.random() * (max - min);
++}
++
++function nextSyllable(startedAt: number, level: number): Syllable {
++  const endsWord = Math.random() < 0.3;
++  return {
++    startedAt,
++    duration: randomBetween(110, 260),
++    peak: level * randomBetween(0.55, 1.35),
++    gap: endsWord ? randomBetween(220, 520) : randomBetween(30, 90),
++  };
++}
++
++// Fast attack, slower decay, like a voiced syllable.
++function syllableEnvelope(progress: number): number {
++  if (progress < 0.2) return progress / 0.2;
++  return Math.max(0, 1 - (progress - 0.2) / 0.8) ** 0.7;
++}
++
++function speechLevel(syllable: Syllable, now: number, level: number): number {
++  const elapsed = now - syllable.startedAt;
++  const floor = level * 0.06;
++  if (elapsed >= syllable.duration) return floor;
++  const flutter = 1 + (Math.random() - 0.5) * 0.25;
++  return floor + syllable.peak * syllableEnvelope(elapsed / syllable.duration) * flutter;
++}
++
++/** Volume samples around `level`, updated every 50ms. A level of 0 is silence. */
++export function useSimulatedVolume(level: number): number {
++  const [volume, setVolume] = useState(level);
++  useEffect(() => {
++    if (level === 0) {
++      setVolume(0);
++      return;
++    }
++    let syllable = nextSyllable(Date.now(), level);
++    const handle = setInterval(() => {
++      const now = Date.now();
++      if (now - syllable.startedAt >= syllable.duration + syllable.gap) {
++        syllable = nextSyllable(now, level);
++      }
++      setVolume(Math.min(1, Math.max(0, speechLevel(syllable, now, level))));
++    }, SAMPLE_INTERVAL_MS);
++    return () => clearInterval(handle);
++  }, [level]);
++  return volume;
++}
+diff --git a/packages/app/src/i18n/resources/ar.ts b/packages/app/src/i18n/resources/ar.ts
+index 9e9558ab9..8ded30934 100644
+--- a/packages/app/src/i18n/resources/ar.ts
++++ b/packages/app/src/i18n/resources/ar.ts
+@@ -1874,6 +1874,20 @@ export const ar: TranslationResources = {
+       mute: "كتم صوت الوقت الحقيقي",
+       unmute: "إلغاء كتم صوت الوقت الحقيقي",
+       stop: "إيقاف الصوت في الوقت الحقيقي ومقاطعة الدوران",
++      end: "إنهاء",
++    },
++    strip: {
++      label: "وضع الصوت",
++      mute: "كتم",
++      unmute: "إلغاء الكتم",
++    },
++    status: {
++      connecting: "جارٍ الاتصال…",
++      listening: "يستمع",
++      thinking: "يفكر",
++      speaking: "يتحدث",
++      muted: "مكتوم",
++      ending: "جارٍ الإنهاء…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/en.ts b/packages/app/src/i18n/resources/en.ts
+index d3bf52804..89c364b7c 100644
+--- a/packages/app/src/i18n/resources/en.ts
++++ b/packages/app/src/i18n/resources/en.ts
+@@ -1899,6 +1899,20 @@ export const en = {
+       mute: "Mute realtime voice",
+       unmute: "Unmute realtime voice",
+       stop: "Stop realtime voice and interrupt turn",
++      end: "End",
++    },
++    strip: {
++      label: "Voice mode",
++      mute: "Mute",
++      unmute: "Unmute",
++    },
++    status: {
++      connecting: "Connecting…",
++      listening: "Listening",
++      thinking: "Thinking",
++      speaking: "Speaking",
++      muted: "Muted",
++      ending: "Ending…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/es.ts b/packages/app/src/i18n/resources/es.ts
+index 1ed1318f2..16efbf114 100644
+--- a/packages/app/src/i18n/resources/es.ts
++++ b/packages/app/src/i18n/resources/es.ts
+@@ -1922,6 +1922,20 @@ export const es: TranslationResources = {
+       mute: "Silenciar voz en tiempo real",
+       unmute: "Activar voz en tiempo real",
+       stop: "Detener la voz en tiempo real e interrumpir el turno.",
++      end: "Finalizar",
++    },
++    strip: {
++      label: "Modo de voz",
++      mute: "Silenciar",
++      unmute: "Activar",
++    },
++    status: {
++      connecting: "Conectando…",
++      listening: "Escuchando",
++      thinking: "Pensando",
++      speaking: "Hablando",
++      muted: "Silenciado",
++      ending: "Finalizando…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/fr.ts b/packages/app/src/i18n/resources/fr.ts
+index 57efdd379..11f468fb9 100644
+--- a/packages/app/src/i18n/resources/fr.ts
++++ b/packages/app/src/i18n/resources/fr.ts
+@@ -1920,6 +1920,20 @@ export const fr: TranslationResources = {
+       mute: "Couper la voix en temps réel",
+       unmute: "Réactiver la voix en temps réel",
+       stop: "Arrêter la voix en temps réel et interrompre le tour",
++      end: "Terminer",
++    },
++    strip: {
++      label: "Mode vocal",
++      mute: "Couper",
++      unmute: "Réactiver",
++    },
++    status: {
++      connecting: "Connexion…",
++      listening: "Écoute",
++      thinking: "Réflexion",
++      speaking: "Parole",
++      muted: "Micro coupé",
++      ending: "Fin…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/ja.ts b/packages/app/src/i18n/resources/ja.ts
+index 72cfd10b9..9ea9788f0 100644
+--- a/packages/app/src/i18n/resources/ja.ts
++++ b/packages/app/src/i18n/resources/ja.ts
+@@ -1893,6 +1893,20 @@ export const ja: TranslationResources = {
+       mute: "リアルタイム音声をミュート",
+       unmute: "リアルタイム音声のミュートを解除",
+       stop: "リアルタイム音声を停止してターンを中断",
++      end: "終了",
++    },
++    strip: {
++      label: "音声モード",
++      mute: "ミュート",
++      unmute: "ミュート解除",
++    },
++    status: {
++      connecting: "接続中…",
++      listening: "聞き取り中",
++      thinking: "考え中",
++      speaking: "話し中",
++      muted: "ミュート中",
++      ending: "終了中…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/ko.ts b/packages/app/src/i18n/resources/ko.ts
+index c9482834d..19f1f819d 100644
+--- a/packages/app/src/i18n/resources/ko.ts
++++ b/packages/app/src/i18n/resources/ko.ts
+@@ -1884,6 +1884,20 @@ export const ko: TranslationResources = {
+       mute: "실시간 음성 음소거",
+       unmute: "실시간 음성 음소거 해제",
+       stop: "실시간 음성 중지 및 턴 중단",
++      end: "종료",
++    },
++    strip: {
++      label: "음성 모드",
++      mute: "음소거",
++      unmute: "음소거 해제",
++    },
++    status: {
++      connecting: "연결 중…",
++      listening: "듣는 중",
++      thinking: "생각 중",
++      speaking: "말하는 중",
++      muted: "음소거됨",
++      ending: "종료 중…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/pt-BR.ts b/packages/app/src/i18n/resources/pt-BR.ts
+index 0dcb94382..9351095b6 100644
+--- a/packages/app/src/i18n/resources/pt-BR.ts
++++ b/packages/app/src/i18n/resources/pt-BR.ts
+@@ -1907,6 +1907,20 @@ export const ptBR: TranslationResources = {
+       mute: "Silenciar voz em tempo real",
+       unmute: "Ativar voz em tempo real",
+       stop: "Parar voz em tempo real e interromper a resposta",
++      end: "Encerrar",
++    },
++    strip: {
++      label: "Modo de voz",
++      mute: "Silenciar",
++      unmute: "Ativar",
++    },
++    status: {
++      connecting: "Conectando…",
++      listening: "Ouvindo",
++      thinking: "Pensando",
++      speaking: "Falando",
++      muted: "Silenciado",
++      ending: "Encerrando…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/ru.ts b/packages/app/src/i18n/resources/ru.ts
+index 34e60a36a..4954f6d66 100644
+--- a/packages/app/src/i18n/resources/ru.ts
++++ b/packages/app/src/i18n/resources/ru.ts
+@@ -1906,6 +1906,20 @@ export const ru: TranslationResources = {
+       mute: "Отключить микрофон в голосовом режиме реального времени",
+       unmute: "Включить микрофон в голосовом режиме реального времени",
+       stop: "Остановить голосовой режим реального времени и прервать текущий ответ",
++      end: "Завершить",
++    },
++    strip: {
++      label: "Голосовой режим",
++      mute: "Выкл. звук",
++      unmute: "Вкл. звук",
++    },
++    status: {
++      connecting: "Подключение…",
++      listening: "Слушаю",
++      thinking: "Думаю",
++      speaking: "Говорю",
++      muted: "Микрофон выкл.",
++      ending: "Завершение…",
+     },
+   },
+   rewind: {
+diff --git a/packages/app/src/i18n/resources/zh-CN.ts b/packages/app/src/i18n/resources/zh-CN.ts
+index a991531f6..22e48d696 100644
+--- a/packages/app/src/i18n/resources/zh-CN.ts
++++ b/packages/app/src/i18n/resources/zh-CN.ts
+@@ -1852,6 +1852,20 @@ export const zhCN: TranslationResources = {
+       mute: "静音 realtime voice",
+       unmute: "取消静音 realtime voice",
+       stop: "停止 realtime voice 并中断 turn",
++      end: "结束",
++    },
++    strip: {
++      label: "语音模式",
++      mute: "静音",
++      unmute: "取消静音",
++    },
++    status: {
++      connecting: "连接中…",
++      listening: "聆听中",
++      thinking: "思考中",
++      speaking: "播报中",
++      muted: "已静音",
++      ending: "正在结束…",
+     },
+   },
+   rewind: {
+-- 
+2.52.0
+
