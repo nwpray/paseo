@@ -1,0 +1,559 @@
+From 8c365b9dedd5619bf4878ca7d0c697637e0e5be1 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 16:09:25 -0600
+Subject: [PATCH] fork: volume meter bars trade off; add mini size
+
+The three bars now share one height budget set by the volume. A drifting
+focus decides how the budget is split, so when one bar rises the others
+drop and the peak moves between bars. Silence keeps the idle pulse, muted
+stays flat, and reduced motion follows volume only. Adds a `mini` variant
+for the voice strip, and drops useUnistyles() from the meter.
+
+The volume-meter design now shows the mini size and speech-like input.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/app/src/components/volume-meter.tsx  | 375 +++++++++++-------
+ .../app/src/design/designs/volume-meter.tsx   |  63 ++-
+ 2 files changed, 300 insertions(+), 138 deletions(-)
+
+diff --git a/packages/app/src/components/volume-meter.tsx b/packages/app/src/components/volume-meter.tsx
+index b6865c6e1..4d2667d7c 100644
+--- a/packages/app/src/components/volume-meter.tsx
++++ b/packages/app/src/components/volume-meter.tsx
+@@ -1,24 +1,202 @@
+-import { useEffect, useMemo } from "react";
++import { useCallback, useEffect, useMemo } from "react";
+ import { View } from "react-native";
+ import ReanimatedAnimated, {
+   useSharedValue,
+   useAnimatedStyle,
++  useFrameCallback,
++  useReducedMotion,
+   withTiming,
+   withRepeat,
+   withSequence,
+   Easing,
++  type FrameInfo,
++  type SharedValue,
+ } from "react-native-reanimated";
+-import { StyleSheet, useUnistyles } from "react-native-unistyles";
++import { StyleSheet } from "react-native-unistyles";
++
++type VolumeMeterVariant = "default" | "compact" | "mini";
++type VolumeMeterOrientation = "vertical" | "horizontal";
+ 
+ interface VolumeMeterProps {
+   volume: number;
+   isMuted?: boolean;
+   isSpeaking?: boolean;
+-  orientation?: "vertical" | "horizontal";
+-  variant?: "default" | "compact";
++  orientation?: VolumeMeterOrientation;
++  variant?: VolumeMeterVariant;
+   color?: string;
+ }
+ 
++interface MeterSize {
++  lineWidth: number;
++  lineSpacing: number;
++  /** Bar height in silence. */
++  minHeight: number;
++  /** Height added per unit of volume, before the per-bar gain. */
++  volumeRange: number;
++  /** Hard ceiling for a bar so the bounce never escapes the container. */
++  maxHeight: number;
++  containerHeight: number;
++}
++
++// default and compact keep their original geometry. Their ceiling is the
++// container height, which the original unclamped formula never reached.
++const MINI_SIZE: MeterSize = {
++  lineWidth: 3,
++  lineSpacing: 3,
++  minHeight: 4,
++  volumeRange: 10,
++  maxHeight: 14,
++  containerHeight: 16,
++};
++
++const SIZES: Record<VolumeMeterVariant, Record<VolumeMeterOrientation, MeterSize>> = {
++  default: {
++    horizontal: {
++      lineWidth: 8,
++      lineSpacing: 8,
++      minHeight: 12,
++      volumeRange: 30,
++      maxHeight: 60,
++      containerHeight: 60,
++    },
++    vertical: {
++      lineWidth: 8,
++      lineSpacing: 8,
++      minHeight: 20,
++      volumeRange: 50,
++      maxHeight: 100,
++      containerHeight: 100,
++    },
++  },
++  compact: {
++    horizontal: {
++      lineWidth: 6,
++      lineSpacing: 6,
++      minHeight: 8,
++      volumeRange: 18,
++      maxHeight: 32,
++      containerHeight: 32,
++    },
++    vertical: {
++      lineWidth: 6,
++      lineSpacing: 6,
++      minHeight: 14,
++      volumeRange: 32,
++      maxHeight: 64,
++      containerHeight: 64,
++    },
++  },
++  mini: { horizontal: MINI_SIZE, vertical: MINI_SIZE },
++};
++
++interface BarTuning {
++  /** Angle of this bar around the focus circle, in radians. */
++  angle: number;
++  /** Relative share of the budget. Above 1 sits taller on average. */
++  bias: number;
++  /** Wobble period in ms. The three are non-harmonic. */
++  wobblePeriod: number;
++  wobblePhase: number;
++}
++
++// One mic, one volume. Volume sets a height budget for the three bars and a
++// drifting focus decides how the budget is shared, so when one bar rises the
++// others drop and the peak travels between bars. Bars sit 120 degrees apart, so
++// the cosine weights always sum to 3 before the bias is normalized out.
++const BARS: readonly [BarTuning, BarTuning, BarTuning] = [
++  { angle: 0, bias: 1, wobblePeriod: 230, wobblePhase: 0 },
++  { angle: (Math.PI * 2) / 3, bias: 1.15, wobblePeriod: 310, wobblePhase: 2.1 },
++  { angle: (Math.PI * 4) / 3, bias: 1, wobblePeriod: 270, wobblePhase: 4.2 },
++];
++const BIAS_SUM = BARS[0].bias + BARS[1].bias + BARS[2].bias;
++/** Average multiplier on the volume part of a bar's height. */
++const VOLUME_GAIN = 1.05;
++/** How strongly the focus bar takes the budget from the others, 0..1. */
++const MAX_SHARE = 0.8;
++/** Peak per-bar wobble as a fraction of the bar's height. */
++const MAX_WOBBLE = 0.08;
++/** Volume at which share and wobble reach their maximum. */
++const MOTION_FULL_AT = 0.3;
++/** Focus drift speed in radians per second: calm when quiet, quicker when loud. */
++const DRIFT_BASE = 2.5;
++const DRIFT_PER_VOLUME = 9;
++/** A second, slower phase bends the drift so it reverses and never visibly repeats. */
++const DRIFT_SWAY_RATIO = 0.618;
++const DRIFT_SWAY = 1.4;
++/** Below this volume the idle pulse fades in. */
++const IDLE_PULSE_FADE = 0.05;
++const TWO_PI = Math.PI * 2;
++
++interface BarStyleInput {
++  bar: BarTuning;
++  size: MeterSize;
++  volume: SharedValue<number>;
++  /** Frame timestamp in ms, for the wobble. */
++  clock: SharedValue<number>;
++  /** Accumulated focus drift phase in radians. */
++  drift: SharedValue<number>;
++  idlePulse: SharedValue<number>;
++  isMuted: boolean;
++  isSpeaking: boolean;
++  reduceMotion: boolean;
++}
++
++function useBarStyle({
++  bar,
++  size,
++  volume,
++  clock,
++  drift,
++  idlePulse,
++  isMuted,
++  isSpeaking,
++  reduceMotion,
++}: BarStyleInput) {
++  return useAnimatedStyle(() => {
++    let baseOpacity: number;
++    if (isMuted) baseOpacity = 0.3;
++    else if (isSpeaking) baseOpacity = 0.9;
++    else baseOpacity = 0.5;
++    const currentVolume = isMuted ? 0 : volume.value;
++    const volumeHeight = size.volumeRange * currentVolume * VOLUME_GAIN;
++
++    let height = size.minHeight + volumeHeight;
++    if (!isMuted && !reduceMotion) {
++      const phase = drift.value;
++      const strength = Math.min(1, currentVolume / MOTION_FULL_AT);
++      const focus = phase + DRIFT_SWAY * Math.sin(phase * DRIFT_SWAY_RATIO);
++      const share =
++        ((1 + MAX_SHARE * strength * Math.cos(focus - bar.angle)) * bar.bias * 3) / BIAS_SUM;
++      const wobble =
++        1 +
++        MAX_WOBBLE *
++          strength *
++          Math.sin((TWO_PI * clock.value) / bar.wobblePeriod + bar.wobblePhase);
++      const idleWeight = Math.max(0, 1 - currentVolume / IDLE_PULSE_FADE);
++      const idle = 1 + (idlePulse.value - 1) * idleWeight;
++      height = (size.minHeight + volumeHeight * share) * wobble * idle;
++    }
++
++    const volumeBoost = isMuted || !isSpeaking ? 0 : currentVolume * 0.3;
++    return {
++      height: Math.min(size.maxHeight, Math.max(size.minHeight, height)),
++      opacity: baseOpacity + volumeBoost,
++    };
++  });
++}
++
++function startIdlePulse(pulse: SharedValue<number>, delay: number, peak: number, duration: number) {
++  pulse.value = withRepeat(
++    withSequence(
++      withTiming(1, { duration: delay }),
++      withTiming(peak, { duration, easing: Easing.inOut(Easing.ease) }),
++      withTiming(1, { duration, easing: Easing.inOut(Easing.ease) }),
++    ),
++    -1,
++    false,
++  );
++}
++
+ export function VolumeMeter({
+   volume,
+   isMuted = false,
+@@ -27,72 +205,47 @@ export function VolumeMeter({
+   variant = "default",
+   color,
+ }: VolumeMeterProps) {
+-  const { theme } = useUnistyles();
+-  const isCompact = variant === "compact";
+-
+-  // Base dimensions
+-  const LINE_SPACING = isCompact ? 6 : 8;
+-  const LINE_WIDTH = isCompact ? 6 : 8;
+-  let MAX_HEIGHT: number;
+-  if (orientation === "horizontal") {
+-    MAX_HEIGHT = isCompact ? 18 : 30;
+-  } else {
+-    MAX_HEIGHT = isCompact ? 32 : 50;
+-  }
+-  let MIN_HEIGHT: number;
+-  if (orientation === "horizontal") {
+-    MIN_HEIGHT = isCompact ? 8 : 12;
+-  } else {
+-    MIN_HEIGHT = isCompact ? 14 : 20;
+-  }
+-
+-  // Create shared values for 3 dots unconditionally
++  const size = SIZES[variant][orientation];
++  const reduceMotion = useReducedMotion();
++  const isAnimating = !isMuted && !reduceMotion;
++
+   const animatedVolume = useSharedValue(0);
++  const clock = useSharedValue(0);
++  const drift = useSharedValue(0);
+   const line1Pulse = useSharedValue(1);
+   const line2Pulse = useSharedValue(1);
+   const line3Pulse = useSharedValue(1);
+ 
+-  // Start idle animations with different phases for all dots
++  // UI-thread clock and focus drift. Paused while muted or when the OS asks
++  // for reduced motion. Drift integrates frame deltas so its speed can follow
++  // the volume without jumping.
++  const tick = useCallback(
++    (frame: FrameInfo) => {
++      "worklet";
++      const dt = Math.min(frame.timeSincePreviousFrame ?? 0, 100) / 1000;
++      const speed = DRIFT_BASE + DRIFT_PER_VOLUME * animatedVolume.value;
++      clock.value = frame.timestamp;
++      drift.value += speed * dt;
++    },
++    [animatedVolume, clock, drift],
++  );
++  const frameCallback = useFrameCallback(tick, false);
++
+   useEffect(() => {
+-    if (isMuted) {
+-      // When muted, set all pulses to 1 (no animation)
++    frameCallback.setActive(isAnimating);
++  }, [frameCallback, isAnimating]);
++
++  useEffect(() => {
++    if (!isAnimating) {
+       line1Pulse.value = 1;
+       line2Pulse.value = 1;
+       line3Pulse.value = 1;
+       return;
+     }
+-
+-    // Animate each dot with different phases and durations
+-    line1Pulse.value = withRepeat(
+-      withSequence(
+-        withTiming(1, { duration: 0 }),
+-        withTiming(1.15, { duration: 800, easing: Easing.inOut(Easing.ease) }),
+-        withTiming(1, { duration: 800, easing: Easing.inOut(Easing.ease) }),
+-      ),
+-      -1,
+-      false,
+-    );
+-
+-    line2Pulse.value = withRepeat(
+-      withSequence(
+-        withTiming(1, { duration: 200 }),
+-        withTiming(1.2, { duration: 1000, easing: Easing.inOut(Easing.ease) }),
+-        withTiming(1, { duration: 1000, easing: Easing.inOut(Easing.ease) }),
+-      ),
+-      -1,
+-      false,
+-    );
+-
+-    line3Pulse.value = withRepeat(
+-      withSequence(
+-        withTiming(1, { duration: 400 }),
+-        withTiming(1.25, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+-        withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+-      ),
+-      -1,
+-      false,
+-    );
+-  }, [isMuted, line1Pulse, line2Pulse, line3Pulse]);
++    startIdlePulse(line1Pulse, 0, 1.15, 800);
++    startIdlePulse(line2Pulse, 200, 1.2, 1000);
++    startIdlePulse(line3Pulse, 400, 1.25, 1200);
++  }, [isAnimating, line1Pulse, line2Pulse, line3Pulse]);
+ 
+   // Drive a single animated volume value and derive the individual bar heights
+   // on the UI thread instead of scheduling three independent springs per sample.
+@@ -108,89 +261,41 @@ export function VolumeMeter({
+     });
+   }, [animatedVolume, isMuted, volume]);
+ 
+-  const lineColor = color ?? theme.colors.foreground;
+-  let containerHeight: number;
+-  if (orientation === "horizontal") {
+-    containerHeight = isCompact ? 32 : 60;
+-  } else {
+-    containerHeight = isCompact ? 64 : 100;
+-  }
+-
+-  // Create animated styles unconditionally at top level
+-  const line1Style = useAnimatedStyle(() => {
+-    const isActive = isSpeaking;
+-    let baseOpacity: number;
+-    if (isMuted) baseOpacity = 0.3;
+-    else if (isActive) baseOpacity = 0.9;
+-    else baseOpacity = 0.5;
+-    const currentVolume = isMuted ? 0 : animatedVolume.value;
+-    const currentHeight = MIN_HEIGHT + MAX_HEIGHT * currentVolume * 1.2;
+-    const volumeBoost = isMuted || !isActive ? 0 : currentVolume * 0.3;
+-    return {
+-      height: currentHeight * (isMuted || currentVolume > 0.001 ? 1 : line1Pulse.value),
+-      opacity: baseOpacity + volumeBoost,
+-    };
+-  });
+-
+-  const line2Style = useAnimatedStyle(() => {
+-    const isActive = isSpeaking;
+-    let baseOpacity: number;
+-    if (isMuted) baseOpacity = 0.3;
+-    else if (isActive) baseOpacity = 0.9;
+-    else baseOpacity = 0.5;
+-    const currentVolume = isMuted ? 0 : animatedVolume.value;
+-    const currentHeight = MIN_HEIGHT + MAX_HEIGHT * currentVolume * 1.05;
+-    const volumeBoost = isMuted || !isActive ? 0 : currentVolume * 0.3;
+-    return {
+-      height: currentHeight * (isMuted || currentVolume > 0.001 ? 1 : line2Pulse.value),
+-      opacity: baseOpacity + volumeBoost,
+-    };
+-  });
+-
+-  const line3Style = useAnimatedStyle(() => {
+-    const isActive = isSpeaking;
+-    let baseOpacity: number;
+-    if (isMuted) baseOpacity = 0.3;
+-    else if (isActive) baseOpacity = 0.9;
+-    else baseOpacity = 0.5;
+-    const currentVolume = isMuted ? 0 : animatedVolume.value;
+-    const currentHeight = MIN_HEIGHT + MAX_HEIGHT * currentVolume * 0.9;
+-    const volumeBoost = isMuted || !isActive ? 0 : currentVolume * 0.3;
+-    return {
+-      height: currentHeight * (isMuted || currentVolume > 0.001 ? 1 : line3Pulse.value),
+-      opacity: baseOpacity + volumeBoost,
+-    };
+-  });
++  const shared = { size, volume: animatedVolume, clock, drift, isMuted, isSpeaking, reduceMotion };
++  const line1Style = useBarStyle({ ...shared, bar: BARS[0], idlePulse: line1Pulse });
++  const line2Style = useBarStyle({ ...shared, bar: BARS[1], idlePulse: line2Pulse });
++  const line3Style = useBarStyle({ ...shared, bar: BARS[2], idlePulse: line3Pulse });
+ 
+   const containerStyle = useMemo(
+-    () => [styles.container, { height: containerHeight }],
+-    [containerHeight],
+-  );
+-  const lineBase = useMemo(
+-    () => ({ width: LINE_WIDTH, backgroundColor: lineColor }),
+-    [LINE_WIDTH, lineColor],
+-  );
+-  const spacerStyle = useMemo(() => ({ width: LINE_SPACING }), [LINE_SPACING]);
+-  const line1CombinedStyle = useMemo(
+-    () => [styles.line, lineBase, line1Style],
+-    [lineBase, line1Style],
+-  );
+-  const line2CombinedStyle = useMemo(
+-    () => [styles.line, lineBase, line2Style],
+-    [lineBase, line2Style],
++    () => [styles.container, { height: size.containerHeight }],
++    [size.containerHeight],
+   );
+-  const line3CombinedStyle = useMemo(
+-    () => [styles.line, lineBase, line3Style],
+-    [lineBase, line3Style],
++  const spacerStyle = useMemo(() => ({ width: size.lineSpacing }), [size.lineSpacing]);
++  const widthStyle = useMemo(() => ({ width: size.lineWidth }), [size.lineWidth]);
++  // Reanimated owns the outer bar node, which gets plain styles only. Unistyles
++  // owns the inner fill, so a theme change never patches a node Reanimated is
++  // animating. See docs/unistyles.md, "Reanimated Animated.View + Dynamic Styles".
++  const fillStyle = useMemo(
++    () => (color ? [styles.fill, { backgroundColor: color }] : styles.fill),
++    [color],
+   );
++  const line1CombinedStyle = useMemo(() => [widthStyle, line1Style], [widthStyle, line1Style]);
++  const line2CombinedStyle = useMemo(() => [widthStyle, line2Style], [widthStyle, line2Style]);
++  const line3CombinedStyle = useMemo(() => [widthStyle, line3Style], [widthStyle, line3Style]);
+ 
+   return (
+     <View style={containerStyle}>
+-      <ReanimatedAnimated.View style={line1CombinedStyle} />
++      <ReanimatedAnimated.View style={line1CombinedStyle}>
++        <View style={fillStyle} />
++      </ReanimatedAnimated.View>
+       <View style={spacerStyle} />
+-      <ReanimatedAnimated.View style={line2CombinedStyle} />
++      <ReanimatedAnimated.View style={line2CombinedStyle}>
++        <View style={fillStyle} />
++      </ReanimatedAnimated.View>
+       <View style={spacerStyle} />
+-      <ReanimatedAnimated.View style={line3CombinedStyle} />
++      <ReanimatedAnimated.View style={line3CombinedStyle}>
++        <View style={fillStyle} />
++      </ReanimatedAnimated.View>
+     </View>
+   );
+ }
+@@ -201,7 +306,9 @@ const styles = StyleSheet.create((theme) => ({
+     alignItems: "center",
+     justifyContent: "center",
+   },
+-  line: {
++  fill: {
++    flex: 1,
+     borderRadius: theme.borderRadius.full,
++    backgroundColor: theme.colors.foreground,
+   },
+ }));
+diff --git a/packages/app/src/design/designs/volume-meter.tsx b/packages/app/src/design/designs/volume-meter.tsx
+index c92cf2c9c..8045d9258 100644
+--- a/packages/app/src/design/designs/volume-meter.tsx
++++ b/packages/app/src/design/designs/volume-meter.tsx
+@@ -4,7 +4,9 @@ import { DesignPage, DesignRow, DesignSection, DesignSpecimen } from "@/design/k
+ import type { DesignDefinition } from "@/design/types";
+ 
+ // The VolumeMeter as it ships today, in every variant and orientation.
+-// Speaking and loud feed it a jittered level so the bars move like live input.
++// Speaking and loud feed it a speech-like level: syllable bursts with short
++// dips between them and longer pauses between words, so the bars move like
++// live mic input.
+ 
+ interface MeterInput {
+   level: number;
+@@ -12,7 +14,43 @@ interface MeterInput {
+   isMuted: boolean;
+ }
+ 
+-const SAMPLE_INTERVAL_MS = 90;
++const SAMPLE_INTERVAL_MS = 50;
++
++interface Syllable {
++  startedAt: number;
++  duration: number;
++  peak: number;
++  /** Silence after this syllable: a short dip, or a word gap. */
++  gap: number;
++}
++
++function randomBetween(min: number, max: number): number {
++  return min + Math.random() * (max - min);
++}
++
++function nextSyllable(startedAt: number, level: number): Syllable {
++  const endsWord = Math.random() < 0.3;
++  return {
++    startedAt,
++    duration: randomBetween(110, 260),
++    peak: level * randomBetween(0.55, 1.35),
++    gap: endsWord ? randomBetween(220, 520) : randomBetween(30, 90),
++  };
++}
++
++// Fast attack, slower decay, like a voiced syllable.
++function syllableEnvelope(progress: number): number {
++  if (progress < 0.2) return progress / 0.2;
++  return Math.max(0, 1 - (progress - 0.2) / 0.8) ** 0.7;
++}
++
++function speechLevel(syllable: Syllable, now: number, level: number): number {
++  const elapsed = now - syllable.startedAt;
++  const floor = level * 0.06;
++  if (elapsed >= syllable.duration) return floor;
++  const flutter = 1 + (Math.random() - 0.5) * 0.25;
++  return floor + syllable.peak * syllableEnvelope(elapsed / syllable.duration) * flutter;
++}
+ 
+ function useSimulatedVolume(level: number): number {
+   const [volume, setVolume] = useState(level);
+@@ -21,9 +59,13 @@ function useSimulatedVolume(level: number): number {
+       setVolume(0);
+       return;
+     }
++    let syllable = nextSyllable(Date.now(), level);
+     const handle = setInterval(() => {
+-      const jitter = (Math.random() - 0.5) * level * 0.8;
+-      setVolume(Math.min(1, Math.max(0, level + jitter)));
++      const now = Date.now();
++      if (now - syllable.startedAt >= syllable.duration + syllable.gap) {
++        syllable = nextSyllable(now, level);
++      }
++      setVolume(Math.min(1, Math.max(0, speechLevel(syllable, now, level))));
+     }, SAMPLE_INTERVAL_MS);
+     return () => clearInterval(handle);
+   }, [level]);
+@@ -76,6 +118,19 @@ function MeterVariants({ level, isSpeaking, isMuted }: MeterInput) {
+           </DesignSpecimen>
+         </DesignRow>
+       </DesignSection>
++      <DesignSection title="Mini" description="Inline size for the voice strip">
++        <DesignRow>
++          <DesignSpecimen label="Horizontal">
++            <VolumeMeter
++              volume={volume}
++              isSpeaking={isSpeaking}
++              isMuted={isMuted}
++              orientation="horizontal"
++              variant="mini"
++            />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
+     </DesignPage>
+   );
+ }
+-- 
+2.52.0
+
