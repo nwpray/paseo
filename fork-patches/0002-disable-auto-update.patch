@@ -1,5 +1,5 @@
 From 28a2b321da89c3a6375e25293bd156bca930ade3 Mon Sep 17 00:00:00 2001
-From: Nick Pray <nickpray@numetric.com>
+From: Nick Pray <nickwpray@gmail.com>
 Date: Tue, 27 Oct 2026 12:57:58 -0600
 Subject: [PATCH] fork: disable desktop auto-update unless
  PASEO_FORK_ENABLE_UPDATES=1
