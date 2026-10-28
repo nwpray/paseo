@@ -13,6 +13,7 @@
 #      at that path is removed first, so every build starts clean.
 #   3. Applies fork-patches/*.patch in lexical order with `git am --3way`.
 #      Any patch that does not apply aborts the build (exit 1).
+#      Patches in fork-patches/wip/ are not applied.
 #   4. Runs `npm ci` (upstream's postinstall patch-package step runs as usual)
 #      and `npm run build:desktop` for macOS, unsigned-for-distribution:
 #      ad-hoc signature, no hardened runtime, no notarization, --publish never.
