@@ -1,0 +1,2762 @@
+From 79dccede8623127dbbe4ba04545321b03e301108 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 15:29:09 -0600
+Subject: [PATCH] fork: add dev-only design frame
+
+Render real app components and the real theme through react-native-web for
+design reviews, with no daemon and nothing in production builds.
+
+- /design and /design/[name] routes, only on disk for Metro when
+  EXPO_PUBLIC_PASEO_DESIGN_FRAME=1; the root layout renders them through a
+  bare provider tree so host bootstrap, chrome and startup restore never run.
+- Review bar: state, device (phone/tablet/desktop/all as real-width
+  iframes), zoom, every built-in theme via the app's applyTheme path
+  (postMessage to each iframe), and Check.
+- Design registry, starter and flow templates, a token-driven catalog and
+  a volume-meter design.
+- design:check rules + CLI, also served to the frame by Metro middleware.
+- npm run design / npm run design:check, docs/design-frame.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CLAUDE.md                                     |   1 +
+ docs/design-frame.md                          |  57 ++
+ package.json                                  |   2 +
+ packages/app/metro.config.cjs                 |  31 +-
+ packages/app/scripts/design-check.mjs         | 111 +++
+ packages/app/src/app/_layout.tsx              |  39 +-
+ packages/app/src/app/design/[name].tsx        |   5 +
+ packages/app/src/app/design/index.tsx         |   5 +
+ packages/app/src/appearance/provider.tsx      |   3 +-
+ packages/app/src/design/check/rules.test.ts   |  61 ++
+ packages/app/src/design/check/rules.ts        | 171 +++++
+ packages/app/src/design/designs/catalog.tsx   | 634 ++++++++++++++++++
+ .../app/src/design/designs/volume-meter.tsx   | 109 +++
+ .../src/design/frame/apply-design-theme.ts    |  25 +
+ packages/app/src/design/frame/check-panel.tsx |  92 +++
+ packages/app/src/design/frame/context.tsx     |  20 +
+ .../app/src/design/frame/device-frame.tsx     |  50 ++
+ .../app/src/design/frame/device-viewport.tsx  |  26 +
+ .../src/design/frame/device-viewport.web.tsx  | 100 +++
+ packages/app/src/design/frame/messages.ts     |  28 +
+ packages/app/src/design/frame/params.ts       |  71 ++
+ .../src/design/frame/quiet-known-warnings.ts  |   2 +
+ .../design/frame/quiet-known-warnings.web.ts  |  23 +
+ packages/app/src/design/frame/review-bar.tsx  | 181 +++++
+ packages/app/src/design/frame/review-page.tsx | 154 +++++
+ packages/app/src/design/frame/screens.tsx     | 125 ++++
+ packages/app/src/design/frame/theme-gate.tsx  |  36 +
+ .../src/design/frame/use-frame-messages.ts    |   4 +
+ .../design/frame/use-frame-messages.web.ts    |  15 +
+ packages/app/src/design/kit.tsx               |  98 +++
+ packages/app/src/design/registry.ts           |  12 +
+ packages/app/src/design/templates/flow.md     |  32 +
+ packages/app/src/design/templates/starter.tsx |  63 ++
+ packages/app/src/design/types.ts              |  18 +
+ scripts/dev-design.sh                         |  18 +
+ 35 files changed, 2419 insertions(+), 3 deletions(-)
+ create mode 100644 docs/design-frame.md
+ create mode 100644 packages/app/scripts/design-check.mjs
+ create mode 100644 packages/app/src/app/design/[name].tsx
+ create mode 100644 packages/app/src/app/design/index.tsx
+ create mode 100644 packages/app/src/design/check/rules.test.ts
+ create mode 100644 packages/app/src/design/check/rules.ts
+ create mode 100644 packages/app/src/design/designs/catalog.tsx
+ create mode 100644 packages/app/src/design/designs/volume-meter.tsx
+ create mode 100644 packages/app/src/design/frame/apply-design-theme.ts
+ create mode 100644 packages/app/src/design/frame/check-panel.tsx
+ create mode 100644 packages/app/src/design/frame/context.tsx
+ create mode 100644 packages/app/src/design/frame/device-frame.tsx
+ create mode 100644 packages/app/src/design/frame/device-viewport.tsx
+ create mode 100644 packages/app/src/design/frame/device-viewport.web.tsx
+ create mode 100644 packages/app/src/design/frame/messages.ts
+ create mode 100644 packages/app/src/design/frame/params.ts
+ create mode 100644 packages/app/src/design/frame/quiet-known-warnings.ts
+ create mode 100644 packages/app/src/design/frame/quiet-known-warnings.web.ts
+ create mode 100644 packages/app/src/design/frame/review-bar.tsx
+ create mode 100644 packages/app/src/design/frame/review-page.tsx
+ create mode 100644 packages/app/src/design/frame/screens.tsx
+ create mode 100644 packages/app/src/design/frame/theme-gate.tsx
+ create mode 100644 packages/app/src/design/frame/use-frame-messages.ts
+ create mode 100644 packages/app/src/design/frame/use-frame-messages.web.ts
+ create mode 100644 packages/app/src/design/kit.tsx
+ create mode 100644 packages/app/src/design/registry.ts
+ create mode 100644 packages/app/src/design/templates/flow.md
+ create mode 100644 packages/app/src/design/templates/starter.tsx
+ create mode 100644 packages/app/src/design/types.ts
+ create mode 100755 scripts/dev-design.sh
+
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 3f1731597..5b410bd02 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -30,6 +30,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
+ | [docs/glossary.md](docs/glossary.md)                                 | Authoritative terminology — UI label wins, no synonyms                                                                         |
+ | [docs/coding-standards.md](docs/coding-standards.md)                 | Type hygiene, error handling, state design, React patterns, file organization                                                  |
+ | [docs/design.md](docs/design.md)                                     | Design system — tokens, buttons, hierarchy, density, alignment rails, states, what's forbidden                                 |
++| [docs/design-frame.md](docs/design-frame.md)                         | Dev-only design frame: real components on web, review bar, catalog, design check                                               |
+ | [docs/forms.md](docs/forms.md)                                       | Form architecture — non-React form model, form kit, load-state gating; the schedule form is the golden example                 |
+ | [docs/hover.md](docs/hover.md)                                       | Hover — the canonical pattern (plain View + onPointerEnter/Leave, separate inner Pressable) and the three ways agents break it |
+ | [docs/unistyles.md](docs/unistyles.md)                               | Unistyles gotchas — `useUnistyles()` is forbidden, alternatives in order                                                       |
+diff --git a/docs/design-frame.md b/docs/design-frame.md
+new file mode 100644
+index 000000000..ef4f58de7
+--- /dev/null
++++ b/docs/design-frame.md
+@@ -0,0 +1,57 @@
++# Design frame
++
++The design frame renders real app components and the real theme through react-native-web, so a design review looks at the code that ships. It is dev-only and needs no daemon.
++
++## Run it
++
++```bash
++npm run design                     # http://localhost:8095/design
++DESIGN_PORT=8096 npm run design    # another port
++npm run design:check               # check every design file
++npm run design:check -- packages/app/src/design/designs/volume-meter.tsx
++```
++
++`npm run design` starts Expo web with `EXPO_PUBLIC_PASEO_DESIGN_FRAME=1`. It does not start or contact a daemon. Run `npm run build:app-deps` first in a fresh checkout.
++
++`/design` lists designs. `/design/<name>` opens one with the review bar:
++
++- **State**: the design's named states.
++- **Device**: Phone 375, Tablet 768, Desktop 1280, or All side by side.
++- **Zoom**: Fit scales the previews into the window; 100% shows them at device pixels.
++- **Theme**: every built-in theme, including Auto. Plugin themes need a host and are not offered.
++- **Check**: runs `design:check` on the design's file and shows the findings.
++
++The query string holds the selection, so a URL is a shareable review link: `/design/volume-meter?state=loud&device=all&theme=light`.
++
++## Add a design
++
++1. Copy `packages/app/src/design/templates/starter.tsx` to `packages/app/src/design/designs/<name>.tsx`.
++2. Register it in `packages/app/src/design/registry.ts` under the same `<name>`. Check finds the file by that name.
++3. Copy `templates/flow.md` next to it as `<name>.md` for the brief.
++4. Run `npm run design:check -- <file>` until it is clean.
++
++A design exports `{ title, states: [{ id, label, render }] }`. `render` is a component, so it can hold state and hooks. Compose with real components from `@/components`. `@/design/kit` has page, section, row and specimen layout pieces; they arrange examples and are not app UI. `useDesignFrame()` gives the preview's device and theme.
++
++Check rejects raw hex/rgb/hsl colors, `palette.*`, numeric padding/margin/gap/fontSize/lineHeight/fontWeight/borderRadius/borderWidth values (`0` is allowed), numeric icon `size={}` and `useUnistyles()`. Put `// design-check-ignore-next-line` above a line that has a reason to break a rule. The rules live in `packages/app/src/design/check/rules.ts`.
++
++`/design/catalog` is the design system reference: every color, spacing, type, icon, radius, border, shadow and opacity token read from the active theme, the `xs`/`sm`/`md` control sizes, and live shared components. Its Layout block shows the breakpoint and form factor each preview resolved to.
++
++## How it works
++
++- **No daemon.** The root layout (`packages/app/src/app/_layout.tsx`) renders `/design/*` through a bare provider tree with a `Slot`. Host runtime bootstrap, app chrome, the root stack, startup redirects and workspace restore never mount, so normal routing is untouched.
++- **Not in production.** Metro's `blockList` hides `src/app/design/` unless `EXPO_PUBLIC_PASEO_DESIGN_FRAME=1`, so Expo Router never sees the routes and nothing under `src/design` is bundled. The same flag gates the root layout branch at build time.
++- **Real breakpoints.** Each device preview is an iframe of the same route with `?frame=device`, sized to the device. Unistyles and `useIsCompactFormFactor()` read the iframe's window, so the phone is compact (`xs`) and tablet and desktop are wide (`md`, `xl`).
++- **Theme.** Each iframe is its own JS runtime. The review page posts the selected state and theme to every iframe, and each applies it through `applyTheme` from `packages/app/src/appearance/provider.tsx`, the path the app uses. Previews do not reload on change. Phone and tablet previews use the native default font sizes; desktop uses the web defaults.
++- **Check.** With the flag set, the Metro dev server answers `GET /__design/check?name=<design>` by running `packages/app/scripts/design-check.mjs`.
++
++## What web can't show
++
++Web is exact for the Electron and browser apps and close for iOS and Android.
++
++- `.native.tsx` variants never render. The web or base file renders in their place.
++- iOS and Android font metrics differ, so line heights and text widths shift by a few pixels.
++- Shadows render as CSS `box-shadow`; native shadow and Android elevation look different.
++- Haptics, keyboard avoidance, safe-area insets and native gestures are absent.
++- Hover works only in the browser. `Shortcut` and desktop tooltips are hidden on compact, as in the app.
++
++Confirm native-sensitive details on a device before calling a design done.
+diff --git a/package.json b/package.json
+index beeff7c61..be97a6388 100644
+--- a/package.json
++++ b/package.json
+@@ -46,6 +46,8 @@
+     "test:e2e:mobile": "./scripts/test-mobile-agent-device.sh",
+     "test:e2e:composer-keyboard:android": "./packages/app/e2e/mobile/composer-keyboard/android.sh",
+     "dev:website": "npm run dev --workspace=@getpaseo/website",
++    "design": "./scripts/dev-design.sh",
++    "design:check": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON packages/app/scripts/design-check.mjs",
+     "postinstall": "node scripts/postinstall-patches.mjs",
+     "prepare": "lefthook install --force",
+     "build": "npm run build --workspaces --if-present",
+diff --git a/packages/app/metro.config.cjs b/packages/app/metro.config.cjs
+index 96a965e1f..e79660279 100644
+--- a/packages/app/metro.config.cjs
++++ b/packages/app/metro.config.cjs
+@@ -38,8 +38,13 @@ config.resolver.extraNodeModules = {
+   "react/jsx-runtime": path.join(appNodeModulesRoot, "react/jsx-runtime"),
+   "react/jsx-dev-runtime": path.join(appNodeModulesRoot, "react/jsx-dev-runtime"),
+ };
++// The design frame (docs/design-frame.md) is opt-in. Without the flag its routes
++// are not on disk as far as Metro and Expo Router are concerned, so no build
++// that forgot to set it can ship them.
++const isDesignFrameEnabled = process.env.EXPO_PUBLIC_PASEO_DESIGN_FRAME === "1";
++const designRoutesPattern = `|^${escapedAppSrcRoot}${pathSeparatorPattern}app${pathSeparatorPattern}design${pathSeparatorPattern}.*`;
+ config.resolver.blockList = new RegExp(
+-  `(^${escapedAppSrcRoot}${pathSeparatorPattern}.*\\.(test|spec)\\.(ts|tsx)$|${pathSeparatorPattern}__tests__${pathSeparatorPattern}.*)$`,
++  `(^${escapedAppSrcRoot}${pathSeparatorPattern}.*\\.(test|spec)\\.(ts|tsx)$|${pathSeparatorPattern}__tests__${pathSeparatorPattern}.*${isDesignFrameEnabled ? "" : designRoutesPattern})$`,
+ );
+ 
+ function isLocalModuleImport(moduleName) {
+@@ -119,4 +124,28 @@ if (process.env.PASEO_SERVE_SIM_PREVIEW === "1") {
+   };
+ }
+ 
++if (isDesignFrameEnabled) {
++  // Serves the design frame's Check button. Dev server only; `expo export` never runs it.
++  const originalEnhanceMiddleware = config.server?.enhanceMiddleware;
++  config.server = config.server ?? {};
++  config.server.enhanceMiddleware = (metroMiddleware, server) => {
++    const middleware = originalEnhanceMiddleware
++      ? originalEnhanceMiddleware(metroMiddleware, server)
++      : metroMiddleware;
++    return (req, res, next) => {
++      if (!req.url || !req.url.startsWith("/__design/check")) {
++        middleware(req, res, next);
++        return;
++      }
++      import("./scripts/design-check.mjs")
++        .then(({ handleDesignCheckRequest }) => handleDesignCheckRequest(req, res))
++        .catch((error) => {
++          res.statusCode = 500;
++          res.setHeader("Content-Type", "application/json");
++          res.end(JSON.stringify({ error: String(error) }));
++        });
++    };
++  };
++}
++
+ module.exports = config;
+diff --git a/packages/app/scripts/design-check.mjs b/packages/app/scripts/design-check.mjs
+new file mode 100644
+index 000000000..da211c76e
+--- /dev/null
++++ b/packages/app/scripts/design-check.mjs
+@@ -0,0 +1,111 @@
++#!/usr/bin/env node
++// Design check: flags raw colors, palette.*, literal spacing/type/radius values and
++// useUnistyles() in design-frame files. See docs/design-frame.md.
++//
++// Usage:
++//   npm run design:check                          Check every design in src/design/designs
++//   npm run design:check -- <file> [file...]      Check specific files
++//   npm run design:check -- --json [files...]     Print findings as JSON
++//   npm run design:check -- --help
++//
++// Exits 1 when any finding is reported. Silence one line with a
++// `// design-check-ignore-next-line` comment directly above it.
++//
++// The Metro dev server (EXPO_PUBLIC_PASEO_DESIGN_FRAME=1) also serves this check at
++// GET /__design/check?name=<design> for the frame's Check button.
++
++import { readdir, readFile } from "node:fs/promises";
++import path from "node:path";
++import { fileURLToPath, pathToFileURL } from "node:url";
++import { checkDesignSource } from "../src/design/check/rules.ts";
++
++const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const DESIGNS_DIR = path.join(APP_ROOT, "src", "design", "designs");
++const DESIGN_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
++
++const HELP = `design:check — lint design-frame files against the design system
++
++Usage:
++  npm run design:check                         every file in src/design/designs
++  npm run design:check -- <file> [file...]     specific files
++  npm run design:check -- --json [files...]    JSON output
++
++Rules:
++  raw-color          "#hex", rgb(), rgba(), hsl() literals
++  palette            palette.* (raw scale) instead of semantic theme.colors
++  style-literal      numeric padding/margin/gap/fontSize/lineHeight/fontWeight/
++                     borderRadius/borderWidth instead of theme tokens (0 is allowed)
++  icon-size-literal  size={14} instead of theme.iconSize / ICON_SIZE
++  use-unistyles      useUnistyles() (banned by docs/unistyles.md)
++
++Silence one line with // design-check-ignore-next-line above it.`;
++
++export async function listDesignFiles() {
++  const entries = await readdir(DESIGNS_DIR);
++  return entries
++    .filter((entry) => /\.(ts|tsx)$/.test(entry) && !/\.test\./.test(entry))
++    .sort()
++    .map((entry) => path.join(DESIGNS_DIR, entry));
++}
++
++export async function checkDesignFile(file, displayRoot = APP_ROOT) {
++  const source = await readFile(file, "utf8");
++  return { file: path.relative(displayRoot, file), findings: checkDesignSource(source) };
++}
++
++/** Metro middleware handler: GET /__design/check?name=<design>. */
++export async function handleDesignCheckRequest(req, res) {
++  const url = new URL(req.url, "http://localhost");
++  const name = url.searchParams.get("name") ?? "";
++  res.setHeader("Content-Type", "application/json");
++  res.setHeader("Cache-Control", "no-store");
++  if (!DESIGN_NAME_PATTERN.test(name)) {
++    res.statusCode = 400;
++    res.end(JSON.stringify({ error: "Expected ?name=<design-name>" }));
++    return;
++  }
++  const file = path.join(DESIGNS_DIR, `${name}.tsx`);
++  try {
++    res.end(JSON.stringify(await checkDesignFile(file)));
++  } catch {
++    res.statusCode = 404;
++    res.end(JSON.stringify({ error: `No design file for "${name}"` }));
++  }
++}
++
++async function main(argv) {
++  if (argv.includes("--help") || argv.includes("-h")) {
++    console.log(HELP);
++    return 0;
++  }
++  const json = argv.includes("--json");
++  const fileArgs = argv.filter((arg) => !arg.startsWith("--"));
++  const cwd = process.env.INIT_CWD ?? process.cwd();
++  const files =
++    fileArgs.length > 0 ? fileArgs.map((file) => path.resolve(cwd, file)) : await listDesignFiles();
++  const results = await Promise.all(files.map((file) => checkDesignFile(file, cwd)));
++  const total = results.reduce((sum, result) => sum + result.findings.length, 0);
++
++  if (json) {
++    console.log(JSON.stringify(results, null, 2));
++  } else {
++    for (const result of results) {
++      for (const finding of result.findings) {
++        console.log(
++          `${result.file}:${finding.line}:${finding.column}  ${finding.rule}  ${finding.message}`,
++        );
++        console.log(`    ${finding.excerpt}`);
++      }
++    }
++    console.log(
++      total === 0
++        ? `design:check: ${results.length} file(s) clean`
++        : `design:check: ${total} finding(s) in ${results.length} file(s)`,
++    );
++  }
++  return total === 0 ? 0 : 1;
++}
++
++if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
++  process.exitCode = await main(process.argv.slice(2));
++}
+diff --git a/packages/app/src/app/_layout.tsx b/packages/app/src/app/_layout.tsx
+index 99022863f..5e2cc9ced 100644
+--- a/packages/app/src/app/_layout.tsx
++++ b/packages/app/src/app/_layout.tsx
+@@ -8,7 +8,7 @@ import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
+ import { PortalProvider } from "@gorhom/portal";
+ import { LucideProvider } from "lucide-react-native";
+ import * as Linking from "expo-linking";
+-import { Stack, useNavigationContainerRef, usePathname, useRouter } from "expo-router";
++import { Slot, Stack, useNavigationContainerRef, usePathname, useRouter } from "expo-router";
+ import {
+   createContext,
+   type ReactNode,
+@@ -899,7 +899,44 @@ function RootAppTree() {
+   );
+ }
+ 
++// Dev-only design frame (docs/design-frame.md). Expo inlines EXPO_PUBLIC_* at build
++// time, so production bundles compile this branch away, and Metro leaves the
++// `app/design` routes out of the route tree unless the same flag is set.
++const DESIGN_FRAME_ENABLED = process.env.EXPO_PUBLIC_PASEO_DESIGN_FRAME === "1";
++
++function isDesignFramePathname(pathname: string): boolean {
++  return pathname === "/design" || pathname.startsWith("/design/");
++}
++
++/**
++ * Design previews render real components with no host. They get the same app-wide
++ * providers as the app, but skip host runtime bootstrap, app chrome, and the root
++ * stack, so no daemon is contacted and no startup redirect or workspace restore runs.
++ */
++function DesignFrameRootTree() {
++  return (
++    <GestureHandlerRootView style={flexStyle}>
++      <View style={layoutStyles.surfaceFill}>
++        <LucideProvider strokeWidth={ICON_STROKE_WIDTH}>
++          <RootProviders>
++            <Slot />
++            <FloatingPanelPortalHost />
++          </RootProviders>
++        </LucideProvider>
++      </View>
++    </GestureHandlerRootView>
++  );
++}
++
+ export default function RootLayout() {
++  const pathname = usePathname();
++  if (DESIGN_FRAME_ENABLED && isDesignFramePathname(pathname)) {
++    return <DesignFrameRootTree />;
++  }
++  return <AppRootLayout />;
++}
++
++function AppRootLayout() {
+   useEffect(() => installWebScrollbarStyles(), []);
+   useEffect(() => {
+     const subscription = AppState.addEventListener("change", (nextState) => {
+diff --git a/packages/app/src/app/design/[name].tsx b/packages/app/src/app/design/[name].tsx
+new file mode 100644
+index 000000000..1c39990d1
+--- /dev/null
++++ b/packages/app/src/app/design/[name].tsx
+@@ -0,0 +1,5 @@
++// Dev-only design frame. Metro excludes this directory unless
++// EXPO_PUBLIC_PASEO_DESIGN_FRAME=1 (docs/design-frame.md).
++import { DesignFrameScreen } from "@/design/frame/screens";
++
++export default DesignFrameScreen;
+diff --git a/packages/app/src/app/design/index.tsx b/packages/app/src/app/design/index.tsx
+new file mode 100644
+index 000000000..f13313f88
+--- /dev/null
++++ b/packages/app/src/app/design/index.tsx
+@@ -0,0 +1,5 @@
++// Dev-only design frame. Metro excludes this directory unless
++// EXPO_PUBLIC_PASEO_DESIGN_FRAME=1 (docs/design-frame.md).
++import { DesignIndexScreen } from "@/design/frame/screens";
++
++export default DesignIndexScreen;
+diff --git a/packages/app/src/appearance/provider.tsx b/packages/app/src/appearance/provider.tsx
+index 77addad9a..162b03bca 100644
+--- a/packages/app/src/appearance/provider.tsx
++++ b/packages/app/src/appearance/provider.tsx
+@@ -36,7 +36,8 @@ interface ApplyThemeInput {
+ 
+ const ContributedThemesContext = createContext<ContributedThemes | null>(null);
+ 
+-function applyTheme({ preference, contributedTheme }: ApplyThemeInput): void {
++/** The one path that puts a theme preference into Unistyles. The design frame reuses it. */
++export function applyTheme({ preference, contributedTheme }: ApplyThemeInput): void {
+   if (contributedTheme) {
+     const themeName = PLUGIN_THEME_NAMES[contributedTheme.theme.colorScheme];
+     UnistylesRuntime.updateTheme(themeName, () => contributedTheme.theme);
+diff --git a/packages/app/src/design/check/rules.test.ts b/packages/app/src/design/check/rules.test.ts
+new file mode 100644
+index 000000000..c1846a814
+--- /dev/null
++++ b/packages/app/src/design/check/rules.test.ts
+@@ -0,0 +1,61 @@
++import { describe, expect, it } from "vitest";
++import { checkDesignSource } from "./rules";
++
++function rulesOf(source: string): string[] {
++  return checkDesignSource(source).map((finding) => finding.rule);
++}
++
++describe("checkDesignSource", () => {
++  it("accepts token-only styles", () => {
++    const source = [
++      "const styles = StyleSheet.create((theme) => ({",
++      "  row: { padding: theme.spacing[4], gap: 0, borderRadius: theme.borderRadius.lg },",
++      "  label: { fontSize: theme.fontSize.sm, color: theme.colors.foregroundMuted },",
++      "}));",
++      "<Icon size={ICON_SIZE.md} />",
++    ].join("\n");
++    expect(checkDesignSource(source)).toEqual([]);
++  });
++
++  it("flags raw hex, rgb and hsl colors", () => {
++    expect(rulesOf(`color: "#fff", bg: 'rgba(0, 0, 0, 0.5)', x: "hsl(0 0% 0%)"`)).toEqual([
++      "raw-color",
++      "raw-color",
++      "raw-color",
++    ]);
++  });
++
++  it("flags palette use", () => {
++    expect(rulesOf("color: theme.colors.palette.zinc[500]")).toEqual(["palette"]);
++  });
++
++  it("flags literal spacing, type and radius values with position", () => {
++    const findings = checkDesignSource(
++      "a\n  view: { padding: 12, fontSize: 14, borderRadius: 8, fontWeight: '500' },",
++    );
++    expect(findings.map((finding) => [finding.line, finding.column, finding.message])).toEqual([
++      [2, 11, expect.stringContaining("padding: 12")],
++      [2, 24, expect.stringContaining("fontSize: 14")],
++      [2, 38, expect.stringContaining("borderRadius: 8")],
++      [2, 55, expect.stringContaining("fontWeight: 500")],
++    ]);
++  });
++
++  it("flags icon size literals and useUnistyles", () => {
++    expect(rulesOf("const { theme } = useUnistyles();\n<Mic size={14} />")).toEqual([
++      "use-unistyles",
++      "icon-size-literal",
++    ]);
++  });
++
++  it("ignores comments and lines marked to skip", () => {
++    const source = [
++      "// padding: 12 and #fff in a comment",
++      "/* useUnistyles() */",
++      "const url = 'https://example.com'; // gap: 4",
++      "// design-check-ignore-next-line",
++      "const swatch = '#123456';",
++    ].join("\n");
++    expect(checkDesignSource(source)).toEqual([]);
++  });
++});
+diff --git a/packages/app/src/design/check/rules.ts b/packages/app/src/design/check/rules.ts
+new file mode 100644
+index 000000000..b4710be23
+--- /dev/null
++++ b/packages/app/src/design/check/rules.ts
+@@ -0,0 +1,171 @@
++// Design-file rules for `npm run design:check` and the design frame's Check button.
++// Plain TypeScript with no imports so Node can load it directly (type stripping).
++
++export type DesignCheckRule =
++  | "raw-color"
++  | "palette"
++  | "style-literal"
++  | "icon-size-literal"
++  | "use-unistyles";
++
++export interface DesignCheckFinding {
++  rule: DesignCheckRule;
++  line: number;
++  column: number;
++  message: string;
++  excerpt: string;
++}
++
++const IGNORE_NEXT_LINE = "design-check-ignore-next-line";
++
++// Style keys whose numbers must come from theme tokens (spacing, fontSize,
++// lineHeight, fontWeight, borderRadius, borderWidth). `0` is allowed.
++const TOKEN_STYLE_KEYS = [
++  "padding",
++  "paddingTop",
++  "paddingBottom",
++  "paddingLeft",
++  "paddingRight",
++  "paddingHorizontal",
++  "paddingVertical",
++  "paddingStart",
++  "paddingEnd",
++  "margin",
++  "marginTop",
++  "marginBottom",
++  "marginLeft",
++  "marginRight",
++  "marginHorizontal",
++  "marginVertical",
++  "marginStart",
++  "marginEnd",
++  "gap",
++  "rowGap",
++  "columnGap",
++  "fontSize",
++  "lineHeight",
++  "fontWeight",
++  "borderRadius",
++  "borderTopLeftRadius",
++  "borderTopRightRadius",
++  "borderBottomLeftRadius",
++  "borderBottomRightRadius",
++  "borderWidth",
++  "borderTopWidth",
++  "borderBottomWidth",
++  "borderLeftWidth",
++  "borderRightWidth",
++];
++
++interface Matcher {
++  rule: DesignCheckRule;
++  pattern: RegExp;
++  message: (match: RegExpExecArray) => string;
++}
++
++const MATCHERS: Matcher[] = [
++  {
++    rule: "raw-color",
++    pattern: /["'`]#[0-9a-fA-F]{3,8}["'`]/g,
++    message: (m) => `Raw hex color ${m[0]}. Use a theme.colors token.`,
++  },
++  {
++    rule: "raw-color",
++    pattern: /\b(?:rgba?|hsla?)\s*\(/g,
++    message: (m) => `Raw ${m[0].replace(/\s*\($/, "")}() color. Use a theme.colors token.`,
++  },
++  {
++    rule: "palette",
++    pattern: /\bpalette\s*(?:\.|\[)/g,
++    message: () => "palette.* is the raw scale. Use a semantic theme.colors token.",
++  },
++  {
++    rule: "style-literal",
++    pattern: new RegExp(
++      `\\b(${TOKEN_STYLE_KEYS.join("|")})\\s*:\\s*["']?(-?(?:[1-9]\\d*|0?\\.\\d+)(?:\\.\\d+)?)["']?`,
++      "g",
++    ),
++    message: (m) => `${m[1]}: ${m[2]} is a literal. Use the theme token (spacing, fontSize, ...).`,
++  },
++  {
++    rule: "icon-size-literal",
++    pattern: /\bsize=\{\s*-?\d+(?:\.\d+)?\s*\}/g,
++    message: (m) => `${m[0]} is a literal icon size. Use theme.iconSize / ICON_SIZE.`,
++  },
++  {
++    rule: "use-unistyles",
++    pattern: /\buseUnistyles\b/g,
++    message: () => "useUnistyles() is banned (docs/unistyles.md). Use StyleSheet.create.",
++  },
++];
++
++/** Blank out comments while keeping line and column positions stable. */
++function maskComments(source: string): string {
++  let out = "";
++  let i = 0;
++  let quote: string | null = null;
++  while (i < source.length) {
++    const char = source[i];
++    const next = source[i + 1];
++    if (quote) {
++      out += char;
++      if (char === "\\") {
++        out += next ?? "";
++        i += 2;
++        continue;
++      }
++      if (char === quote) quote = null;
++      i += 1;
++      continue;
++    }
++    if (char === '"' || char === "'" || char === "`") {
++      quote = char;
++      out += char;
++      i += 1;
++      continue;
++    }
++    if (char === "/" && next === "/") {
++      while (i < source.length && source[i] !== "\n") {
++        out += " ";
++        i += 1;
++      }
++      continue;
++    }
++    if (char === "/" && next === "*") {
++      while (i < source.length && !(source[i] === "*" && source[i + 1] === "/")) {
++        out += source[i] === "\n" ? "\n" : " ";
++        i += 1;
++      }
++      out += "  ";
++      i += 2;
++      continue;
++    }
++    out += char;
++    i += 1;
++  }
++  return out;
++}
++
++export function checkDesignSource(source: string): DesignCheckFinding[] {
++  const rawLines = source.split("\n");
++  const lines = maskComments(source).split("\n");
++  const findings: DesignCheckFinding[] = [];
++  lines.forEach((line, index) => {
++    if (index > 0 && rawLines[index - 1]?.includes(IGNORE_NEXT_LINE)) return;
++    for (const matcher of MATCHERS) {
++      matcher.pattern.lastIndex = 0;
++      let match = matcher.pattern.exec(line);
++      while (match) {
++        findings.push({
++          rule: matcher.rule,
++          line: index + 1,
++          column: match.index + 1,
++          message: matcher.message(match),
++          excerpt: (rawLines[index] ?? "").trim(),
++        });
++        match = matcher.pattern.exec(line);
++      }
++    }
++  });
++  return findings.sort((a, b) => a.line - b.line || a.column - b.column);
++}
+diff --git a/packages/app/src/design/designs/catalog.tsx b/packages/app/src/design/designs/catalog.tsx
+new file mode 100644
+index 000000000..e680aa3b7
+--- /dev/null
++++ b/packages/app/src/design/designs/catalog.tsx
+@@ -0,0 +1,634 @@
++import { useMemo, useState } from "react";
++import { Text, useWindowDimensions, View } from "react-native";
++import { StyleSheet, UnistylesRuntime, withUnistyles } from "react-native-unistyles";
++import { Mic, Plus, Settings } from "lucide-react-native";
++import { Alert } from "@/components/ui/alert";
++import { Button } from "@/components/ui/button";
++import { buttonControlHeight } from "@/components/ui/control-geometry";
++import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
++import { DropdownTrigger } from "@/components/ui/dropdown-trigger";
++import { ExternalLink } from "@/components/ui/external-link";
++import { Field, FormTextInput } from "@/components/ui/form-field";
++import { LoadingSpinner } from "@/components/ui/loading-spinner";
++import { SearchField } from "@/components/ui/search-field";
++import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
++import { Shortcut } from "@/components/ui/shortcut";
++import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
++import { Switch } from "@/components/ui/switch";
++import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
++import { VolumeMeter } from "@/components/volume-meter";
++import { isCompactBreakpoint, useIsCompactFormFactor } from "@/constants/layout";
++import {
++  BORDER_RADIUS,
++  BORDER_WIDTH,
++  FONT_WEIGHT,
++  ICON_SIZE,
++  lightTheme,
++  OPACITY,
++  SPACING,
++  type Theme,
++} from "@/styles/theme";
++import { useDesignFrame } from "@/design/frame/context";
++import { DesignPage, DesignRow, DesignSection, DesignSpecimen } from "@/design/kit";
++import type { DesignDefinition } from "@/design/types";
++
++// The catalog renders the live theme: every swatch, bar and sample is painted from
++// a StyleSheet.create((theme) => ...) factory, and the printed values are read from
++// the active Unistyles theme. The frame remounts this page on theme change.
++
++type Colors = Theme["colors"];
++type ColorToken = {
++  [Key in keyof Colors]: Colors[Key] extends string ? Key : never;
++}[keyof Colors];
++type SpacingToken = keyof typeof SPACING;
++type FontSizeToken = keyof Theme["fontSize"];
++type FontWeightToken = keyof typeof FONT_WEIGHT;
++type IconSizeToken = keyof typeof ICON_SIZE;
++type RadiusToken = keyof typeof BORDER_RADIUS;
++type BorderWidthToken = keyof typeof BORDER_WIDTH;
++type OpacityToken = keyof typeof OPACITY;
++type ShadowToken = keyof Theme["shadow"];
++type ControlSize = "xs" | "sm" | "md";
++
++// Token names are the same in every theme; values come from the active theme.
++const COLOR_TOKENS = (Object.keys(lightTheme.colors) as (keyof Colors)[]).filter(
++  (key): key is ColorToken => typeof lightTheme.colors[key] === "string",
++);
++const SPACING_TOKENS = (Object.keys(SPACING).map(Number) as SpacingToken[]).sort((a, b) => a - b);
++const FONT_SIZE_TOKENS = Object.keys(lightTheme.fontSize) as FontSizeToken[];
++const FONT_WEIGHT_TOKENS = Object.keys(FONT_WEIGHT) as FontWeightToken[];
++const ICON_SIZE_TOKENS = Object.keys(ICON_SIZE) as IconSizeToken[];
++const RADIUS_TOKENS = Object.keys(BORDER_RADIUS) as RadiusToken[];
++const BORDER_WIDTH_TOKENS = Object.keys(BORDER_WIDTH).map(Number) as BorderWidthToken[];
++const OPACITY_TOKENS = Object.keys(OPACITY).map(Number) as OpacityToken[];
++const SHADOW_TOKENS = Object.keys(lightTheme.shadow) as ShadowToken[];
++const CONTROL_SIZES: ControlSize[] = ["xs", "sm", "md"];
++const BUTTON_VARIANTS = ["default", "secondary", "outline", "ghost", "destructive"] as const;
++const BUTTON_SIZES = ["xs", "sm", "md", "lg"] as const;
++const BADGE_VARIANTS: StatusBadgeVariant[] = ["success", "warning", "error", "muted"];
++const ALERT_VARIANTS = ["default", "info", "success", "warning", "error"] as const;
++const SEGMENT_OPTIONS: SegmentedControlOption<string>[] = [
++  { value: "one", label: "One" },
++  { value: "two", label: "Two" },
++  { value: "three", label: "Three" },
++];
++
++const mutedColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
++const foregroundColor = (theme: Theme) => ({ color: theme.colors.foreground });
++const ThemedMic = withUnistyles(Mic);
++const ThemedSettings = withUnistyles(Settings);
++const ThemedSpinner = withUnistyles(LoadingSpinner, mutedColor);
++
++function activeTheme(): Theme {
++  return UnistylesRuntime.getTheme() as Theme;
++}
++
++function LayoutInfo() {
++  const { width, height } = useWindowDimensions();
++  const isCompact = useIsCompactFormFactor();
++  const { device } = useDesignFrame();
++  const breakpoint = UnistylesRuntime.breakpoint ?? "none";
++  return (
++    <DesignSection title="Layout" description="What this preview resolved to">
++      <View style={styles.keyValues} testID="design-layout-info">
++        <KeyValue label="Device" value={device} />
++        <KeyValue label="Window" value={`${width} × ${height}`} />
++        <KeyValue label="Breakpoint" value={breakpoint} />
++        <KeyValue
++          label="Form factor"
++          value={isCompact ? "compact" : "wide"}
++          testID="design-form-factor"
++        />
++        <KeyValue
++          label="Compact by breakpoint"
++          value={String(isCompactBreakpoint(UnistylesRuntime.breakpoint))}
++        />
++        <KeyValue label="Theme" value={UnistylesRuntime.themeName ?? "none"} />
++      </View>
++    </DesignSection>
++  );
++}
++
++function KeyValue({ label, value, testID }: { label: string; value: string; testID?: string }) {
++  return (
++    <View style={styles.keyValue}>
++      <Text style={styles.caption}>{label}</Text>
++      <Text style={styles.value} testID={testID}>
++        {value}
++      </Text>
++    </View>
++  );
++}
++
++function ColorTokens() {
++  const theme = activeTheme();
++  return (
++    <DesignSection title="Colors" description="theme.colors — semantic tokens only">
++      <View style={styles.swatchGrid}>
++        {COLOR_TOKENS.map((token) => (
++          <View key={token} style={styles.swatchCell}>
++            <View style={styles.swatch(token)} />
++            <Text style={styles.value} numberOfLines={1}>
++              {token}
++            </Text>
++            <Text style={styles.caption} numberOfLines={1}>
++              {theme.colors[token]}
++            </Text>
++          </View>
++        ))}
++      </View>
++    </DesignSection>
++  );
++}
++
++function SpacingTokens() {
++  const theme = activeTheme();
++  return (
++    <DesignSection title="Spacing" description="theme.spacing">
++      {SPACING_TOKENS.map((token) => (
++        <View key={token} style={styles.scaleRow}>
++          <Text style={styles.scaleName}>spacing[{token}]</Text>
++          <Text style={styles.scaleValue}>{theme.spacing[token]}</Text>
++          <View style={styles.spacingBar(token)} />
++        </View>
++      ))}
++    </DesignSection>
++  );
++}
++
++function TypeTokens() {
++  const theme = activeTheme();
++  return (
++    <DesignSection title="Type" description="theme.fontSize and theme.fontWeight">
++      {FONT_SIZE_TOKENS.map((token) => (
++        <View key={token} style={styles.scaleRow}>
++          <Text style={styles.scaleName}>fontSize.{token}</Text>
++          <Text style={styles.scaleValue}>{theme.fontSize[token]}</Text>
++          <Text style={styles.fontSizeSample(token)}>Run the agent</Text>
++        </View>
++      ))}
++      {FONT_WEIGHT_TOKENS.map((token) => (
++        <View key={token} style={styles.scaleRow}>
++          <Text style={styles.scaleName}>fontWeight.{token}</Text>
++          <Text style={styles.scaleValue}>{theme.fontWeight[token]}</Text>
++          <Text style={styles.fontWeightSample(token)}>Run the agent</Text>
++        </View>
++      ))}
++    </DesignSection>
++  );
++}
++
++function IconTokens() {
++  return (
++    <DesignSection title="Icon sizes" description="theme.iconSize">
++      <DesignRow>
++        {ICON_SIZE_TOKENS.map((token) => (
++          <DesignSpecimen key={token} label={`${token} · ${ICON_SIZE[token]}`}>
++            <ThemedMic size={ICON_SIZE[token]} uniProps={foregroundColor} />
++          </DesignSpecimen>
++        ))}
++      </DesignRow>
++    </DesignSection>
++  );
++}
++
++function ShapeTokens() {
++  const theme = activeTheme();
++  return (
++    <DesignSection title="Radii, borders, shadows, opacity">
++      <DesignRow>
++        {RADIUS_TOKENS.map((token) => (
++          <DesignSpecimen key={token} label={`radius.${token} · ${theme.borderRadius[token]}`}>
++            <View style={styles.radiusBox(token)} />
++          </DesignSpecimen>
++        ))}
++      </DesignRow>
++      <DesignRow>
++        {BORDER_WIDTH_TOKENS.map((token) => (
++          <DesignSpecimen key={`border-${token}`} label={`borderWidth[${token}] · border`}>
++            <View style={styles.borderBox(token, "border")} />
++          </DesignSpecimen>
++        ))}
++        {BORDER_WIDTH_TOKENS.map((token) => (
++          <DesignSpecimen key={`accent-${token}`} label={`borderWidth[${token}] · borderAccent`}>
++            <View style={styles.borderBox(token, "borderAccent")} />
++          </DesignSpecimen>
++        ))}
++      </DesignRow>
++      <DesignRow>
++        {SHADOW_TOKENS.map((token) => (
++          <DesignSpecimen key={token} label={`shadow.${token}`}>
++            <View style={styles.shadowBox(token)} />
++          </DesignSpecimen>
++        ))}
++        {OPACITY_TOKENS.map((token) => (
++          <DesignSpecimen key={token} label={`opacity[${token}] · ${theme.opacity[token]}`}>
++            <View style={styles.opacityBox(token)} />
++          </DesignSpecimen>
++        ))}
++      </DesignRow>
++    </DesignSection>
++  );
++}
++
++function ControlSizes() {
++  const [segment, setSegment] = useState("one");
++  return (
++    <DesignSection
++      title="Control sizes"
++      description="control-geometry.ts — a button, segmented control and dropdown of one size share height, label size and radius"
++    >
++      {CONTROL_SIZES.map((size) => (
++        <DesignRow key={size}>
++          <DesignSpecimen label={`${size} · ${buttonControlHeight[size]}px`}>
++            <Button size={size}>Button</Button>
++          </DesignSpecimen>
++          <DesignSpecimen label="SegmentedControl">
++            <SegmentedControl
++              size={size}
++              options={SEGMENT_OPTIONS}
++              value={segment}
++              onValueChange={setSegment}
++            />
++          </DesignSpecimen>
++          <DesignSpecimen label="DropdownTrigger">
++            <DropdownMenu>
++              <DropdownTrigger size={size} accessibilityRole="button">
++                Option
++              </DropdownTrigger>
++              <DropdownMenuContent side="bottom" align="start" width={200}>
++                <DropdownMenuItem selected>Option</DropdownMenuItem>
++                <DropdownMenuItem>Other option</DropdownMenuItem>
++              </DropdownMenuContent>
++            </DropdownMenu>
++          </DesignSpecimen>
++        </DesignRow>
++      ))}
++    </DesignSection>
++  );
++}
++
++function Tokens() {
++  return (
++    <DesignPage>
++      <LayoutInfo />
++      <ColorTokens />
++      <SpacingTokens />
++      <TypeTokens />
++      <IconTokens />
++      <ShapeTokens />
++    </DesignPage>
++  );
++}
++
++function Controls() {
++  return (
++    <DesignPage>
++      <LayoutInfo />
++      <ControlSizes />
++      <ButtonExamples />
++    </DesignPage>
++  );
++}
++
++function ButtonExamples() {
++  const plusIcon = useMemo(() => <ThemedSettings size={ICON_SIZE.sm} uniProps={mutedColor} />, []);
++  return (
++    <DesignSection title="Button" description="Variants by size, then icon, loading and disabled">
++      {BUTTON_VARIANTS.map((variant) => (
++        <DesignRow key={variant}>
++          {BUTTON_SIZES.map((size) => (
++            <DesignSpecimen key={size} label={`${variant} · ${size}`}>
++              <Button variant={variant} size={size}>
++                Save
++              </Button>
++            </DesignSpecimen>
++          ))}
++        </DesignRow>
++      ))}
++      <DesignRow>
++        <DesignSpecimen label="leftIcon (component)">
++          <Button size="sm" leftIcon={Plus}>
++            Add host
++          </Button>
++        </DesignSpecimen>
++        <DesignSpecimen label="leftIcon (element)">
++          <Button size="sm" variant="outline" leftIcon={plusIcon}>
++            Settings
++          </Button>
++        </DesignSpecimen>
++        <DesignSpecimen label="loading">
++          <Button size="sm" loading>
++            Saving...
++          </Button>
++        </DesignSpecimen>
++        <DesignSpecimen label="disabled">
++          <Button size="sm" disabled>
++            Save
++          </Button>
++        </DesignSpecimen>
++      </DesignRow>
++    </DesignSection>
++  );
++}
++
++function VolumeMeterExamples() {
++  return (
++    <DesignSection
++      title="VolumeMeter"
++      description="variant × orientation × idle / speaking / muted"
++    >
++      {(["default", "compact"] as const).map((variant) => (
++        <DesignRow key={variant}>
++          {(["horizontal", "vertical"] as const).map((orientation) => (
++            <VolumeMeterTriplet key={orientation} variant={variant} orientation={orientation} />
++          ))}
++        </DesignRow>
++      ))}
++    </DesignSection>
++  );
++}
++
++function VolumeMeterTriplet({
++  variant,
++  orientation,
++}: {
++  variant: "default" | "compact";
++  orientation: "horizontal" | "vertical";
++}) {
++  return (
++    <>
++      <DesignSpecimen label={`${variant} ${orientation} · idle`}>
++        <VolumeMeter volume={0} variant={variant} orientation={orientation} />
++      </DesignSpecimen>
++      <DesignSpecimen label={`${variant} ${orientation} · speaking`}>
++        <VolumeMeter volume={0.6} isSpeaking variant={variant} orientation={orientation} />
++      </DesignSpecimen>
++      <DesignSpecimen label={`${variant} ${orientation} · muted`}>
++        <VolumeMeter volume={0} isMuted variant={variant} orientation={orientation} />
++      </DesignSpecimen>
++    </>
++  );
++}
++
++function FeedbackExamples() {
++  return (
++    <>
++      <DesignSection title="StatusBadge">
++        <DesignRow>
++          {BADGE_VARIANTS.map((variant) => (
++            <DesignSpecimen key={variant} label={`${variant} · sm / xs`}>
++              <View style={styles.inline}>
++                <StatusBadge label="Merged" variant={variant} />
++                <StatusBadge label="Merged" variant={variant} size="xs" />
++              </View>
++            </DesignSpecimen>
++          ))}
++        </DesignRow>
++      </DesignSection>
++      <DesignSection title="Alert">
++        {ALERT_VARIANTS.map((variant) => (
++          <Alert
++            key={variant}
++            variant={variant}
++            size="sm"
++            title={`${variant} alert`}
++            description="Restarts the daemon process. The app will reconnect automatically."
++          />
++        ))}
++      </DesignSection>
++      <DesignSection title="LoadingSpinner">
++        <DesignRow>
++          <DesignSpecimen label="small">
++            <ThemedSpinner size="small" />
++          </DesignSpecimen>
++          <DesignSpecimen label="large">
++            <ThemedSpinner size="large" />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
++    </>
++  );
++}
++
++function OverlayExamples() {
++  const tooltipContent = useMemo(
++    () => (
++      <TooltipContent side="bottom">
++        <Text style={styles.tooltipText}>Open settings</Text>
++      </TooltipContent>
++    ),
++    [],
++  );
++  return (
++    <>
++      <DesignSection title="Tooltip" description="Hover on desktop; disabled on compact by default">
++        <DesignRow>
++          <Tooltip delayDuration={0}>
++            <TooltipTrigger asChild>
++              <Button size="sm" variant="outline">
++                Hover me
++              </Button>
++            </TooltipTrigger>
++            {tooltipContent}
++          </Tooltip>
++        </DesignRow>
++      </DesignSection>
++      <DesignSection title="Shortcut" description="Hidden on compact and native, as in the app">
++        <DesignRow>
++          <DesignSpecimen label="mod K">
++            <Shortcut keys={["mod", "k"]} />
++          </DesignSpecimen>
++          <DesignSpecimen label="mod shift P">
++            <Shortcut keys={["mod", "shift", "p"]} />
++          </DesignSpecimen>
++          <DesignSpecimen label="chord g, s">
++            <Shortcut chord={[["g"], ["s"]]} />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
++      <DesignSection title="DropdownMenu">
++        <DesignRow>
++          <DropdownMenu>
++            <DropdownTrigger accessibilityRole="button">Dark</DropdownTrigger>
++            <DropdownMenuContent side="bottom" align="start" width={200}>
++              <DropdownMenuItem selected>Dark</DropdownMenuItem>
++              <DropdownMenuItem>Light</DropdownMenuItem>
++              <DropdownMenuItem>Auto</DropdownMenuItem>
++            </DropdownMenuContent>
++          </DropdownMenu>
++        </DesignRow>
++      </DesignSection>
++    </>
++  );
++}
++
++function InputExamples() {
++  const [enabled, setEnabled] = useState(true);
++  const [query, setQuery] = useState("");
++  return (
++    <>
++      <DesignSection title="Switch">
++        <DesignRow>
++          <DesignSpecimen label={enabled ? "on" : "off"}>
++            <Switch value={enabled} onValueChange={setEnabled} accessibilityLabel="Example" />
++          </DesignSpecimen>
++          <DesignSpecimen label="disabled">
++            <Switch value={false} disabled accessibilityLabel="Disabled example" />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
++      <DesignSection title="SearchField">
++        <View style={styles.field}>
++          <SearchField
++            value={query}
++            onChangeText={setQuery}
++            placeholder="Search workspaces"
++            clearAccessibilityLabel="Clear search"
++          />
++        </View>
++      </DesignSection>
++      <DesignSection title="Field + FormTextInput">
++        <View style={styles.field}>
++          <Field label="Host name" hint="Shown in the sidebar">
++            <FormTextInput initialValue="" placeholder="My laptop" />
++          </Field>
++        </View>
++      </DesignSection>
++      <DesignSection title="ExternalLink">
++        <ExternalLink href="https://paseo.sh" label="paseo.sh" />
++      </DesignSection>
++    </>
++  );
++}
++
++function Components() {
++  return (
++    <DesignPage>
++      <LayoutInfo />
++      <VolumeMeterExamples />
++      <FeedbackExamples />
++      <OverlayExamples />
++      <InputExamples />
++    </DesignPage>
++  );
++}
++
++const design: DesignDefinition = {
++  title: "Catalog",
++  states: [
++    { id: "tokens", label: "Tokens", render: Tokens },
++    { id: "controls", label: "Controls and buttons", render: Controls },
++    { id: "components", label: "Components", render: Components },
++  ],
++};
++
++export default design;
++
++const styles = StyleSheet.create((theme) => ({
++  keyValues: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    gap: theme.spacing[6],
++  },
++  keyValue: {
++    gap: theme.spacing[1],
++  },
++  caption: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++  value: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.sm,
++    fontFamily: theme.fontFamily.mono,
++  },
++  swatchGrid: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    gap: theme.spacing[4],
++  },
++  swatchCell: {
++    width: theme.spacing[32],
++    gap: theme.spacing[1],
++  },
++  swatch: (token: ColorToken) => ({
++    height: theme.spacing[12],
++    borderRadius: theme.borderRadius.lg,
++    borderWidth: theme.borderWidth[1],
++    borderColor: theme.colors.border,
++    backgroundColor: theme.colors[token],
++  }),
++  scaleRow: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[4],
++  },
++  scaleName: {
++    width: theme.spacing[32],
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++    fontFamily: theme.fontFamily.mono,
++  },
++  scaleValue: {
++    width: theme.spacing[12],
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.sm,
++    fontFamily: theme.fontFamily.mono,
++  },
++  spacingBar: (token: SpacingToken) => ({
++    width: theme.spacing[token],
++    height: theme.spacing[4],
++    backgroundColor: theme.colors.accent,
++  }),
++  fontSizeSample: (token: FontSizeToken) => ({
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize[token],
++  }),
++  fontWeightSample: (token: FontWeightToken) => ({
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.base,
++    fontWeight: theme.fontWeight[token],
++  }),
++  radiusBox: (token: RadiusToken) => ({
++    width: theme.spacing[12],
++    height: theme.spacing[12],
++    borderRadius: theme.borderRadius[token],
++    backgroundColor: theme.colors.surface3,
++  }),
++  borderBox: (token: BorderWidthToken, color: "border" | "borderAccent") => ({
++    width: theme.spacing[12],
++    height: theme.spacing[12],
++    borderRadius: theme.borderRadius.lg,
++    borderWidth: theme.borderWidth[token],
++    borderColor: theme.colors[color],
++    backgroundColor: theme.colors.surface1,
++  }),
++  shadowBox: (token: ShadowToken) => ({
++    width: theme.spacing[12],
++    height: theme.spacing[12],
++    borderRadius: theme.borderRadius.lg,
++    backgroundColor: theme.colors.surface1,
++    ...theme.shadow[token],
++  }),
++  opacityBox: (token: OpacityToken) => ({
++    width: theme.spacing[12],
++    height: theme.spacing[12],
++    borderRadius: theme.borderRadius.lg,
++    backgroundColor: theme.colors.foreground,
++    opacity: theme.opacity[token],
++  }),
++  inline: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++  },
++  tooltipText: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.sm,
++  },
++  field: {
++    width: "100%",
++    maxWidth: theme.spacing[32] * 3,
++  },
++}));
+diff --git a/packages/app/src/design/designs/volume-meter.tsx b/packages/app/src/design/designs/volume-meter.tsx
+new file mode 100644
+index 000000000..c92cf2c9c
+--- /dev/null
++++ b/packages/app/src/design/designs/volume-meter.tsx
+@@ -0,0 +1,109 @@
++import { useEffect, useState } from "react";
++import { VolumeMeter } from "@/components/volume-meter";
++import { DesignPage, DesignRow, DesignSection, DesignSpecimen } from "@/design/kit";
++import type { DesignDefinition } from "@/design/types";
++
++// The VolumeMeter as it ships today, in every variant and orientation.
++// Speaking and loud feed it a jittered level so the bars move like live input.
++
++interface MeterInput {
++  level: number;
++  isSpeaking: boolean;
++  isMuted: boolean;
++}
++
++const SAMPLE_INTERVAL_MS = 90;
++
++function useSimulatedVolume(level: number): number {
++  const [volume, setVolume] = useState(level);
++  useEffect(() => {
++    if (level === 0) {
++      setVolume(0);
++      return;
++    }
++    const handle = setInterval(() => {
++      const jitter = (Math.random() - 0.5) * level * 0.8;
++      setVolume(Math.min(1, Math.max(0, level + jitter)));
++    }, SAMPLE_INTERVAL_MS);
++    return () => clearInterval(handle);
++  }, [level]);
++  return volume;
++}
++
++function MeterVariants({ level, isSpeaking, isMuted }: MeterInput) {
++  const volume = useSimulatedVolume(level);
++  return (
++    <DesignPage>
++      <DesignSection title="Default" description="Realtime voice overlay size">
++        <DesignRow>
++          <DesignSpecimen label="Horizontal">
++            <VolumeMeter
++              volume={volume}
++              isSpeaking={isSpeaking}
++              isMuted={isMuted}
++              orientation="horizontal"
++            />
++          </DesignSpecimen>
++          <DesignSpecimen label="Vertical">
++            <VolumeMeter
++              volume={volume}
++              isSpeaking={isSpeaking}
++              isMuted={isMuted}
++              orientation="vertical"
++            />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
++      <DesignSection title="Compact" description="Dictation and inline size">
++        <DesignRow>
++          <DesignSpecimen label="Horizontal">
++            <VolumeMeter
++              volume={volume}
++              isSpeaking={isSpeaking}
++              isMuted={isMuted}
++              orientation="horizontal"
++              variant="compact"
++            />
++          </DesignSpecimen>
++          <DesignSpecimen label="Vertical">
++            <VolumeMeter
++              volume={volume}
++              isSpeaking={isSpeaking}
++              isMuted={isMuted}
++              orientation="vertical"
++              variant="compact"
++            />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++function Idle() {
++  return <MeterVariants level={0} isSpeaking={false} isMuted={false} />;
++}
++
++function Speaking() {
++  return <MeterVariants level={0.35} isSpeaking isMuted={false} />;
++}
++
++function Loud() {
++  return <MeterVariants level={0.9} isSpeaking isMuted={false} />;
++}
++
++function Muted() {
++  return <MeterVariants level={0} isSpeaking={false} isMuted />;
++}
++
++const design: DesignDefinition = {
++  title: "Volume meter",
++  states: [
++    { id: "idle", label: "Idle", render: Idle },
++    { id: "speaking", label: "Speaking", render: Speaking },
++    { id: "loud", label: "Loud", render: Loud },
++    { id: "muted", label: "Muted", render: Muted },
++  ],
++};
++
++export default design;
+diff --git a/packages/app/src/design/frame/apply-design-theme.ts b/packages/app/src/design/frame/apply-design-theme.ts
+new file mode 100644
+index 000000000..f07205133
+--- /dev/null
++++ b/packages/app/src/design/frame/apply-design-theme.ts
+@@ -0,0 +1,25 @@
++import { applyAppearance } from "@/appearance/apply";
++import { applyTheme } from "@/appearance/provider";
++import { DEFAULT_CLIENT_SETTINGS, resolveContentMaxWidth } from "@/hooks/use-settings";
++import { defaultContentFontSize, defaultUiBaseFontSize } from "@/hooks/use-settings/storage";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDevice } from "@/design/types";
++
++/**
++ * Apply a theme through the app's own appearance path, with fresh-install appearance
++ * defaults. Phone and tablet previews take the native defaults (15px interface, 16px
++ * content) so a phone frame on web reads like the phone app, not like desktop web.
++ */
++export function applyDesignTheme(theme: ThemePreference, device: DesignDevice | null): void {
++  applyTheme({ preference: theme, contributedTheme: null });
++  const native = device === "phone" || device === "tablet";
++  applyAppearance({
++    uiFontFamily: DEFAULT_CLIENT_SETTINGS.uiFontFamily,
++    monoFontFamily: DEFAULT_CLIENT_SETTINGS.monoFontFamily,
++    uiBaseFontSize: defaultUiBaseFontSize(native),
++    contentFontSize: defaultContentFontSize(native),
++    codeFontSize: DEFAULT_CLIENT_SETTINGS.codeFontSize,
++    contentMaxWidth: resolveContentMaxWidth(DEFAULT_CLIENT_SETTINGS),
++    syntaxTheme: DEFAULT_CLIENT_SETTINGS.syntaxTheme,
++  });
++}
+diff --git a/packages/app/src/design/frame/check-panel.tsx b/packages/app/src/design/frame/check-panel.tsx
+new file mode 100644
+index 000000000..c7ea9499b
+--- /dev/null
++++ b/packages/app/src/design/frame/check-panel.tsx
+@@ -0,0 +1,92 @@
++import { useMemo } from "react";
++import { Text, View } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import { Alert } from "@/components/ui/alert";
++import type { DesignCheckFinding } from "@/design/check/rules";
++
++export interface DesignCheckResult {
++  file: string;
++  findings: DesignCheckFinding[];
++}
++
++export type DesignCheckStatus =
++  | { kind: "idle" }
++  | { kind: "running" }
++  | { kind: "done"; result: DesignCheckResult }
++  | { kind: "error"; message: string };
++
++/** Ask the Metro dev server to run `design:check` on this design's file. */
++export async function runDesignCheck(name: string): Promise<DesignCheckResult> {
++  const response = await fetch(`/__design/check?name=${encodeURIComponent(name)}`);
++  const body = (await response.json()) as Partial<DesignCheckResult> & { error?: string };
++  if (!response.ok || !body.file || !body.findings) {
++    throw new Error(body.error ?? `Check failed with HTTP ${response.status}`);
++  }
++  return { file: body.file, findings: body.findings };
++}
++
++export function DesignCheckPanel({ status }: { status: DesignCheckStatus }) {
++  if (status.kind === "idle" || status.kind === "running") return null;
++  if (status.kind === "error") {
++    return (
++      <View style={styles.panel}>
++        <Alert variant="error" size="sm" title="Check unavailable" description={status.message} />
++      </View>
++    );
++  }
++  const { file, findings } = status.result;
++  if (findings.length === 0) {
++    return (
++      <View style={styles.panel} testID="design-check-result">
++        <Alert
++          variant="success"
++          size="sm"
++          title="Check passed"
++          description={`${file} uses only theme tokens`}
++        />
++      </View>
++    );
++  }
++  return <FindingsAlert file={file} findings={findings} />;
++}
++
++function FindingsAlert({ file, findings }: DesignCheckResult) {
++  const description = useMemo(() => <FindingList findings={findings} />, [findings]);
++  return (
++    <View style={styles.panel} testID="design-check-result">
++      <Alert
++        variant="warning"
++        size="sm"
++        title={`${findings.length} finding${findings.length === 1 ? "" : "s"} in ${file}`}
++        description={description}
++      />
++    </View>
++  );
++}
++
++function FindingList({ findings }: { findings: DesignCheckFinding[] }) {
++  return (
++    <View style={styles.list}>
++      {findings.map((finding) => (
++        <Text key={`${finding.line}:${finding.column}:${finding.rule}`} style={styles.finding}>
++          {finding.line}:{finding.column} {finding.rule} — {finding.message}
++        </Text>
++      ))}
++    </View>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  panel: {
++    paddingHorizontal: theme.spacing[4],
++    paddingTop: theme.spacing[3],
++  },
++  list: {
++    gap: theme.spacing[1],
++  },
++  finding: {
++    color: theme.colors.foregroundMuted,
++    fontFamily: theme.fontFamily.mono,
++    fontSize: theme.fontSize.sm,
++  },
++}));
+diff --git a/packages/app/src/design/frame/context.tsx b/packages/app/src/design/frame/context.tsx
+new file mode 100644
+index 000000000..206c12cb5
+--- /dev/null
++++ b/packages/app/src/design/frame/context.tsx
+@@ -0,0 +1,20 @@
++import { createContext, useContext } from "react";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDevice } from "@/design/types";
++
++export interface DesignFrameContextValue {
++  device: DesignDevice;
++  theme: ThemePreference;
++}
++
++const DesignFrameContext = createContext<DesignFrameContextValue>({
++  device: "desktop",
++  theme: "dark",
++});
++
++export const DesignFrameContextProvider = DesignFrameContext.Provider;
++
++/** The device and theme this preview is rendering for. */
++export function useDesignFrame(): DesignFrameContextValue {
++  return useContext(DesignFrameContext);
++}
+diff --git a/packages/app/src/design/frame/device-frame.tsx b/packages/app/src/design/frame/device-frame.tsx
+new file mode 100644
+index 000000000..2b982b700
+--- /dev/null
++++ b/packages/app/src/design/frame/device-frame.tsx
+@@ -0,0 +1,50 @@
++import { createElement, useCallback, useMemo, useState } from "react";
++import { View } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDefinition, DesignDevice } from "@/design/types";
++import { DesignFrameContextProvider } from "@/design/frame/context";
++import type { DesignFrameMessage } from "@/design/frame/messages";
++import { DesignThemeGate } from "@/design/frame/theme-gate";
++import { useDesignFrameMessages } from "@/design/frame/use-frame-messages";
++
++/** The inside of one device iframe: the selected state, full-bleed, no review chrome. */
++export function DesignDeviceFrame({
++  design,
++  device,
++  initialState,
++  initialTheme,
++}: {
++  design: DesignDefinition;
++  device: DesignDevice;
++  initialState: string | null;
++  initialTheme: ThemePreference;
++}) {
++  const [stateId, setStateId] = useState(initialState);
++  const [theme, setTheme] = useState(initialTheme);
++  const handleMessage = useCallback((message: DesignFrameMessage) => {
++    setStateId(message.state);
++    setTheme(message.theme);
++  }, []);
++  useDesignFrameMessages(handleMessage);
++
++  const state = design.states.find((candidate) => candidate.id === stateId) ?? design.states[0];
++  const context = useMemo(() => ({ device, theme }), [device, theme]);
++
++  return (
++    <DesignThemeGate theme={theme} device={device} remount>
++      <DesignFrameContextProvider value={context}>
++        <View style={styles.root} testID="design-device-frame">
++          {state ? createElement(state.render, { key: state.id }) : null}
++        </View>
++      </DesignFrameContextProvider>
++    </DesignThemeGate>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  root: {
++    flex: 1,
++    backgroundColor: theme.colors.surface0,
++  },
++}));
+diff --git a/packages/app/src/design/frame/device-viewport.tsx b/packages/app/src/design/frame/device-viewport.tsx
+new file mode 100644
+index 000000000..1295caa0f
+--- /dev/null
++++ b/packages/app/src/design/frame/device-viewport.tsx
+@@ -0,0 +1,26 @@
++import { Text } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDevice } from "@/design/types";
++
++export interface DeviceViewportProps {
++  name: string;
++  device: DesignDevice;
++  state: string;
++  theme: ThemePreference;
++  scale: number;
++}
++
++/** Device previews are iframes, so the review page is web-only. */
++export function DeviceViewport(_props: DeviceViewportProps) {
++  return (
++    <Text style={styles.text}>Device previews need web. Open the design frame in a browser.</Text>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  text: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.base,
++  },
++}));
+diff --git a/packages/app/src/design/frame/device-viewport.web.tsx b/packages/app/src/design/frame/device-viewport.web.tsx
+new file mode 100644
+index 000000000..2e0442b82
+--- /dev/null
++++ b/packages/app/src/design/frame/device-viewport.web.tsx
+@@ -0,0 +1,100 @@
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
++import { Text, View } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDevice } from "@/design/types";
++import { createDesignFrameMessage } from "@/design/frame/messages";
++import { buildDeviceFrameUrl, DESIGN_DEVICES } from "@/design/frame/params";
++
++export interface DeviceViewportProps {
++  name: string;
++  device: DesignDevice;
++  state: string;
++  theme: ThemePreference;
++  scale: number;
++}
++
++/**
++ * One device preview: an iframe of the same design route at the device's real width,
++ * so Unistyles breakpoints and `useIsCompactFormFactor()` resolve as they would on
++ * that device. The src is fixed at mount; later state and theme changes arrive by
++ * postMessage so the preview does not reload.
++ */
++export function DeviceViewport({ name, device, state, theme, scale }: DeviceViewportProps) {
++  const iframeRef = useRef<HTMLIFrameElement>(null);
++  const [src] = useState(() => buildDeviceFrameUrl({ name, device, state, theme }));
++  const size = DESIGN_DEVICES[device];
++
++  const post = useCallback(() => {
++    iframeRef.current?.contentWindow?.postMessage(
++      createDesignFrameMessage(state, theme),
++      window.location.origin,
++    );
++  }, [state, theme]);
++
++  useEffect(() => {
++    post();
++  }, [post]);
++
++  const iframeStyle = useMemo(
++    () => ({
++      width: size.width,
++      height: size.height,
++      border: 0,
++      display: "block",
++      // The clip box is a flex column at the scaled height; without this the iframe
++      // shrinks to it and the preview gets a shorter viewport than the device.
++      flexShrink: 0,
++      transform: `scale(${scale})`,
++      transformOrigin: "0 0",
++    }),
++    [scale, size.height, size.width],
++  );
++
++  return (
++    <View style={styles.viewport} testID={`design-viewport-${device}`}>
++      <Text style={styles.label}>
++        {size.label} · {size.width} × {size.height}
++      </Text>
++      <View style={styles.screenBorder}>
++        <View
++          style={[
++            styles.screen,
++            inlineUnistylesStyle({ width: size.width * scale, height: size.height * scale }),
++          ]}
++        >
++          {/* oxlint-disable-next-line react/iframe-missing-sandbox -- the preview is this
++              app on this origin; a sandbox would block its storage and postMessage origin. */}
++          <iframe
++            ref={iframeRef}
++            src={src}
++            title={`${name} on ${size.label}`}
++            style={iframeStyle}
++            onLoad={post}
++          />
++        </View>
++      </View>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  viewport: {
++    gap: theme.spacing[2],
++    alignItems: "flex-start",
++  },
++  label: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++  screenBorder: {
++    overflow: "hidden",
++    borderWidth: theme.borderWidth[1],
++    borderColor: theme.colors.border,
++    borderRadius: theme.borderRadius.lg,
++  },
++  screen: {
++    overflow: "hidden",
++  },
++}));
+diff --git a/packages/app/src/design/frame/messages.ts b/packages/app/src/design/frame/messages.ts
+new file mode 100644
+index 000000000..f22234d17
+--- /dev/null
++++ b/packages/app/src/design/frame/messages.ts
+@@ -0,0 +1,28 @@
++import type { ThemePreference } from "@/styles/theme";
++import { isThemePreference } from "@/design/frame/params";
++
++/**
++ * The review page posts this to every device iframe when the state or theme changes.
++ * Each iframe is its own JS runtime with its own Unistyles, so it applies the theme
++ * itself through the same `applyTheme` path.
++ */
++export interface DesignFrameMessage {
++  source: "paseo-design-frame";
++  state: string;
++  theme: ThemePreference;
++}
++
++export function createDesignFrameMessage(
++  state: string,
++  theme: ThemePreference,
++): DesignFrameMessage {
++  return { source: "paseo-design-frame", state, theme };
++}
++
++export function parseDesignFrameMessage(data: unknown): DesignFrameMessage | null {
++  if (typeof data !== "object" || data === null) return null;
++  const record = data as Record<string, unknown>;
++  if (record.source !== "paseo-design-frame") return null;
++  if (typeof record.state !== "string" || !isThemePreference(record.theme)) return null;
++  return { source: "paseo-design-frame", state: record.state, theme: record.theme };
++}
+diff --git a/packages/app/src/design/frame/params.ts b/packages/app/src/design/frame/params.ts
+new file mode 100644
+index 000000000..062bcf87e
+--- /dev/null
++++ b/packages/app/src/design/frame/params.ts
+@@ -0,0 +1,71 @@
++import { THEME_OPTIONS, type ThemePreference } from "@/styles/theme";
++import type { DesignDevice, DesignDeviceSelection, DesignZoom } from "@/design/types";
++
++/** Viewport each device preview gets. Width drives the Unistyles breakpoint. */
++export const DESIGN_DEVICES: Record<
++  DesignDevice,
++  { label: string; width: number; height: number }
++> = {
++  phone: { label: "Phone", width: 375, height: 812 },
++  tablet: { label: "Tablet", width: 768, height: 1024 },
++  desktop: { label: "Desktop", width: 1280, height: 800 },
++};
++
++export const DESIGN_DEVICE_ORDER: readonly DesignDevice[] = ["phone", "tablet", "desktop"];
++
++export const DESIGN_THEME_PREFERENCES: readonly Exclude<ThemePreference, "plugin">[] =
++  THEME_OPTIONS.map((option) => option.name);
++
++const DEFAULT_THEME: Exclude<ThemePreference, "plugin"> = "dark";
++
++/** Query params shared by the review page and each device iframe. */
++export interface DesignFrameParams {
++  state: string | null;
++  device: DesignDeviceSelection;
++  zoom: DesignZoom;
++  theme: Exclude<ThemePreference, "plugin">;
++  /** `device` when this page is the inside of a device iframe. */
++  frame: "device" | null;
++}
++
++type RawParam = string | string[] | undefined;
++
++function first(value: RawParam): string | undefined {
++  return Array.isArray(value) ? value[0] : value;
++}
++
++export function parseDesignFrameParams(raw: Record<string, RawParam>): DesignFrameParams {
++  const device = first(raw.device);
++  const zoom = first(raw.zoom);
++  const theme = first(raw.theme);
++  return {
++    state: first(raw.state) ?? null,
++    device: isDeviceSelection(device) ? device : "phone",
++    zoom: zoom === "100" ? "100" : "fit",
++    theme: isThemePreference(theme) ? theme : DEFAULT_THEME,
++    frame: first(raw.frame) === "device" ? "device" : null,
++  };
++}
++
++export function isDeviceSelection(value: unknown): value is DesignDeviceSelection {
++  return value === "all" || value === "phone" || value === "tablet" || value === "desktop";
++}
++
++export function isThemePreference(value: unknown): value is Exclude<ThemePreference, "plugin"> {
++  return DESIGN_THEME_PREFERENCES.some((name) => name === value);
++}
++
++export function buildDeviceFrameUrl(input: {
++  name: string;
++  device: DesignDevice;
++  state: string;
++  theme: ThemePreference;
++}): string {
++  const query = new URLSearchParams({
++    frame: "device",
++    device: input.device,
++    state: input.state,
++    theme: input.theme,
++  });
++  return `/design/${encodeURIComponent(input.name)}?${query.toString()}`;
++}
+diff --git a/packages/app/src/design/frame/quiet-known-warnings.ts b/packages/app/src/design/frame/quiet-known-warnings.ts
+new file mode 100644
+index 000000000..5d69b9bd7
+--- /dev/null
++++ b/packages/app/src/design/frame/quiet-known-warnings.ts
+@@ -0,0 +1,2 @@
++/** The warning this filters is web-only. */
++export function quietKnownWebWarnings(): void {}
+diff --git a/packages/app/src/design/frame/quiet-known-warnings.web.ts b/packages/app/src/design/frame/quiet-known-warnings.web.ts
+new file mode 100644
+index 000000000..9ead3dac3
+--- /dev/null
++++ b/packages/app/src/design/frame/quiet-known-warnings.web.ts
+@@ -0,0 +1,23 @@
++let installed = false;
++
++/**
++ * Unistyles web forwards `uniProps` to the wrapped lucide SVG, so every themed icon
++ * logs "React does not recognize the `uniProps` prop" in web dev builds, app-wide.
++ * Expo's error toast for it would sit on top of every device preview. Drop only that
++ * message, only in the design frame.
++ */
++export function quietKnownWebWarnings(): void {
++  if (installed) return;
++  installed = true;
++  const forward = console.error;
++  console.error = (...args: unknown[]) => {
++    if (
++      typeof args[0] === "string" &&
++      args[0].startsWith("React does not recognize the") &&
++      args[1] === "uniProps"
++    ) {
++      return;
++    }
++    forward(...args);
++  };
++}
+diff --git a/packages/app/src/design/frame/review-bar.tsx b/packages/app/src/design/frame/review-bar.tsx
+new file mode 100644
+index 000000000..13faeeec5
+--- /dev/null
++++ b/packages/app/src/design/frame/review-bar.tsx
+@@ -0,0 +1,181 @@
++import { useCallback } from "react";
++import { Text, View } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import { Button } from "@/components/ui/button";
++import { DropdownMenu, DropdownMenuContent, DropdownMenuItem } from "@/components/ui/dropdown-menu";
++import { DropdownTrigger } from "@/components/ui/dropdown-trigger";
++import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDeviceSelection, DesignState, DesignZoom } from "@/design/types";
++import { DESIGN_THEME_PREFERENCES } from "@/design/frame/params";
++
++const DEVICE_OPTIONS: SegmentedControlOption<DesignDeviceSelection>[] = [
++  { value: "phone", label: "Phone", testID: "design-device-phone" },
++  { value: "tablet", label: "Tablet", testID: "design-device-tablet" },
++  { value: "desktop", label: "Desktop", testID: "design-device-desktop" },
++  { value: "all", label: "All", testID: "design-device-all" },
++];
++
++const ZOOM_OPTIONS: SegmentedControlOption<DesignZoom>[] = [
++  { value: "fit", label: "Fit" },
++  { value: "100", label: "100%" },
++];
++
++const THEME_LABELS: Record<Exclude<ThemePreference, "plugin">, string> = {
++  light: "Light",
++  dark: "Dark",
++  auto: "Auto (system)",
++  zinc: "Zinc",
++  midnight: "Midnight",
++  claude: "Claude",
++  ghostty: "Ghostty",
++  pureBlack: "Pure black",
++};
++
++export interface ReviewBarProps {
++  title: string;
++  states: readonly DesignState[];
++  stateId: string;
++  device: DesignDeviceSelection;
++  zoom: DesignZoom;
++  theme: Exclude<ThemePreference, "plugin">;
++  checkRunning: boolean;
++  onStateChange: (stateId: string) => void;
++  onDeviceChange: (device: DesignDeviceSelection) => void;
++  onZoomChange: (zoom: DesignZoom) => void;
++  onThemeChange: (theme: Exclude<ThemePreference, "plugin">) => void;
++  onCheck: () => void;
++  onBack: () => void;
++}
++
++export function DesignReviewBar(props: ReviewBarProps) {
++  const activeState = props.states.find((state) => state.id === props.stateId);
++  return (
++    <View style={styles.bar} testID="design-review-bar">
++      <View style={styles.group}>
++        <Button variant="ghost" size="sm" onPress={props.onBack}>
++          Designs
++        </Button>
++        <Text style={styles.title} numberOfLines={1}>
++          {props.title}
++        </Text>
++      </View>
++      <View style={styles.group}>
++        <BarLabel label="State" />
++        <DropdownMenu>
++          <DropdownTrigger size="sm" accessibilityRole="button" testID="design-state-trigger">
++            {activeState?.label ?? props.stateId}
++          </DropdownTrigger>
++          <DropdownMenuContent side="bottom" align="start" width={220}>
++            {props.states.map((state) => (
++              <OptionItem
++                key={state.id}
++                value={state.id}
++                label={state.label}
++                selected={state.id === props.stateId}
++                onSelect={props.onStateChange}
++              />
++            ))}
++          </DropdownMenuContent>
++        </DropdownMenu>
++      </View>
++      <View style={styles.group}>
++        <BarLabel label="Device" />
++        <SegmentedControl
++          size="sm"
++          options={DEVICE_OPTIONS}
++          value={props.device}
++          onValueChange={props.onDeviceChange}
++        />
++      </View>
++      <View style={styles.group}>
++        <BarLabel label="Zoom" />
++        <SegmentedControl
++          size="sm"
++          options={ZOOM_OPTIONS}
++          value={props.zoom}
++          onValueChange={props.onZoomChange}
++        />
++      </View>
++      <View style={styles.group}>
++        <BarLabel label="Theme" />
++        <DropdownMenu>
++          <DropdownTrigger size="sm" accessibilityRole="button" testID="design-theme-trigger">
++            {THEME_LABELS[props.theme]}
++          </DropdownTrigger>
++          <DropdownMenuContent side="bottom" align="start" width={200}>
++            {DESIGN_THEME_PREFERENCES.map((theme) => (
++              <OptionItem
++                key={theme}
++                value={theme}
++                label={THEME_LABELS[theme]}
++                selected={theme === props.theme}
++                onSelect={props.onThemeChange}
++              />
++            ))}
++          </DropdownMenuContent>
++        </DropdownMenu>
++      </View>
++      <Button
++        variant="outline"
++        size="sm"
++        loading={props.checkRunning}
++        onPress={props.onCheck}
++        testID="design-check-button"
++      >
++        Check
++      </Button>
++    </View>
++  );
++}
++
++function BarLabel({ label }: { label: string }) {
++  return <Text style={styles.label}>{label}</Text>;
++}
++
++function OptionItem<T extends string>({
++  value,
++  label,
++  selected,
++  onSelect,
++}: {
++  value: T;
++  label: string;
++  selected: boolean;
++  onSelect: (value: T) => void;
++}) {
++  const handleSelect = useCallback(() => onSelect(value), [onSelect, value]);
++  return (
++    <DropdownMenuItem selected={selected} onSelect={handleSelect}>
++      {label}
++    </DropdownMenuItem>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  bar: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    alignItems: "center",
++    gap: theme.spacing[4],
++    paddingHorizontal: theme.spacing[4],
++    paddingVertical: theme.spacing[2],
++    backgroundColor: theme.colors.surfaceSidebar,
++    borderBottomWidth: theme.borderWidth[1],
++    borderBottomColor: theme.colors.border,
++  },
++  group: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++  },
++  title: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.base,
++    fontWeight: theme.fontWeight.medium,
++  },
++  label: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++}));
+diff --git a/packages/app/src/design/frame/review-page.tsx b/packages/app/src/design/frame/review-page.tsx
+new file mode 100644
+index 000000000..2d4a0797e
+--- /dev/null
++++ b/packages/app/src/design/frame/review-page.tsx
+@@ -0,0 +1,154 @@
++import { useCallback, useMemo, useState } from "react";
++import { type LayoutChangeEvent, ScrollView, View } from "react-native";
++import { useRouter } from "expo-router";
++import { StyleSheet } from "react-native-unistyles";
++import { BORDER_WIDTH, SPACING, type ThemePreference } from "@/styles/theme";
++import type { DesignDefinition, DesignDeviceSelection, DesignZoom } from "@/design/types";
++import {
++  type DesignCheckStatus,
++  DesignCheckPanel,
++  runDesignCheck,
++} from "@/design/frame/check-panel";
++import { DeviceViewport } from "@/design/frame/device-viewport";
++import { DESIGN_DEVICE_ORDER, DESIGN_DEVICES, type DesignFrameParams } from "@/design/frame/params";
++import { DesignReviewBar } from "@/design/frame/review-bar";
++import { DesignThemeGate } from "@/design/frame/theme-gate";
++
++const PREVIEW_GAP = SPACING[8];
++const PREVIEW_PADDING = SPACING[6];
++// Room for the device caption above each viewport.
++const PREVIEW_CAPTION_ALLOWANCE = SPACING[8];
++const VIEWPORT_BORDER = BORDER_WIDTH[1];
++
++interface Size {
++  width: number;
++  height: number;
++}
++
++/** Scale that fits every visible device into the preview area, never above 100%. */
++export function resolveFitScale(devices: readonly (keyof typeof DESIGN_DEVICES)[], area: Size) {
++  const deviceWidth = devices.reduce((sum, device) => sum + DESIGN_DEVICES[device].width, 0);
++  const deviceHeight = Math.max(...devices.map((device) => DESIGN_DEVICES[device].height));
++  // Gaps, padding, captions and the 1px viewport borders do not scale.
++  const fixedWidth =
++    PREVIEW_GAP * Math.max(0, devices.length - 1) +
++    PREVIEW_PADDING * 2 +
++    devices.length * VIEWPORT_BORDER * 2;
++  const fixedHeight = PREVIEW_PADDING * 2 + PREVIEW_CAPTION_ALLOWANCE + VIEWPORT_BORDER * 2;
++  const availableWidth = area.width - fixedWidth;
++  const availableHeight = area.height - fixedHeight;
++  if (availableWidth <= 0 || availableHeight <= 0) return 1;
++  return Math.min(1, availableWidth / deviceWidth, availableHeight / deviceHeight);
++}
++
++export function DesignReviewPage({
++  name,
++  design,
++  params,
++}: {
++  name: string;
++  design: DesignDefinition;
++  params: DesignFrameParams;
++}) {
++  const router = useRouter();
++  const stateId = params.state ?? design.states[0]?.id ?? "";
++  const [area, setArea] = useState<Size | null>(null);
++  const [checkStatus, setCheckStatus] = useState<DesignCheckStatus>({ kind: "idle" });
++
++  const devices = useMemo(
++    () => (params.device === "all" ? DESIGN_DEVICE_ORDER : [params.device]),
++    [params.device],
++  );
++  const scale = params.zoom === "fit" && area ? resolveFitScale(devices, area) : 1;
++
++  const handleLayout = useCallback((event: LayoutChangeEvent) => {
++    const { width, height } = event.nativeEvent.layout;
++    setArea({ width, height });
++  }, []);
++  const setStateId = useCallback((state: string) => router.setParams({ state }), [router]);
++  const setDevice = useCallback(
++    (device: DesignDeviceSelection) => router.setParams({ device }),
++    [router],
++  );
++  const setZoom = useCallback((zoom: DesignZoom) => router.setParams({ zoom }), [router]);
++  const setTheme = useCallback(
++    (theme: Exclude<ThemePreference, "plugin">) => router.setParams({ theme }),
++    [router],
++  );
++  const goBack = useCallback(() => router.push("/design"), [router]);
++  const check = useCallback(() => {
++    setCheckStatus({ kind: "running" });
++    runDesignCheck(name)
++      .then((result) => setCheckStatus({ kind: "done", result }))
++      .catch((error: unknown) =>
++        setCheckStatus({
++          kind: "error",
++          message: error instanceof Error ? error.message : String(error),
++        }),
++      );
++  }, [name]);
++
++  const viewports = useMemo(
++    () =>
++      devices.map((device) => (
++        <DeviceViewport
++          key={device}
++          name={name}
++          device={device}
++          state={stateId}
++          theme={params.theme}
++          scale={scale}
++        />
++      )),
++    [devices, name, params.theme, scale, stateId],
++  );
++
++  return (
++    <DesignThemeGate theme={params.theme} device={null} remount={false}>
++      <View style={styles.root}>
++        <DesignReviewBar
++          title={design.title}
++          states={design.states}
++          stateId={stateId}
++          device={params.device}
++          zoom={params.zoom}
++          theme={params.theme}
++          checkRunning={checkStatus.kind === "running"}
++          onStateChange={setStateId}
++          onDeviceChange={setDevice}
++          onZoomChange={setZoom}
++          onThemeChange={setTheme}
++          onCheck={check}
++          onBack={goBack}
++        />
++        <DesignCheckPanel status={checkStatus} />
++        <View style={styles.previewArea} onLayout={handleLayout}>
++          <ScrollView style={styles.scroll}>
++            <ScrollView horizontal style={styles.scroll} contentContainerStyle={styles.previews}>
++              {area ? viewports : null}
++            </ScrollView>
++          </ScrollView>
++        </View>
++      </View>
++    </DesignThemeGate>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  root: {
++    flex: 1,
++    backgroundColor: theme.colors.surface1,
++  },
++  previewArea: {
++    flex: 1,
++  },
++  scroll: {
++    flex: 1,
++  },
++  previews: {
++    flexDirection: "row",
++    alignItems: "flex-start",
++    gap: PREVIEW_GAP,
++    padding: PREVIEW_PADDING,
++  },
++}));
+diff --git a/packages/app/src/design/frame/screens.tsx b/packages/app/src/design/frame/screens.tsx
+new file mode 100644
+index 000000000..e992f23bd
+--- /dev/null
++++ b/packages/app/src/design/frame/screens.tsx
+@@ -0,0 +1,125 @@
++import { useCallback } from "react";
++import { Text, View } from "react-native";
++import { useLocalSearchParams, useRouter } from "expo-router";
++import { StyleSheet } from "react-native-unistyles";
++import { Button } from "@/components/ui/button";
++import { settingsStyles } from "@/styles/settings";
++import { DESIGNS } from "@/design/registry";
++import { DesignDeviceFrame } from "@/design/frame/device-frame";
++import { parseDesignFrameParams } from "@/design/frame/params";
++import { DesignReviewPage } from "@/design/frame/review-page";
++import { DesignThemeGate } from "@/design/frame/theme-gate";
++import { quietKnownWebWarnings } from "@/design/frame/quiet-known-warnings";
++
++quietKnownWebWarnings();
++
++/** `/design/[name]`: the review page, or the inside of a device iframe. */
++export function DesignFrameScreen() {
++  const rawParams = useLocalSearchParams();
++  const name = typeof rawParams.name === "string" ? rawParams.name : "";
++  const params = parseDesignFrameParams(rawParams);
++  const design = DESIGNS[name];
++
++  if (!design) {
++    return <MissingDesign name={name} theme={params.theme} />;
++  }
++  if (params.frame === "device") {
++    return (
++      <DesignDeviceFrame
++        design={design}
++        device={params.device === "all" ? "desktop" : params.device}
++        initialState={params.state}
++        initialTheme={params.theme}
++      />
++    );
++  }
++  return <DesignReviewPage key={name} name={name} design={design} params={params} />;
++}
++
++/** `/design`: every registered design. */
++export function DesignIndexScreen() {
++  const params = parseDesignFrameParams(useLocalSearchParams());
++  return (
++    <DesignThemeGate theme={params.theme} device={null} remount={false}>
++      <View style={styles.page}>
++        <View style={styles.column}>
++          <Text style={styles.title}>Design frame</Text>
++          <View style={settingsStyles.card}>
++            {Object.entries(DESIGNS).map(([name, design], index) => (
++              <DesignRow
++                key={name}
++                name={name}
++                title={design.title}
++                stateCount={design.states.length}
++                first={index === 0}
++              />
++            ))}
++          </View>
++        </View>
++      </View>
++    </DesignThemeGate>
++  );
++}
++
++function DesignRow({
++  name,
++  title,
++  stateCount,
++  first,
++}: {
++  name: string;
++  title: string;
++  stateCount: number;
++  first: boolean;
++}) {
++  const router = useRouter();
++  const open = useCallback(() => router.push(`/design/${name}`), [name, router]);
++  return (
++    <View style={[settingsStyles.row, first ? null : settingsStyles.rowBorder]}>
++      <View style={settingsStyles.rowContent}>
++        <Text style={settingsStyles.rowTitle}>{title}</Text>
++        <Text style={settingsStyles.rowHint}>
++          {name} · {stateCount} state{stateCount === 1 ? "" : "s"}
++        </Text>
++      </View>
++      <Button variant="outline" size="sm" onPress={open} testID={`design-open-${name}`}>
++        Open
++      </Button>
++    </View>
++  );
++}
++
++function MissingDesign({
++  name,
++  theme,
++}: {
++  name: string;
++  theme: ReturnType<typeof parseDesignFrameParams>["theme"];
++}) {
++  return (
++    <DesignThemeGate theme={theme} device={null} remount={false}>
++      <View style={styles.page}>
++        <Text style={settingsStyles.rowHint}>{`No design named "${name}"`}</Text>
++      </View>
++    </DesignThemeGate>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  page: {
++    flex: 1,
++    alignItems: "center",
++    backgroundColor: theme.colors.surface0,
++    padding: theme.spacing[6],
++  },
++  column: {
++    width: "100%",
++    maxWidth: 720,
++    gap: theme.spacing[4],
++  },
++  title: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.lg,
++    fontWeight: theme.fontWeight.medium,
++  },
++}));
+diff --git a/packages/app/src/design/frame/theme-gate.tsx b/packages/app/src/design/frame/theme-gate.tsx
+new file mode 100644
+index 000000000..4f4df41ba
+--- /dev/null
++++ b/packages/app/src/design/frame/theme-gate.tsx
+@@ -0,0 +1,36 @@
++import { type ReactNode, useEffect, useState } from "react";
++import type { ThemePreference } from "@/styles/theme";
++import type { DesignDevice } from "@/design/types";
++import { applyDesignTheme } from "@/design/frame/apply-design-theme";
++
++/**
++ * Apply the theme before the first paint of the children, then on every change.
++ * With `remount`, children remount per theme: web bakes numeric tokens into classes,
++ * and the catalog reads token values at render. The review page does not remount,
++ * so its device iframes keep their runtime across theme changes.
++ */
++export function DesignThemeGate({
++  theme,
++  device,
++  remount,
++  children,
++}: {
++  theme: ThemePreference;
++  device: DesignDevice | null;
++  remount: boolean;
++  children: ReactNode;
++}) {
++  const [appliedTheme, setAppliedTheme] = useState<ThemePreference | null>(null);
++
++  useEffect(() => {
++    applyDesignTheme(theme, device);
++    setAppliedTheme(theme);
++  }, [device, theme]);
++
++  if (appliedTheme === null) return null;
++  return <ThemeKey key={remount ? appliedTheme : "stable"}>{children}</ThemeKey>;
++}
++
++function ThemeKey({ children }: { children: ReactNode }) {
++  return children;
++}
+diff --git a/packages/app/src/design/frame/use-frame-messages.ts b/packages/app/src/design/frame/use-frame-messages.ts
+new file mode 100644
+index 000000000..a1cd3ba3d
+--- /dev/null
++++ b/packages/app/src/design/frame/use-frame-messages.ts
+@@ -0,0 +1,4 @@
++import type { DesignFrameMessage } from "@/design/frame/messages";
++
++/** Device iframes only exist on web; native has nothing to listen to. */
++export function useDesignFrameMessages(_onMessage: (message: DesignFrameMessage) => void): void {}
+diff --git a/packages/app/src/design/frame/use-frame-messages.web.ts b/packages/app/src/design/frame/use-frame-messages.web.ts
+new file mode 100644
+index 000000000..98ae17154
+--- /dev/null
++++ b/packages/app/src/design/frame/use-frame-messages.web.ts
+@@ -0,0 +1,15 @@
++import { useEffect } from "react";
++import { parseDesignFrameMessage, type DesignFrameMessage } from "@/design/frame/messages";
++
++/** Inside a device iframe: receive state and theme changes from the review page. */
++export function useDesignFrameMessages(onMessage: (message: DesignFrameMessage) => void): void {
++  useEffect(() => {
++    function handleMessage(event: MessageEvent) {
++      if (event.origin !== window.location.origin) return;
++      const message = parseDesignFrameMessage(event.data);
++      if (message) onMessage(message);
++    }
++    window.addEventListener("message", handleMessage);
++    return () => window.removeEventListener("message", handleMessage);
++  }, [onMessage]);
++}
+diff --git a/packages/app/src/design/kit.tsx b/packages/app/src/design/kit.tsx
+new file mode 100644
+index 000000000..49d71e723
+--- /dev/null
++++ b/packages/app/src/design/kit.tsx
+@@ -0,0 +1,98 @@
++import type { ReactNode } from "react";
++import { ScrollView, Text, View } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++
++// Layout pieces for composing design states. They only arrange real app
++// components; they are not app UI and nothing outside src/design uses them.
++
++/** A scrolling page on the app's base surface, with page padding. */
++export function DesignPage({ children }: { children: ReactNode }) {
++  return (
++    <View style={styles.page}>
++      <ScrollView style={styles.scroll} contentContainerStyle={styles.pageContent}>
++        {children}
++      </ScrollView>
++    </View>
++  );
++}
++
++/** A titled group of examples. */
++export function DesignSection({
++  title,
++  description,
++  children,
++}: {
++  title: string;
++  description?: string;
++  children: ReactNode;
++}) {
++  return (
++    <View style={styles.section}>
++      <Text style={styles.sectionTitle}>{title}</Text>
++      {description ? <Text style={styles.sectionDescription}>{description}</Text> : null}
++      <View style={styles.sectionBody}>{children}</View>
++    </View>
++  );
++}
++
++/** A wrapping row of examples. */
++export function DesignRow({ children }: { children: ReactNode }) {
++  return <View style={styles.row}>{children}</View>;
++}
++
++/** One example with a caption under it. */
++export function DesignSpecimen({ label, children }: { label: string; children: ReactNode }) {
++  return (
++    <View style={styles.specimen}>
++      <View style={styles.specimenBody}>{children}</View>
++      <Text style={styles.specimenLabel}>{label}</Text>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create((theme) => ({
++  page: {
++    flex: 1,
++    backgroundColor: theme.colors.surface0,
++  },
++  scroll: {
++    flex: 1,
++  },
++  pageContent: {
++    padding: theme.spacing[6],
++    gap: theme.spacing[8],
++  },
++  section: {
++    gap: theme.spacing[3],
++  },
++  sectionTitle: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.base,
++    fontWeight: theme.fontWeight.medium,
++  },
++  sectionDescription: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++  sectionBody: {
++    gap: theme.spacing[4],
++  },
++  row: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    alignItems: "flex-end",
++    gap: theme.spacing[4],
++  },
++  specimen: {
++    alignItems: "flex-start",
++    gap: theme.spacing[2],
++  },
++  specimenBody: {
++    minHeight: theme.spacing[8],
++    justifyContent: "center",
++  },
++  specimenLabel: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++}));
+diff --git a/packages/app/src/design/registry.ts b/packages/app/src/design/registry.ts
+new file mode 100644
+index 000000000..d0b0d7cc8
+--- /dev/null
++++ b/packages/app/src/design/registry.ts
+@@ -0,0 +1,12 @@
++import catalog from "@/design/designs/catalog";
++import volumeMeter from "@/design/designs/volume-meter";
++import type { DesignDefinition } from "@/design/types";
++
++/**
++ * Every design the frame can open, keyed by URL name (`/design/<name>`).
++ * The key must match the file name in `designs/` so Check finds the file.
++ */
++export const DESIGNS: Record<string, DesignDefinition> = {
++  catalog,
++  "volume-meter": volumeMeter,
++};
+diff --git a/packages/app/src/design/templates/flow.md b/packages/app/src/design/templates/flow.md
+new file mode 100644
+index 000000000..0d0315774
+--- /dev/null
++++ b/packages/app/src/design/templates/flow.md
+@@ -0,0 +1,32 @@
++# <Design name>
++
++Copy next to the design as `src/design/designs/<name>.md`. Keep it short; it is the
++brief a reviewer reads before clicking through the states.
++
++## Problem
++
++What the user is trying to do, and what gets in the way today.
++
++## States
++
++One line per state in the design file, in the same order.
++
++| State id | When the user sees it | What they can do |
++| -------- | --------------------- | ---------------- |
++| `empty`  |                       |                  |
++| `filled` |                       |                  |
++
++## Flow
++
++1. Entry point: where the user comes from.
++2. Each step, naming the state it lands on.
++3. Exit: where they end up.
++
++## Components
++
++Which shared components from `components/ui` carry this, and any primitive that
++is missing (propose it here rather than hand-rolling it in the design).
++
++## Open questions
++
++-
+diff --git a/packages/app/src/design/templates/starter.tsx b/packages/app/src/design/templates/starter.tsx
+new file mode 100644
+index 000000000..ff390182a
+--- /dev/null
++++ b/packages/app/src/design/templates/starter.tsx
+@@ -0,0 +1,63 @@
++// Starter for a new design. Copy to src/design/designs/<name>.tsx, then register it
++// in src/design/registry.ts under the same <name>. See docs/design-frame.md.
++//
++// Rules (npm run design:check): real components from @/components, colors and sizes
++// from the theme only — no hex, no palette.*, no numeric padding/fontSize/radius,
++// no useUnistyles().
++import { Text, View } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import { Button } from "@/components/ui/button";
++import { DesignPage, DesignSection } from "@/design/kit";
++import type { DesignDefinition } from "@/design/types";
++
++function Empty() {
++  return (
++    <DesignPage>
++      <DesignSection title="Empty">
++        <Text style={styles.hint}>No projects yet</Text>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++function Filled() {
++  return (
++    <DesignPage>
++      <DesignSection title="Filled">
++        <View style={styles.row}>
++          <Text style={styles.title}>Project name</Text>
++          <Button variant="outline" size="sm">
++            Open
++          </Button>
++        </View>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++const design: DesignDefinition = {
++  title: "New design",
++  states: [
++    { id: "empty", label: "Empty", render: Empty },
++    { id: "filled", label: "Filled", render: Filled },
++  ],
++};
++
++export default design;
++
++const styles = StyleSheet.create((theme) => ({
++  row: {
++    flexDirection: "row",
++    alignItems: "center",
++    justifyContent: "space-between",
++    gap: theme.spacing[3],
++  },
++  title: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.base,
++  },
++  hint: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++}));
+diff --git a/packages/app/src/design/types.ts b/packages/app/src/design/types.ts
+new file mode 100644
+index 000000000..43f1a1dc5
+--- /dev/null
++++ b/packages/app/src/design/types.ts
+@@ -0,0 +1,18 @@
++import type { ReactElement } from "react";
++
++/** One named state of a design. `render` draws it with real app components. */
++export interface DesignState {
++  id: string;
++  label: string;
++  render: () => ReactElement;
++}
++
++/** A design file's default export. */
++export interface DesignDefinition {
++  title: string;
++  states: readonly DesignState[];
++}
++
++export type DesignDevice = "phone" | "tablet" | "desktop";
++export type DesignDeviceSelection = DesignDevice | "all";
++export type DesignZoom = "fit" | "100";
+diff --git a/scripts/dev-design.sh b/scripts/dev-design.sh
+new file mode 100755
+index 000000000..d3a1bebae
+--- /dev/null
++++ b/scripts/dev-design.sh
+@@ -0,0 +1,18 @@
++#!/usr/bin/env bash
++# Design frame: Expo web with the dev-only /design routes and no daemon.
++# See docs/design-frame.md. DESIGN_PORT overrides the default port.
++set -e
++
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
++export PATH="$ROOT_DIR/node_modules/.bin:$PATH"
++
++DESIGN_PORT="${DESIGN_PORT:-8095}"
++
++echo "Design frame: http://localhost:${DESIGN_PORT}/design"
++
++exec cross-env \
++  BROWSER="${BROWSER:-none}" \
++  APP_VARIANT=development \
++  EXPO_PUBLIC_PASEO_DESIGN_FRAME=1 \
++  npm run web:expo --workspace=@getpaseo/app -- --port "$DESIGN_PORT"
+-- 
+2.52.0
+
