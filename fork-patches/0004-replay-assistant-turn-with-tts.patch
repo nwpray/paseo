@@ -1,0 +1,1244 @@
+From b1f125215458e6e1c2e11097ca3c2a080aab3fb4 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Tue, 27 Oct 2026 13:43:36 -0600
+Subject: [PATCH] fork: read assistant turns aloud with the daemon's TTS
+
+Adds a speaker button next to Copy in each completed assistant turn. It
+sends the turn's text (the same text Copy uses) to the daemon, which strips
+markdown (code blocks become "Code block.", links keep their label, tags
+are removed) and plays it through the existing TTSManager path used by the
+voice `speak` tool. The button turns into Stop while that turn plays and is
+disabled while any other speech is playing.
+
+Protocol: speech_replay_request / speech_replay_cancel inbound,
+speech_replay_finished outbound, gated by server_info features.speechReplay.
+The button is also hidden unless voice readiness reports TTS available.
+
+In voice mode the audio is flagged isVoiceMode so the app plays it through
+the voice runtime, which shares the capture engine's echo cancellation and
+barge-in: speaking over a replay cancels it like it cancels live speech.
+Cancel never interrupts the agent; a voice `speak` call supersedes a replay.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ packages/app/src/agent-stream/turn-footer.tsx | 11 +++
+ packages/app/src/agent-stream/view.tsx        | 11 +++
+ packages/app/src/components/message.tsx       | 75 ++++++++++++++++
+ packages/app/src/contexts/session-context.tsx | 10 +++
+ packages/app/src/i18n/resources/ar.ts         |  2 +
+ packages/app/src/i18n/resources/en.ts         |  2 +
+ packages/app/src/i18n/resources/es.ts         |  2 +
+ packages/app/src/i18n/resources/fr.ts         |  2 +
+ packages/app/src/i18n/resources/ja.ts         |  2 +
+ packages/app/src/i18n/resources/ko.ts         |  2 +
+ packages/app/src/i18n/resources/pt-BR.ts      |  2 +
+ packages/app/src/i18n/resources/ru.ts         |  2 +
+ packages/app/src/i18n/resources/zh-CN.ts      |  2 +
+ .../speech-replay/speech-replay-store.test.ts | 51 +++++++++++
+ .../src/speech-replay/speech-replay-store.ts  | 51 +++++++++++
+ .../speech-replay/use-turn-speech-replay.ts   | 71 +++++++++++++++
+ packages/client/src/daemon-client.ts          | 14 +++
+ packages/protocol/src/messages.ts             | 26 ++++++
+ .../authorization/operation-permissions.ts    |  3 +
+ packages/server/src/server/session.ts         |  2 +
+ .../session/owned-subscriptions/replies.ts    |  1 +
+ .../src/server/session/voice/index.test.ts    | 49 ++++++++++-
+ .../server/src/server/session/voice/index.ts  |  9 +-
+ .../session/voice/voice-session.test.ts       | 87 +++++++++++++++++++
+ .../src/server/session/voice/voice-session.ts | 50 +++++++++++
+ .../server/speech/speech-replay-text.test.ts  | 44 ++++++++++
+ .../src/server/speech/speech-replay-text.ts   | 60 +++++++++++++
+ .../server/src/server/websocket-server.ts     |  2 +
+ 28 files changed, 643 insertions(+), 2 deletions(-)
+ create mode 100644 packages/app/src/speech-replay/speech-replay-store.test.ts
+ create mode 100644 packages/app/src/speech-replay/speech-replay-store.ts
+ create mode 100644 packages/app/src/speech-replay/use-turn-speech-replay.ts
+ create mode 100644 packages/server/src/server/speech/speech-replay-text.test.ts
+ create mode 100644 packages/server/src/server/speech/speech-replay-text.ts
+
+diff --git a/packages/app/src/agent-stream/turn-footer.tsx b/packages/app/src/agent-stream/turn-footer.tsx
+index acbd920b8..05f58aa5e 100644
+--- a/packages/app/src/agent-stream/turn-footer.tsx
++++ b/packages/app/src/agent-stream/turn-footer.tsx
+@@ -15,6 +15,7 @@ import {
+   STREAM_METADATA_FONT_SIZE,
+   type AssistantForkTarget,
+ } from "@/components/message";
++import type { SpeechReplayScope } from "@/speech-replay/use-turn-speech-replay";
+ import type { TurnFooterHost } from "./layout";
+ import { AssistantForkMenu } from "@/components/assistant-fork-menu";
+ import { SyncedLoader } from "@/components/synced-loader";
+@@ -49,6 +50,7 @@ export const TurnFooter = memo(function TurnFooter({
+   supportsTimelineCursor,
+   onForkAssistantTurn,
+   onForkInFlightTurn,
++  speechReplayScope,
+ }: {
+   isRunning: boolean;
+   inFlightTurnStartedAt: Date | null;
+@@ -57,6 +59,7 @@ export const TurnFooter = memo(function TurnFooter({
+   supportsTimelineCursor: boolean;
+   onForkAssistantTurn?: AssistantTurnForkHandler;
+   onForkInFlightTurn?: InFlightTurnForkHandler;
++  speechReplayScope?: SpeechReplayScope;
+ }) {
+   if (isRunning) {
+     return (
+@@ -79,6 +82,7 @@ export const TurnFooter = memo(function TurnFooter({
+       startIndex={host.startIndex}
+       supportsTimelineCursor={supportsTimelineCursor}
+       onForkAssistantTurn={onForkAssistantTurn}
++      speechReplayScope={speechReplayScope}
+     />
+   );
+ });
+@@ -90,6 +94,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
+   startIndex,
+   supportsTimelineCursor,
+   onForkAssistantTurn,
++  speechReplayScope,
+ }: {
+   strategy: TurnContentStrategy;
+   items: StreamItem[];
+@@ -97,6 +102,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
+   startIndex: number;
+   supportsTimelineCursor: boolean;
+   onForkAssistantTurn?: AssistantTurnForkHandler;
++  speechReplayScope?: SpeechReplayScope;
+ }) {
+   return (
+     <TurnFooterRow>
+@@ -107,6 +113,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
+         startIndex={startIndex}
+         supportsTimelineCursor={supportsTimelineCursor}
+         onForkAssistantTurn={onForkAssistantTurn}
++        speechReplayScope={speechReplayScope}
+       />
+     </TurnFooterRow>
+   );
+@@ -163,6 +170,7 @@ function CompletedTurnFooter({
+   startIndex,
+   supportsTimelineCursor,
+   onForkAssistantTurn,
++  speechReplayScope,
+ }: {
+   strategy: TurnContentStrategy;
+   items: StreamItem[];
+@@ -170,6 +178,7 @@ function CompletedTurnFooter({
+   startIndex: number;
+   supportsTimelineCursor: boolean;
+   onForkAssistantTurn?: AssistantTurnForkHandler;
++  speechReplayScope?: SpeechReplayScope;
+ }) {
+   const getContent = useCallback(
+     () =>
+@@ -201,6 +210,8 @@ function CompletedTurnFooter({
+         completedAt={timing?.completedAt}
+         durationMs={timing?.durationMs}
+         onFork={boundary && onForkAssistantTurn ? handleFork : undefined}
++        speechReplayScope={speechReplayScope}
++        turnKey={items[startIndex]?.id ?? String(startIndex)}
+       />
+     </View>
+   );
+diff --git a/packages/app/src/agent-stream/view.tsx b/packages/app/src/agent-stream/view.tsx
+index d662a2f34..68db9e1de 100644
+--- a/packages/app/src/agent-stream/view.tsx
++++ b/packages/app/src/agent-stream/view.tsx
+@@ -79,6 +79,7 @@ import {
+   type InFlightTurnForkHandler,
+   type TurnContentStrategy,
+ } from "./turn-footer";
++import type { SpeechReplayScope } from "@/speech-replay/use-turn-speech-replay";
+ import { resolveBottomOverlayTailInset } from "./bottom-overlay-inset";
+ import { layoutStream, type StreamLayoutItem } from "./layout";
+ import {
+@@ -154,6 +155,7 @@ function renderStreamItemWithTurnFooter(input: {
+   strategy: TurnContentStrategy;
+   supportsTimelineCursor: boolean;
+   onForkAssistantTurn?: AssistantTurnForkHandler;
++  speechReplayScope?: SpeechReplayScope;
+ }): ReactNode {
+   if (!input.content) {
+     return null;
+@@ -168,6 +170,7 @@ function renderStreamItemWithTurnFooter(input: {
+       startIndex={footerHost.startIndex}
+       supportsTimelineCursor={input.supportsTimelineCursor}
+       onForkAssistantTurn={input.onForkAssistantTurn}
++      speechReplayScope={input.speechReplayScope}
+     />
+   ) : null;
+   const content = (
+@@ -886,6 +889,10 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
+     );
+ 
+     const bottomTurnFooterHost = streamLayout.auxiliaryTurnFooter;
++    const speechReplayScope = useMemo<SpeechReplayScope | undefined>(
++      () => (readOnly || !resolvedServerId ? undefined : { serverId: resolvedServerId, agentId }),
++      [agentId, readOnly, resolvedServerId],
++    );
+ 
+     const renderStreamItem = useCallback(
+       (layoutItem: StreamLayoutItem) => {
+@@ -896,12 +903,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
+           strategy: streamRenderStrategy,
+           supportsTimelineCursor: supportsAgentForkContextCursor,
+           onForkAssistantTurn: readOnly ? undefined : handleForkAssistantTurn,
++          speechReplayScope,
+         });
+       },
+       [
+         handleForkAssistantTurn,
+         readOnly,
+         renderStreamItemContent,
++        speechReplayScope,
+         streamRenderStrategy,
+         supportsAgentForkContextCursor,
+       ],
+@@ -931,9 +940,11 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
+             supportsTimelineCursor={supportsAgentForkContextCursor}
+             onForkAssistantTurn={readOnly ? undefined : handleForkAssistantTurn}
+             onForkInFlightTurn={readOnly ? undefined : handleForkInFlightTurn}
++            speechReplayScope={speechReplayScope}
+           />
+         ) : null,
+       [
++        speechReplayScope,
+         handleForkAssistantTurn,
+         handleForkInFlightTurn,
+         readOnly,
+diff --git a/packages/app/src/components/message.tsx b/packages/app/src/components/message.tsx
+index d5a224450..c00eddc14 100644
+--- a/packages/app/src/components/message.tsx
++++ b/packages/app/src/components/message.tsx
+@@ -27,6 +27,10 @@ import { getDefaultMarkdownClipboardEnvironment } from "@/utils/rich-clipboard-d
+ import { formatDuration, formatMessageTimestamp } from "@/utils/time";
+ import { resolveToolCallIcon } from "@/utils/tool-call-icon";
+ import { useTargetAgentTitle } from "@/tool-calls/use-target-agent-title";
++import {
++  useTurnSpeechReplay,
++  type SpeechReplayScope,
++} from "@/speech-replay/use-turn-speech-replay";
+ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+ import type { AgentMessage } from "@getpaseo/protocol/agent-message";
+ import type { AgentCapabilityFlags, ToolCallDetail } from "@getpaseo/protocol/agent-types";
+@@ -43,7 +47,9 @@ import {
+   MicVocal,
+   Plus,
+   Scissors,
++  Square,
+   TriangleAlertIcon,
++  Volume2,
+   XCircle,
+ } from "lucide-react-native";
+ import type { ComponentType, ReactNode } from "react";
+@@ -545,6 +551,8 @@ interface AssistantTurnFooterProps {
+   completedAt?: Date;
+   durationMs?: number | null;
+   onFork?: (target: AssistantForkTarget) => Promise<void> | void;
++  speechReplayScope?: SpeechReplayScope;
++  turnKey?: string;
+ }
+ 
+ const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
+@@ -589,6 +597,8 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
+   completedAt,
+   durationMs,
+   onFork,
++  speechReplayScope,
++  turnKey,
+ }: AssistantTurnFooterProps) {
+   const { t } = useTranslation();
+   const [hovered, setHovered] = useState(false);
+@@ -645,6 +655,14 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
+         getContent={getContent}
+         containerStyle={assistantTurnFooterStylesheet.copyButton}
+       />
++      {speechReplayScope && turnKey ? (
++        <TurnSpeakButton
++          scope={speechReplayScope}
++          turnKey={turnKey}
++          getContent={getContent}
++          containerStyle={assistantTurnFooterStylesheet.copyButton}
++        />
++      ) : null}
+       {canFork ? <AssistantForkMenu onFork={handleFork} /> : null}
+       {primaryLabel ? (
+         <Pressable
+@@ -865,6 +883,63 @@ export const TurnCopyButton = memo(function TurnCopyButton({
+   );
+ });
+ 
++interface TurnSpeakButtonProps {
++  scope: SpeechReplayScope;
++  turnKey: string;
++  getContent: () => string;
++  containerStyle?: StyleProp<ViewStyle>;
++}
++
++/** Fork: reads the turn aloud through the daemon's TTS; a Stop button while this turn plays. */
++const TurnSpeakButton = memo(function TurnSpeakButton({
++  scope,
++  turnKey,
++  getContent,
++  containerStyle,
++}: TurnSpeakButtonProps) {
++  const { t } = useTranslation();
++  const { state, toggle } = useTurnSpeechReplay({ scope, turnKey, getContent });
++  const disabled = state === "disabled";
++  const pressableStyle = useMemo(
++    () => [
++      turnCopyButtonStylesheet.container,
++      containerStyle,
++      disabled ? turnSpeakButtonStylesheet.disabled : null,
++    ],
++    [containerStyle, disabled],
++  );
++  const accessibilityState = useMemo(() => ({ disabled }), [disabled]);
++
++  if (state === "hidden") return null;
++  const isStop = state === "stop";
++  return (
++    <Pressable
++      onPress={toggle}
++      disabled={disabled}
++      style={pressableStyle}
++      accessibilityRole="button"
++      accessibilityState={accessibilityState}
++      accessibilityLabel={isStop ? t("message.actions.stopReading") : t("message.actions.readTurn")}
++    >
++      {({ hovered }) => {
++        const iconColor =
++          hovered && !disabled
++            ? turnCopyButtonStylesheet.iconHoveredColor.color
++            : turnCopyButtonStylesheet.iconColor.color;
++        return isStop ? (
++          <Square size={ICON_SIZE.sm} color={iconColor} />
++        ) : (
++          <Volume2 size={ICON_SIZE.sm} color={iconColor} />
++        );
++      }}
++    </Pressable>
++  );
++});
++
++const turnSpeakButtonStylesheet = StyleSheet.create(() => ({
++  disabled: { opacity: 0.4 },
++}));
++
+ const expandableBadgeStylesheet = StyleSheet.create((theme) => ({
+   container: {
+     marginHorizontal: -13,
+diff --git a/packages/app/src/contexts/session-context.tsx b/packages/app/src/contexts/session-context.tsx
+index bccd4d3ee..ce669d21c 100644
+--- a/packages/app/src/contexts/session-context.tsx
++++ b/packages/app/src/contexts/session-context.tsx
+@@ -46,6 +46,7 @@ import {
+ } from "@/utils/agent-initialization";
+ import { derivePendingPermissionKey } from "@/utils/agent-snapshots";
+ import { useToast } from "@/contexts/toast-context";
++import { useSpeechReplayStore } from "@/speech-replay/speech-replay-store";
+ import { toErrorMessage } from "@/utils/error-messages";
+ import { showProviderNoticeToast } from "@/utils/provider-notice-toast";
+ import { applyCheckoutStatusUpdateFromEvent } from "@/git/checkout-status-cache";
+@@ -345,6 +346,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
+ 
+   useEffect(() => {
+     voiceRuntime?.updateSessionConnection(serverId, isConnected);
++    if (!isConnected) useSpeechReplayStore.getState().clearServer(serverId);
+   }, [isConnected, serverId, voiceRuntime]);
+ 
+   // If the client drops mid-initialization, clear pending flags
+@@ -647,6 +649,13 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
+       notifyVoiceAbortFailure(message.payload, toast.error);
+     });
+ 
++    const unsubSpeechReplay = client.on("speech_replay_finished", (message) => {
++      if (message.type !== "speech_replay_finished") return;
++      const { requestId, status, error } = message.payload;
++      useSpeechReplayStore.getState().finish(serverId, requestId);
++      if (status === "error" && error) toast.error(error);
++    });
++
+     const unsubTranscription = client.on("transcription_result", (message) => {
+       if (message.type !== "transcription_result") return;
+ 
+@@ -692,6 +701,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
+       unsubPermissionResolved();
+       unsubAudioOutput();
+       unsubActivity();
++      unsubSpeechReplay();
+       unsubTranscription();
+       unsubVoiceInputState();
+       unsubTerminalAttention();
+diff --git a/packages/app/src/i18n/resources/ar.ts b/packages/app/src/i18n/resources/ar.ts
+index c765f3b83..9e9558ab9 100644
+--- a/packages/app/src/i18n/resources/ar.ts
++++ b/packages/app/src/i18n/resources/ar.ts
+@@ -329,6 +329,8 @@ export const ar: TranslationResources = {
+     actions: {
+       copyCode: "نسخ الرمز",
+       copyTurn: "نسخ بدوره",
++      readTurn: "قراءة الدور بصوت عالٍ",
++      stopReading: "إيقاف القراءة",
+       copyMessage: "انسخ الرسالة",
+       forkMenu: "تفريع الرسالة",
+       forkInNewTab: "تفريع في تبويب جديد",
+diff --git a/packages/app/src/i18n/resources/en.ts b/packages/app/src/i18n/resources/en.ts
+index 351fb33ac..d3bf52804 100644
+--- a/packages/app/src/i18n/resources/en.ts
++++ b/packages/app/src/i18n/resources/en.ts
+@@ -326,6 +326,8 @@ export const en = {
+     actions: {
+       copyCode: "Copy code",
+       copyTurn: "Copy turn",
++      readTurn: "Read turn aloud",
++      stopReading: "Stop reading",
+       copyMessage: "Copy message",
+       forkMenu: "Fork chat from here",
+       forkInNewTab: "Fork in a new tab",
+diff --git a/packages/app/src/i18n/resources/es.ts b/packages/app/src/i18n/resources/es.ts
+index fd195ce59..1ed1318f2 100644
+--- a/packages/app/src/i18n/resources/es.ts
++++ b/packages/app/src/i18n/resources/es.ts
+@@ -334,6 +334,8 @@ export const es: TranslationResources = {
+     actions: {
+       copyCode: "Copiar código",
+       copyTurn: "Copiar turno",
++      readTurn: "Leer turno en voz alta",
++      stopReading: "Dejar de leer",
+       copyMessage: "Copiar mensaje",
+       forkMenu: "Bifurcar mensaje",
+       forkInNewTab: "Bifurcar en una pestaña nueva",
+diff --git a/packages/app/src/i18n/resources/fr.ts b/packages/app/src/i18n/resources/fr.ts
+index 975d6a373..57efdd379 100644
+--- a/packages/app/src/i18n/resources/fr.ts
++++ b/packages/app/src/i18n/resources/fr.ts
+@@ -334,6 +334,8 @@ export const fr: TranslationResources = {
+     actions: {
+       copyCode: "Copier le code",
+       copyTurn: "Copier l’échange",
++      readTurn: "Lire l’échange à voix haute",
++      stopReading: "Arrêter la lecture",
+       copyMessage: "Copier le message",
+       forkMenu: "Forker la conversation à partir d’ici",
+       forkInNewTab: "Forker dans un nouvel onglet",
+diff --git a/packages/app/src/i18n/resources/ja.ts b/packages/app/src/i18n/resources/ja.ts
+index 60a207e1e..72cfd10b9 100644
+--- a/packages/app/src/i18n/resources/ja.ts
++++ b/packages/app/src/i18n/resources/ja.ts
+@@ -334,6 +334,8 @@ export const ja: TranslationResources = {
+     actions: {
+       copyCode: "コードをコピー",
+       copyTurn: "ターンをコピー",
++      readTurn: "ターンを読み上げ",
++      stopReading: "読み上げを停止",
+       copyMessage: "メッセージをコピー",
+       forkMenu: "メッセージをフォーク",
+       forkInNewTab: "新しいタブにフォーク",
+diff --git a/packages/app/src/i18n/resources/ko.ts b/packages/app/src/i18n/resources/ko.ts
+index 477362532..c9482834d 100644
+--- a/packages/app/src/i18n/resources/ko.ts
++++ b/packages/app/src/i18n/resources/ko.ts
+@@ -330,6 +330,8 @@ export const ko: TranslationResources = {
+     actions: {
+       copyCode: "코드 복사",
+       copyTurn: "턴 복사",
++      readTurn: "턴 소리 내어 읽기",
++      stopReading: "읽기 중지",
+       copyMessage: "메시지 복사",
+       forkMenu: "여기에서 채팅 분기",
+       forkInNewTab: "새 탭으로 분기",
+diff --git a/packages/app/src/i18n/resources/pt-BR.ts b/packages/app/src/i18n/resources/pt-BR.ts
+index 766c6d98e..0dcb94382 100644
+--- a/packages/app/src/i18n/resources/pt-BR.ts
++++ b/packages/app/src/i18n/resources/pt-BR.ts
+@@ -333,6 +333,8 @@ export const ptBR: TranslationResources = {
+     actions: {
+       copyCode: "Copiar código",
+       copyTurn: "Copiar turno",
++      readTurn: "Ler turno em voz alta",
++      stopReading: "Parar leitura",
+       copyMessage: "Copiar mensagem",
+       forkMenu: "Bifurcar mensagem",
+       forkInNewTab: "Bifurcar em uma nova aba",
+diff --git a/packages/app/src/i18n/resources/ru.ts b/packages/app/src/i18n/resources/ru.ts
+index 23f3d810e..34e60a36a 100644
+--- a/packages/app/src/i18n/resources/ru.ts
++++ b/packages/app/src/i18n/resources/ru.ts
+@@ -333,6 +333,8 @@ export const ru: TranslationResources = {
+     actions: {
+       copyCode: "Скопировать код",
+       copyTurn: "Скопировать ответ",
++      readTurn: "Прочитать ответ вслух",
++      stopReading: "Остановить чтение",
+       copyMessage: "Копировать сообщение",
+       forkMenu: "Форкнуть чат отсюда",
+       forkInNewTab: "Создать форк в новой вкладке",
+diff --git a/packages/app/src/i18n/resources/zh-CN.ts b/packages/app/src/i18n/resources/zh-CN.ts
+index 43d8ceeef..a991531f6 100644
+--- a/packages/app/src/i18n/resources/zh-CN.ts
++++ b/packages/app/src/i18n/resources/zh-CN.ts
+@@ -329,6 +329,8 @@ export const zhCN: TranslationResources = {
+     actions: {
+       copyCode: "复制代码",
+       copyTurn: "复制回合",
++      readTurn: "朗读回合",
++      stopReading: "停止朗读",
+       copyMessage: "复制消息",
+       forkMenu: "分叉消息",
+       forkInNewTab: "分叉到新标签页",
+diff --git a/packages/app/src/speech-replay/speech-replay-store.test.ts b/packages/app/src/speech-replay/speech-replay-store.test.ts
+new file mode 100644
+index 000000000..ddb2e546a
+--- /dev/null
++++ b/packages/app/src/speech-replay/speech-replay-store.test.ts
+@@ -0,0 +1,51 @@
++import { beforeEach, describe, expect, it } from "vitest";
++import { resolveTurnSpeakButtonState, useSpeechReplayStore } from "./speech-replay-store";
++
++const active = { serverId: "s1", requestId: "r1", turnKey: "agent:turn-1" };
++const base = { available: true, serverId: "s1", turnKey: "agent:turn-1", isSpeechPlaying: false };
++
++describe("resolveTurnSpeakButtonState", () => {
++  it("is idle when the daemon can replay and nothing is playing", () => {
++    expect(resolveTurnSpeakButtonState({ ...base, active: null })).toBe("idle");
++  });
++
++  it("is hidden when the daemon lacks the feature or TTS is not ready", () => {
++    expect(resolveTurnSpeakButtonState({ ...base, available: false, active: null })).toBe("hidden");
++  });
++
++  it("shows stop for the replaying turn, even while its audio is playing", () => {
++    expect(resolveTurnSpeakButtonState({ ...base, active, isSpeechPlaying: true })).toBe("stop");
++  });
++
++  it("is disabled while another turn replays or live voice speech plays", () => {
++    expect(resolveTurnSpeakButtonState({ ...base, turnKey: "agent:turn-2", active })).toBe(
++      "disabled",
++    );
++    expect(resolveTurnSpeakButtonState({ ...base, serverId: "s2", active })).toBe("disabled");
++    expect(resolveTurnSpeakButtonState({ ...base, active: null, isSpeechPlaying: true })).toBe(
++      "disabled",
++    );
++  });
++});
++
++describe("useSpeechReplayStore", () => {
++  beforeEach(() => useSpeechReplayStore.setState({ active: null }));
++
++  it("ignores a finish for a superseded request", () => {
++    const store = useSpeechReplayStore.getState();
++    store.start(active);
++    store.finish("s1", "old-request");
++    expect(useSpeechReplayStore.getState().active).toEqual(active);
++    store.finish("s1", "r1");
++    expect(useSpeechReplayStore.getState().active).toBeNull();
++  });
++
++  it("clears the replay when its host disconnects", () => {
++    const store = useSpeechReplayStore.getState();
++    store.start(active);
++    store.clearServer("s2");
++    expect(useSpeechReplayStore.getState().active).toEqual(active);
++    store.clearServer("s1");
++    expect(useSpeechReplayStore.getState().active).toBeNull();
++  });
++});
+diff --git a/packages/app/src/speech-replay/speech-replay-store.ts b/packages/app/src/speech-replay/speech-replay-store.ts
+new file mode 100644
+index 000000000..19b15fbd7
+--- /dev/null
++++ b/packages/app/src/speech-replay/speech-replay-store.ts
+@@ -0,0 +1,51 @@
++import { create } from "zustand";
++
++/** Fork: the one assistant-turn replay in flight. The audio engine is app-wide, so so is this. */
++export interface ActiveSpeechReplay {
++  serverId: string;
++  requestId: string;
++  turnKey: string;
++}
++
++interface SpeechReplayState {
++  active: ActiveSpeechReplay | null;
++  start(replay: ActiveSpeechReplay): void;
++  /** Clears the replay only if it is still the one with this id (a superseded finish is ignored). */
++  finish(serverId: string, requestId: string): void;
++  clearServer(serverId: string): void;
++}
++
++export const useSpeechReplayStore = create<SpeechReplayState>()((set) => ({
++  active: null,
++  start: (replay) => set({ active: replay }),
++  finish: (serverId, requestId) =>
++    set((state) =>
++      state.active?.serverId === serverId && state.active.requestId === requestId
++        ? { active: null }
++        : state,
++    ),
++  clearServer: (serverId) =>
++    set((state) => (state.active?.serverId === serverId ? { active: null } : state)),
++}));
++
++export type TurnSpeakButtonState = "hidden" | "idle" | "stop" | "disabled";
++
++/**
++ * hidden: the daemon cannot replay (no feature flag, or TTS not ready).
++ * stop: this turn is replaying. disabled: other speech is playing (live voice or another replay).
++ */
++export function resolveTurnSpeakButtonState(input: {
++  available: boolean;
++  serverId: string;
++  turnKey: string;
++  active: ActiveSpeechReplay | null;
++  isSpeechPlaying: boolean;
++}): TurnSpeakButtonState {
++  const { active } = input;
++  if (active && active.serverId === input.serverId && active.turnKey === input.turnKey) {
++    return "stop";
++  }
++  if (!input.available) return "hidden";
++  if (active || input.isSpeechPlaying) return "disabled";
++  return "idle";
++}
+diff --git a/packages/app/src/speech-replay/use-turn-speech-replay.ts b/packages/app/src/speech-replay/use-turn-speech-replay.ts
+new file mode 100644
+index 000000000..491a0d0a1
+--- /dev/null
++++ b/packages/app/src/speech-replay/use-turn-speech-replay.ts
+@@ -0,0 +1,71 @@
++import { useCallback } from "react";
++import { useSessionStore } from "@/stores/session-store";
++import { useVoiceAudioEngineOptional } from "@/contexts/voice-context";
++import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
++import {
++  resolveTurnSpeakButtonState,
++  useSpeechReplayStore,
++  type TurnSpeakButtonState,
++} from "./speech-replay-store";
++
++export interface SpeechReplayScope {
++  serverId: string;
++  agentId: string;
++}
++
++/** Fork: state and press handler for one assistant turn's read-aloud button. */
++export function useTurnSpeechReplay(input: {
++  scope: SpeechReplayScope;
++  turnKey: string;
++  getContent: () => string;
++}): { state: TurnSpeakButtonState; toggle: () => void } {
++  const { scope, getContent } = input;
++  const { serverId } = scope;
++  const turnKey = `${scope.agentId}:${input.turnKey}`;
++  const engine = useVoiceAudioEngineOptional();
++  const client = useSessionStore((state) => state.sessions[serverId]?.client ?? null);
++  const available = useSessionStore((state) => {
++    const serverInfo = state.sessions[serverId]?.serverInfo;
++    return (
++      serverInfo?.features?.speechReplay === true &&
++      resolveVoiceUnavailableMessage({ serverInfo, mode: "voice" }) === null
++    );
++  });
++  // Live voice speech and replays share the app-wide audio engine, so any host playing counts.
++  const isSpeechPlaying = useSessionStore((state) =>
++    Object.values(state.sessions).some((session) => session?.isPlayingAudio),
++  );
++  const active = useSpeechReplayStore((state) => state.active);
++  const state = resolveTurnSpeakButtonState({
++    available: available && client !== null && engine !== null,
++    serverId,
++    turnKey,
++    active,
++    isSpeechPlaying,
++  });
++
++  const toggle = useCallback(() => {
++    const store = useSpeechReplayStore.getState();
++    if (state === "stop" && active) {
++      store.finish(active.serverId, active.requestId);
++      try {
++        client?.cancelSpeechReplay(active.requestId);
++      } catch (error) {
++        console.warn("[SpeechReplay] cancel failed:", error);
++      }
++      engine?.stop();
++      engine?.clearQueue();
++      return;
++    }
++    if (state !== "idle" || !client) return;
++    const text = getContent().trim();
++    if (!text) return;
++    try {
++      store.start({ serverId, requestId: client.startSpeechReplay(text), turnKey });
++    } catch (error) {
++      console.warn("[SpeechReplay] start failed:", error);
++    }
++  }, [active, client, engine, getContent, serverId, state, turnKey]);
++
++  return { state, toggle };
++}
+diff --git a/packages/client/src/daemon-client.ts b/packages/client/src/daemon-client.ts
+index 524df5670..cfaea8193 100644
+--- a/packages/client/src/daemon-client.ts
++++ b/packages/client/src/daemon-client.ts
+@@ -4370,6 +4370,20 @@ export class DaemonClient {
+     this.sendSessionMessage({ type: "audio_played", id });
+   }
+ 
++  /**
++   * Fork: read text aloud with the daemon's TTS (requires `features.speechReplay`).
++   * Audio arrives as `audio_output`; completion as `speech_replay_finished`. Returns the request id.
++   */
++  startSpeechReplay(text: string): string {
++    const requestId = this.createRequestId();
++    this.sendSessionMessageStrict({ type: "speech_replay_request", requestId, text });
++    return requestId;
++  }
++
++  cancelSpeechReplay(requestId: string): void {
++    this.sendSessionMessage({ type: "speech_replay_cancel", requestId });
++  }
++
+   // ============================================================================
+   // Git Operations
+   // ============================================================================
+diff --git a/packages/protocol/src/messages.ts b/packages/protocol/src/messages.ts
+index 4beaf0a0b..52e4ef3f1 100644
+--- a/packages/protocol/src/messages.ts
++++ b/packages/protocol/src/messages.ts
+@@ -927,6 +927,18 @@ export const AudioPlayedMessageSchema = z.object({
+   id: z.string(),
+ });
+ 
++// Fork: read an assistant turn aloud with the daemon's TTS. Gated by features.speechReplay.
++export const SpeechReplayRequestMessageSchema = z.object({
++  type: z.literal("speech_replay_request"),
++  requestId: z.string(),
++  text: z.string(),
++});
++
++export const SpeechReplayCancelMessageSchema = z.object({
++  type: z.literal("speech_replay_cancel"),
++  requestId: z.string(),
++});
++
+ const AgentDirectoryFilterSchema = z.object({
+   labels: z.record(z.string(), z.string()).optional(),
+   projectKeys: z.array(z.string()).optional(),
+@@ -3251,6 +3263,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
+   VoiceAudioChunkMessageSchema,
+   AbortRequestMessageSchema,
+   AudioPlayedMessageSchema,
++  SpeechReplayRequestMessageSchema,
++  SpeechReplayCancelMessageSchema,
+   FetchAgentsRequestMessageSchema,
+   FetchAgentHistoryRequestMessageSchema,
+   FetchRecentProviderSessionsRequestMessageSchema,
+@@ -3505,6 +3519,15 @@ export const TranscriptionResultMessageSchema = z.object({
+   }),
+ });
+ 
++export const SpeechReplayFinishedMessageSchema = z.object({
++  type: z.literal("speech_replay_finished"),
++  payload: z.object({
++    requestId: z.string(),
++    status: z.enum(["completed", "canceled", "error"]),
++    error: z.string().optional(),
++  }),
++});
++
+ export const VoiceInputStateMessageSchema = z.object({
+   type: z.literal("voice_input_state"),
+   payload: z.object({
+@@ -3668,6 +3691,8 @@ export const ServerInfoStatusPayloadSchema = z
+         forgeSearch: z.boolean().optional(),
+         // COMPAT(daemonStatusRpc): added in v0.1.76, remove gate after 2026-11-18.
+         daemonStatusRpc: z.boolean().optional(),
++        // Fork: speech_replay_request / speech_replay_cancel are handled.
++        speechReplay: z.boolean().optional(),
+         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
+         daemonConfigReload: z.boolean().optional(),
+         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
+@@ -6970,6 +6995,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
+   AudioOutputMessageSchema,
+   TranscriptionResultMessageSchema,
+   VoiceInputStateMessageSchema,
++  SpeechReplayFinishedMessageSchema,
+   DictationStreamAckMessageSchema,
+   DictationStreamFinishAcceptedMessageSchema,
+   DictationStreamPartialMessageSchema,
+diff --git a/packages/server/src/server/authorization/operation-permissions.ts b/packages/server/src/server/authorization/operation-permissions.ts
+index 80599a74a..42e2fbc4e 100644
+--- a/packages/server/src/server/authorization/operation-permissions.ts
++++ b/packages/server/src/server/authorization/operation-permissions.ts
+@@ -183,6 +183,8 @@ const INBOUND_PERMISSION = {
+   set_agent_thinking_request: "workspace.write",
+   set_daemon_config_request: "daemon.manage",
+   set_voice_mode: "workspace.write",
++  speech_replay_request: "workspace.write",
++  speech_replay_cancel: "workspace.write",
+   shutdown_server_request: "daemon.manage",
+   start_workspace_script_request: "workspace.write",
+   stash_list_request: "workspace.read",
+@@ -418,6 +420,7 @@ const OUTBOUND_PERMISSION = {
+   set_agent_thinking_response: "workspace.write",
+   set_daemon_config_response: "daemon.manage",
+   set_voice_mode_response: "workspace.write",
++  speech_replay_finished: "workspace.write",
+   start_workspace_script_response: "workspace.write",
+   stash_list_response: "workspace.read",
+   stash_pop_response: "workspace.read",
+diff --git a/packages/server/src/server/session.ts b/packages/server/src/server/session.ts
+index 9a2b2c082..e135ae080 100644
+--- a/packages/server/src/server/session.ts
++++ b/packages/server/src/server/session.ts
+@@ -2703,6 +2703,8 @@ export class Session {
+       case "dictation_stream_chunk":
+       case "dictation_stream_finish":
+       case "dictation_stream_cancel":
++      case "speech_replay_request":
++      case "speech_replay_cancel":
+         return this.voiceSessions.handleMessage(msg);
+       case "restart_server_request":
+         return this.handleRestartServerRequest(msg.requestId, msg.reason);
+diff --git a/packages/server/src/server/session/owned-subscriptions/replies.ts b/packages/server/src/server/session/owned-subscriptions/replies.ts
+index cf8a44b3c..c0fb5ae5f 100644
+--- a/packages/server/src/server/session/owned-subscriptions/replies.ts
++++ b/packages/server/src/server/session/owned-subscriptions/replies.ts
+@@ -35,6 +35,7 @@ const exceptions = {
+   "daemon.update.progress": ["daemon.update.request"],
+   // Transcription belongs to the explicitly retained voice operation, not a request ID.
+   transcription_result: [],
++  speech_replay_finished: [],
+   // This legacy requestId is a producer marker; checkout updates require event demand.
+   checkout_status_update: [],
+ } satisfies Record<ExceptionalReply, readonly Request["type"][]>;
+diff --git a/packages/server/src/server/session/voice/index.test.ts b/packages/server/src/server/session/voice/index.test.ts
+index 043b759d1..5c33628c2 100644
+--- a/packages/server/src/server/session/voice/index.test.ts
++++ b/packages/server/src/server/session/voice/index.test.ts
+@@ -1,6 +1,7 @@
+ import { EventEmitter } from "node:events";
++import { Readable } from "node:stream";
+ import pino from "pino";
+-import { expect, test } from "vitest";
++import { expect, test, vi } from "vitest";
+ import { SessionDelivery } from "../owned-subscriptions/index.js";
+ import { VoiceSessions } from "./index.js";
+ import type { StreamingTranscriptionSession } from "../../speech/speech-provider.js";
+@@ -56,3 +57,49 @@ test("a failed speech close reports the failure without retaining observation de
+   expect(voice.hasDemand).toBe(false);
+   expect(demands.at(-1)).toBe(false);
+ });
++
++test("speech replay requests run on the source's voice session and release it when done", async () => {
++  const source = {};
++  const sent: string[] = [];
++  const delivery = new SessionDelivery((_source, message) => {
++    sent.push(message.type);
++  });
++  delivery.attach(source, true);
++  const voice = new VoiceSessions(
++    {
++      sessionId: "speech-replay",
++      logger: pino({ level: "silent" }),
++      host: {
++        emit() {},
++        async loadAgent() {
++          throw new Error("Unexpected agent load");
++        },
++        async reloadAgentSession() {
++          throw new Error("Unexpected agent reload");
++        },
++        async sendSpokenInput() {
++          throw new Error("Unexpected spoken input");
++        },
++        async interruptAgentIfRunning() {},
++        hasActiveAgentRun: () => false,
++      },
++      stt: null,
++      tts: {
++        async synthesizeSpeech() {
++          return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
++        },
++      },
++    },
++    delivery,
++    () => {},
++  );
++  const request = { type: "speech_replay_request" as const, requestId: "r1", text: "Hello." };
++  const replay = delivery.request(source, request, () => voice.handleMessage(request));
++  await vi.waitFor(() => expect(sent).toContain("audio_output"));
++  expect(voice.hasDemand).toBe(true);
++  const cancel = { type: "speech_replay_cancel" as const, requestId: "r1" };
++  await delivery.request(source, cancel, () => voice.handleMessage(cancel));
++  await replay;
++  expect(sent).toContain("speech_replay_finished");
++  await vi.waitFor(() => expect(voice.hasDemand).toBe(false));
++});
+diff --git a/packages/server/src/server/session/voice/index.ts b/packages/server/src/server/session/voice/index.ts
+index 1832da1c6..01fe46885 100644
+--- a/packages/server/src/server/session/voice/index.ts
++++ b/packages/server/src/server/session/voice/index.ts
+@@ -13,7 +13,9 @@ type VoiceMessage = Extract<
+       | "dictation_stream_start"
+       | "dictation_stream_chunk"
+       | "dictation_stream_finish"
+-      | "dictation_stream_cancel";
++      | "dictation_stream_cancel"
++      | "speech_replay_request"
++      | "speech_replay_cancel";
+   }
+ >;
+ 
+@@ -123,6 +125,10 @@ export class VoiceSessions {
+         return voice.handleDictationFinish(message.dictationId, message.finalSeq);
+       case "dictation_stream_cancel":
+         return voice.handleDictationCancel(message.dictationId);
++      case "speech_replay_request":
++        return voice.handleSpeechReplay(message.requestId, message.text);
++      case "speech_replay_cancel":
++        return voice.cancelSpeechReplay(message.requestId);
+     }
+   }
+ }
+@@ -133,6 +139,7 @@ function isVoiceOutput(message: SessionOutboundMessage): boolean {
+     case "transcription_result":
+     case "voice_input_state":
+     case "set_voice_mode_response":
++    case "speech_replay_finished":
+     case "dictation_stream_ack":
+     case "dictation_stream_partial":
+     case "dictation_stream_final":
+diff --git a/packages/server/src/server/session/voice/voice-session.test.ts b/packages/server/src/server/session/voice/voice-session.test.ts
+index 1511d6f2f..d4f57171f 100644
+--- a/packages/server/src/server/session/voice/voice-session.test.ts
++++ b/packages/server/src/server/session/voice/voice-session.test.ts
+@@ -326,3 +326,90 @@ describe("VoiceSession streaming transcription", () => {
+     await voiceSession.cleanup();
+   });
+ });
++
++describe("VoiceSession speech replay (fork)", () => {
++  const oneChunkTts: TextToSpeechProvider = {
++    async synthesizeSpeech() {
++      return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
++    },
++  };
++
++  function finished(host: FakeVoiceHost) {
++    return host.emitted.filter((message) => message.type === "speech_replay_finished");
++  }
++
++  test("speaks sanitized text outside voice mode and reports completion after playback", async () => {
++    const spoken: string[] = [];
++    const tts: TextToSpeechProvider = {
++      async synthesizeSpeech(text) {
++        spoken.push(text);
++        return oneChunkTts.synthesizeSpeech(text);
++      },
++    };
++    const { voiceSession, host } = createVoiceSession(tts);
++    host.emit = (message) => {
++      host.emitted.push(message);
++      if (message.type === "audio_output") voiceSession.handleAudioPlayed(message.payload.id);
++    };
++
++    await voiceSession.handleSpeechReplay(
++      "r1",
++      "# Done\n\n```ts\nconst x = 1;\n```\nSee [docs](https://x.y).",
++    );
++
++    expect(spoken.join(" ")).toBe("Done. Code block. See docs.");
++    const audio = host.emitted.filter(isAudioOutput);
++    expect(audio.length).toBeGreaterThan(0);
++    expect(audio.every((m) => m.type === "audio_output" && !m.payload.isVoiceMode)).toBe(true);
++    expect(finished(host)).toEqual([
++      { type: "speech_replay_finished", payload: { requestId: "r1", status: "completed" } },
++    ]);
++    await voiceSession.cleanup();
++  });
++
++  test("cancel stops the replay without interrupting the agent", async () => {
++    const { voiceSession, host } = createVoiceSession(oneChunkTts);
++    const interrupt = vi.fn(async () => {});
++    host.interruptAgentIfRunning = interrupt;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
++
++    const replay = voiceSession.handleSpeechReplay("r2", "First sentence. Second sentence.");
++    await waitForAudioOutput(host);
++    voiceSession.cancelSpeechReplay("other-id");
++    expect(voiceSession.hasDemand).toBe(true);
++    voiceSession.cancelSpeechReplay("r2");
++    await replay;
++
++    const audio = host.emitted.filter(isAudioOutput);
++    expect(audio).toHaveLength(1);
++    expect(audio[0]?.type === "audio_output" && audio[0].payload.isVoiceMode).toBe(true);
++    expect(finished(host)).toEqual([
++      { type: "speech_replay_finished", payload: { requestId: "r2", status: "canceled" } },
++    ]);
++    expect(interrupt).not.toHaveBeenCalled();
++    await voiceSession.cleanup();
++  });
++
++  test("barge-in during voice mode cancels the replay", async () => {
++    const { voiceSession, detector, host } = createVoiceSession(oneChunkTts);
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
++    const replay = voiceSession.handleSpeechReplay("r3", "A long reply.");
++    await waitForAudioOutput(host);
++    detector.emit("speech_started");
++    await replay;
++    expect(finished(host).at(-1)?.payload).toEqual({ requestId: "r3", status: "canceled" });
++    await voiceSession.cleanup();
++  });
++
++  test("reports an error when TTS is not configured", async () => {
++    const { voiceSession, host } = createVoiceSession(null);
++    await voiceSession.handleSpeechReplay("r4", "Hello there.");
++    expect(finished(host)).toEqual([
++      {
++        type: "speech_replay_finished",
++        payload: { requestId: "r4", status: "error", error: "TTS not configured" },
++      },
++    ]);
++    await voiceSession.cleanup();
++  });
++});
+diff --git a/packages/server/src/server/session/voice/voice-session.ts b/packages/server/src/server/session/voice/voice-session.ts
+index 95537dd02..3fb06de60 100644
+--- a/packages/server/src/server/session/voice/voice-session.ts
++++ b/packages/server/src/server/session/voice/voice-session.ts
+@@ -20,6 +20,7 @@ import type { ManagedAgent } from "../../agent/agent-manager.js";
+ import type { AgentSessionConfig } from "../../agent/agent-sdk-types.js";
+ import type { LocalSpeechModelId } from "../../speech/providers/local/models.js";
+ import { toResolver, type Resolvable } from "../../speech/provider-resolver.js";
++import { sanitizeTextForSpeech } from "../../speech/speech-replay-text.js";
+ import type { SpeechReadinessSnapshot, SpeechReadinessState } from "../../speech/speech-runtime.js";
+ 
+ const PCM_SAMPLE_RATE = 16000;
+@@ -209,6 +210,7 @@ export class VoiceSession {
+ 
+   private voiceModeAgentId: string | null = null;
+   private voiceModeBaseConfig: VoiceModeBaseConfig | null = null;
++  private speechReplay: { requestId: string; controller: AbortController } | null = null;
+ 
+   constructor(options: VoiceSessionOptions) {
+     const { host, logger, sessionId, sttLanguage, tts, stt, voice, voiceBridge, dictation } =
+@@ -247,6 +249,7 @@ export class VoiceSession {
+       this.isVoiceMode ||
+       this.dictationStreamManager.hasDemand ||
+       this.processingPhase !== "idle" ||
++      this.speechReplay !== null ||
+       this.audioBuffer !== null ||
+       this.pendingAudioSegments.length > 0
+     );
+@@ -1060,6 +1063,7 @@ export class VoiceSession {
+         },
+         "Voice speak tool call received by session handler",
+       );
++      this.cancelSpeechReplay(undefined, "voice speak");
+       const abortSignal = signal
+         ? AbortSignal.any([signal, this.abortController.signal])
+         : this.abortController.signal;
+@@ -1091,6 +1095,50 @@ export class VoiceSession {
+     });
+   }
+ 
++  /**
++   * Fork: read text aloud through the same TTS path as the voice `speak` tool.
++   * In voice mode the audio is flagged `isVoiceMode` so the client plays it through the
++   * voice runtime (same echo cancellation and barge-in as live speech).
++   */
++  async handleSpeechReplay(requestId: string, text: string): Promise<void> {
++    this.cancelSpeechReplay(undefined, "superseded");
++    const finish = (status: "completed" | "canceled" | "error", error?: string) =>
++      this.emit({
++        type: "speech_replay_finished",
++        payload: { requestId, status, ...(error ? { error } : {}) },
++      });
++    const unavailable = this.resolveVoiceFeatureUnavailableContext("voice_mode");
++    if (unavailable) return finish("error", unavailable.message);
++    const spoken = sanitizeTextForSpeech(text);
++    if (!spoken) return finish("completed");
++
++    const controller = new AbortController();
++    this.speechReplay = { requestId, controller };
++    try {
++      await this.ttsManager.generateAndWaitForPlayback(
++        spoken,
++        (msg) => this.emit(msg),
++        controller.signal,
++        this.isVoiceMode,
++      );
++      finish(controller.signal.aborted ? "canceled" : "completed");
++    } catch (error) {
++      if (controller.signal.aborted) finish("canceled");
++      else finish("error", getErrorMessage(error));
++    } finally {
++      if (this.speechReplay?.controller === controller) this.speechReplay = null;
++    }
++  }
++
++  /** Stop the replay with this id, or any replay when no id is given. Never touches the agent. */
++  cancelSpeechReplay(requestId?: string, reason = "client cancel"): void {
++    const replay = this.speechReplay;
++    if (!replay || (requestId !== undefined && replay.requestId !== requestId)) return;
++    this.sessionLogger.debug({ requestId: replay.requestId, reason }, "Cancelling speech replay");
++    this.speechReplay = null;
++    replay.controller.abort();
++  }
++
+   /**
+    * Handle abort request from client
+    */
+@@ -1101,6 +1149,7 @@ export class VoiceSession {
+     );
+ 
+     this.abortController.abort();
++    this.cancelSpeechReplay(undefined, "abort request");
+     this.ttsManager.cancelPendingPlaybacks("abort request");
+ 
+     // Voice abort should always interrupt active agent output immediately.
+@@ -1320,6 +1369,7 @@ export class VoiceSession {
+     if (this.closed) return;
+     this.closed = true;
+     this.abortController.abort();
++    this.cancelSpeechReplay(undefined, "session closed");
+     this.clearBufferTimeout();
+     this.pendingAudioSegments = [];
+     this.audioBuffer = null;
+diff --git a/packages/server/src/server/speech/speech-replay-text.test.ts b/packages/server/src/server/speech/speech-replay-text.test.ts
+new file mode 100644
+index 000000000..aa52cd794
+--- /dev/null
++++ b/packages/server/src/server/speech/speech-replay-text.test.ts
+@@ -0,0 +1,44 @@
++import { describe, expect, test } from "vitest";
++import { sanitizeTextForSpeech } from "./speech-replay-text.js";
++
++describe("sanitizeTextForSpeech", () => {
++  test("replaces code blocks with one placeholder and keeps surrounding prose", () => {
++    const input = "Run this:\n```bash\nnpm test\n```\n~~~\nmore\n~~~\nThen check.";
++    expect(sanitizeTextForSpeech(input)).toBe("Run this:\nCode block.\nThen check.");
++  });
++
++  test("drops an unterminated fence through the end of the text", () => {
++    expect(sanitizeTextForSpeech("Before.\n```\nconst a = 1;")).toBe("Before.\nCode block.");
++  });
++
++  test("keeps link and image labels, replaces bare URLs, strips tags", () => {
++    expect(
++      sanitizeTextForSpeech(
++        "See [the docs](https://a.b/c) and ![diagram](x.png) at https://x.y/z <spoken-input>now</spoken-input>",
++      ),
++    ).toBe("See the docs and diagram at link now.");
++  });
++
++  test("strips headings, lists, quotes, tasks and emphasis but keeps snake_case and a < b", () => {
++    const input = [
++      "## Summary",
++      "- **Bold** item",
++      "1. `user_id` _field_",
++      "> quoted ~~old~~",
++      "- [x] done",
++      "if a < b then",
++    ].join("\n");
++    expect(sanitizeTextForSpeech(input)).toBe(
++      "Summary.\nBold item.\nuser_id field.\nquoted old.\ndone.\nif a < b then.",
++    );
++  });
++
++  test("reads table cells and drops rules and punctuation-only lines", () => {
++    const input = "| Name | Value |\n| --- | --- |\n| a | 1 |\n\n---\n***";
++    expect(sanitizeTextForSpeech(input)).toBe("Name, Value.\na, 1.");
++  });
++
++  test("returns an empty string when nothing is speakable", () => {
++    expect(sanitizeTextForSpeech("---\n\n  \n")).toBe("");
++  });
++});
+diff --git a/packages/server/src/server/speech/speech-replay-text.ts b/packages/server/src/server/speech/speech-replay-text.ts
+new file mode 100644
+index 000000000..b60b78071
+--- /dev/null
++++ b/packages/server/src/server/speech/speech-replay-text.ts
+@@ -0,0 +1,60 @@
++/**
++ * Turn an assistant turn's markdown into text worth hearing (fork: speech replay).
++ *
++ * Code blocks become a short spoken placeholder, links keep their label, tags and
++ * markdown syntax are removed. Each surviving line ends in punctuation so headings
++ * and list items get a pause instead of running together. Lines with nothing to
++ * pronounce are dropped: punctuation-only TTS segments synthesize to empty audio.
++ */
++
++const CODE_BLOCK_PLACEHOLDER = "Code block.";
++const FENCE = /^\s*(`{3,}|~{3,})/;
++const HAS_SPEAKABLE_CONTENT = /[\p{L}\p{N}]/u;
++const ENDS_WITH_PUNCTUATION = /[.!?:;,]$/;
++
++function cleanLine(line: string): string {
++  return (
++    line
++      // <tag>, </tag>, <tag attr="x" /> but not `a < b`
++      .replace(/<\/?[a-zA-Z][\w:-]*(?:\s[^<>]*)?\/?>/g, " ")
++      // ![alt](src), [label](href), [label][ref]
++      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
++      .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
++      .replace(/https?:\/\/\S+/g, "link")
++      // heading, blockquote, list and task-list markers
++      .replace(/^\s{0,3}(?:#{1,6}\s+|(?:>\s?)+|[-*+]\s+(?:\[[ xX]\]\s+)?|\d+[.)]\s+)/, "")
++      // table pipes
++      .replace(/^\s*\|/, "")
++      .replace(/\|\s*$/, "")
++      .replace(/\s*\|\s*/g, ", ")
++      // emphasis and inline code; `_` only at word edges so snake_case survives
++      .replace(/\*+|~~|`+/g, "")
++      .replace(/(^|[^\p{L}\p{N}])_+|_+(?=[^\p{L}\p{N}]|$)/gu, "$1")
++      .replace(/\\([\\`*_{}[\]()#+\-.!|])/g, "$1")
++      .replace(/\s+/g, " ")
++      .trim()
++  );
++}
++
++export function sanitizeTextForSpeech(markdown: string): string {
++  const out: string[] = [];
++  let fence: string | null = null;
++  for (const raw of markdown.split(/\r?\n/)) {
++    const fenceMatch = FENCE.exec(raw);
++    if (fence) {
++      if (fenceMatch && fenceMatch[1][0] === fence[0] && fenceMatch[1].length >= fence.length) {
++        fence = null;
++      }
++      continue;
++    }
++    if (fenceMatch) {
++      fence = fenceMatch[1];
++      if (out[out.length - 1] !== CODE_BLOCK_PLACEHOLDER) out.push(CODE_BLOCK_PLACEHOLDER);
++      continue;
++    }
++    const line = cleanLine(raw);
++    if (!HAS_SPEAKABLE_CONTENT.test(line)) continue;
++    out.push(ENDS_WITH_PUNCTUATION.test(line) ? line : `${line}.`);
++  }
++  return out.join("\n");
++}
+diff --git a/packages/server/src/server/websocket-server.ts b/packages/server/src/server/websocket-server.ts
+index 88fb2c327..aeda66944 100644
+--- a/packages/server/src/server/websocket-server.ts
++++ b/packages/server/src/server/websocket-server.ts
+@@ -1967,6 +1967,8 @@ export class VoiceAssistantWebSocketServer {
+         providersSnapshot: true,
+         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
+         providersSnapshotCwd: true,
++        // Fork: assistant-turn replay through the daemon's TTS.
++        speechReplay: true,
+         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
+         // feature gate and legacy fallback after 2027-01-17 once the supported
+         // daemon floor is >= v0.2.0.
+-- 
+2.52.0
+
