@@ -1,0 +1,4925 @@
+From e019212a6b852a97f4b21bb4ddb4f41bf43435fc Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Thu, 29 Oct 2026 00:47:50 -0600
+Subject: [PATCH] fork: build schedule cadence from intervals, times, days and
+ cron
+
+Replace the five cadence presets in the schedule sheet with a cadence
+builder: Interval (optionally inside set hours and days), Daily at
+several times, Weekly days, Monthly on a day or the nth weekday, and a
+custom Cron field. Every mode compiles to one five-field cron the
+daemon already runs, so no wire change is needed.
+
+- A saved expression opens in a builder mode only when compiling that
+  mode gives back the exact expression; anything else opens as Cron.
+  Untouched cadences and limits are never resent on edit.
+- Cron cadences without a time zone open in UTC, where the daemon runs
+  them. Legacy rolling intervals stay untouched until changed.
+- The time zone is pickable. The preview lists upcoming runs and a
+  14-day strip computed with the daemon's own matcher, now shared from
+  protocol (findNextCronMatch), including fall-back repeats,
+  spring-forward skips and short months.
+- Ends: never, after a date (expiresAt at local midnight after the
+  date) or after N runs (maxRuns, counted against finished runs loaded
+  with schedule/inspect on edit).
+- Host offline and save failures show an alert; cadences that never
+  run are blocked.
+
+PASEO-21
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../schedules-edit-model-hydration.spec.ts    |    9 +-
+ .../browser/schedules-project-target.spec.ts  |   17 +-
+ .../components/schedules/cadence-editor.tsx   | 1482 +++++++++++++++--
+ .../schedules/schedule-form-sheet.tsx         |  158 +-
+ .../app/src/schedules/cadence-builder.test.ts |  135 ++
+ packages/app/src/schedules/cadence-builder.ts |  791 +++++++++
+ .../app/src/schedules/cadence-preview.test.ts |  209 +++
+ packages/app/src/schedules/cadence-preview.ts |  459 +++++
+ .../schedule-cadence-options.test.ts          |   56 -
+ .../src/schedules/schedule-cadence-options.ts |   62 -
+ .../src/schedules/schedule-cadence-state.ts   |  217 +++
+ packages/app/src/schedules/schedule-ends.ts   |  163 ++
+ .../src/schedules/schedule-form-model.test.ts |  120 +-
+ .../app/src/schedules/schedule-form-model.ts  |  100 +-
+ .../schedules/use-schedule-cadence-inputs.ts  |   56 +
+ .../src/schedule/cron-next-run.test.ts        |  108 ++
+ .../protocol/src/schedule/cron-next-run.ts    |  143 ++
+ packages/server/src/server/schedule/cron.ts   |  112 +-
+ 18 files changed, 3971 insertions(+), 426 deletions(-)
+ create mode 100644 packages/app/src/schedules/cadence-builder.test.ts
+ create mode 100644 packages/app/src/schedules/cadence-builder.ts
+ create mode 100644 packages/app/src/schedules/cadence-preview.test.ts
+ create mode 100644 packages/app/src/schedules/cadence-preview.ts
+ delete mode 100644 packages/app/src/schedules/schedule-cadence-options.test.ts
+ delete mode 100644 packages/app/src/schedules/schedule-cadence-options.ts
+ create mode 100644 packages/app/src/schedules/schedule-cadence-state.ts
+ create mode 100644 packages/app/src/schedules/schedule-ends.ts
+ create mode 100644 packages/app/src/schedules/use-schedule-cadence-inputs.ts
+ create mode 100644 packages/protocol/src/schedule/cron-next-run.test.ts
+ create mode 100644 packages/protocol/src/schedule/cron-next-run.ts
+
+diff --git a/packages/app/e2e/browser/schedules-edit-model-hydration.spec.ts b/packages/app/e2e/browser/schedules-edit-model-hydration.spec.ts
+index de91c8856..97286db0a 100644
+--- a/packages/app/e2e/browser/schedules-edit-model-hydration.spec.ts
++++ b/packages/app/e2e/browser/schedules-edit-model-hydration.spec.ts
+@@ -113,9 +113,10 @@ test.describe("Schedules", () => {
+     await expectSettled(modeTrigger);
+     await expect(page.getByTestId("cadence-mode")).toHaveCount(0);
+     await expect(page.getByTestId("cadence-interval-value")).toHaveCount(0);
+-    await expect(page.getByTestId("schedule-cadence-preset-trigger")).toContainText("Daily 9:00");
++    await expect(page.getByTestId("schedule-preview-summary")).toContainText(
++      "Every day at 9:00 AM",
++    );
+     await expect(page.getByText(/Times are in/)).toHaveCount(0);
+-    await expect(formSheet.getByText("Cron", { exact: true })).toHaveCount(0);
+   });
+ 
+   test("edit form hydrates a non-default host schedule after reload", async ({ page }) => {
+@@ -163,7 +164,9 @@ test.describe("Schedules", () => {
+     await expect(modeTrigger).toContainText("Load Test", { timeout: 30_000 });
+     await expectSettled(modeTrigger);
+     await expect(page.getByTestId("cadence-mode")).toHaveCount(0);
+-    await expect(page.getByTestId("schedule-cadence-preset-trigger")).toContainText("Daily 9:00");
++    await expect(page.getByTestId("schedule-preview-summary")).toContainText(
++      "Every day at 9:00 AM",
++    );
+   });
+ 
+   test("create opens pristine after closing an edit form", async ({ page }) => {
+diff --git a/packages/app/e2e/browser/schedules-project-target.spec.ts b/packages/app/e2e/browser/schedules-project-target.spec.ts
+index 4c36eb398..5f787f3e3 100644
+--- a/packages/app/e2e/browser/schedules-project-target.spec.ts
++++ b/packages/app/e2e/browser/schedules-project-target.spec.ts
+@@ -199,7 +199,7 @@ test.describe("Schedules project target", () => {
+     await expect(page.getByTestId("cadence-mode")).toHaveCount(0);
+     await expect(page.getByTestId("cadence-interval-value")).toHaveCount(0);
+     await expect(page.getByText(/Times are in/)).toHaveCount(0);
+-    await expect(formSheet.getByText("Cron", { exact: true })).toHaveCount(0);
++    await expect(page.getByTestId("schedule-cadence-mode")).toBeVisible();
+ 
+     await page.getByRole("button", { name: /select project/i }).click();
+     await page
+@@ -222,10 +222,11 @@ test.describe("Schedules project target", () => {
+       0,
+     );
+ 
+-    await page.getByTestId("schedule-cadence-preset-trigger").click();
+-    await page.getByTestId("schedule-cadence-preset-daily-9").click();
+-    await expect(page.getByTestId("schedule-cadence-preset-trigger")).toContainText("Daily 9:00");
+-    await expect(page.getByTestId("cadence-cron-expression")).toHaveValue("0 9 * * *");
++    await page.getByTestId("schedule-cadence-mode-daily").click();
++    await expect(page.getByTestId("schedule-preview-summary")).toContainText(
++      "Every day at 9:00 AM",
++    );
++    await expect(page.getByTestId("schedule-preview-cron")).toHaveText("0 9 * * *");
+ 
+     await page.getByLabel("Schedule name").fill(scheduleName);
+     await page.getByLabel("Prompt").fill("Summarize the project status.");
+@@ -366,8 +367,10 @@ test.describe("Schedules project target", () => {
+     await page.getByTestId("schedule-archive-on-finish-switch").click();
+     await page.getByLabel("Schedule name").fill(scheduleName);
+     await page.getByLabel("Prompt").fill("Run with custom workspace cleanup.");
+-    await page.getByTestId("schedule-cadence-preset-trigger").click();
+-    await page.getByTestId("schedule-cadence-preset-every-hour").click();
++    await page.getByTestId("schedule-cadence-mode-interval").click();
++    await page.getByTestId("schedule-interval-unit").click();
++    await page.getByTestId("schedule-interval-unit-hours").click();
++    await expect(page.getByTestId("schedule-preview-cron")).toHaveText("0 * * * *");
+     await page.getByRole("button", { name: "Create schedule" }).click();
+ 
+     await expect(page.getByTestId("schedule-form-sheet")).toHaveCount(0, { timeout: 30_000 });
+diff --git a/packages/app/src/components/schedules/cadence-editor.tsx b/packages/app/src/components/schedules/cadence-editor.tsx
+index 2774edd18..b2befa4e4 100644
+--- a/packages/app/src/components/schedules/cadence-editor.tsx
++++ b/packages/app/src/components/schedules/cadence-editor.tsx
+@@ -1,136 +1,1209 @@
+-import { useCallback, useMemo, useReducer, useState, type ReactNode } from "react";
++import { useCallback, useMemo, type ReactElement } from "react";
+ import { Text, View } from "react-native";
++import { X } from "lucide-react-native";
+ import { StyleSheet } from "react-native-unistyles";
+-import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
++import { Button } from "@/components/ui/button";
+ import type { FieldControlSize } from "@/components/ui/control-geometry";
+ import { Field, FormTextInput } from "@/components/ui/form-field";
++import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
+ import { SelectField, type SelectFieldOption } from "@/components/ui/select-field";
++import { Switch } from "@/components/ui/switch";
+ import {
+-  CADENCE_PRESET_OPTIONS,
+-  normalizeScheduleFormCadence,
+-  resolveCronPresetDisplay,
+-  resolveCronPresetId,
+-} from "@/schedules/schedule-cadence-options";
++  addTime,
++  CADENCE_MODES,
++  formatClockTime,
++  formatHourLabel,
++  HOUR_STEPS,
++  MAX_TIMES,
++  MINUTE_STEPS,
++  monthDayHint,
++  NTH_LABELS,
++  ordinal,
++  removeTime,
++  setCadenceMode,
++  setCadenceTimezone,
++  setCronText,
++  setIntervalEvery,
++  setIntervalHours,
++  setIntervalOffset,
++  setIntervalUnit,
++  setIntervalWindowed,
++  setMonthly,
++  setTimeText,
++  setWeekDayPreset,
++  toggleIntervalDay,
++  toggleWeekDay,
++  WEEKDAY_NAMES,
++  WEEKDAY_ORDER,
++  WEEKDAY_SHORT,
++  type CadenceDraft,
++  type CadenceMode,
++  type CadenceTimeEntry,
++  type IntervalUnit,
++  type MonthlyKind,
++  type WeekDayPreset,
++} from "@/schedules/cadence-builder";
++import {
++  formatRelative,
++  formatRunDate,
++  formatRunDay,
++  formatRunTime,
++  formatUtcOffset,
++  type CadencePreview,
++  type CadencePreviewDay,
++  type CadencePreviewEntry,
++  type CadencePreviewMark,
++} from "@/schedules/cadence-preview";
++import type { CadencePreviewState, ScheduleCadenceState } from "@/schedules/schedule-cadence-state";
++import {
++  setEndsDate,
++  setEndsKind,
++  setEndsRuns,
++  type EndsDraft,
++  type EndsKind,
++} from "@/schedules/schedule-ends";
++import type { ScheduleFormModel } from "@/schedules/schedule-form-model";
+ import { getDeviceTimeZone } from "@/utils/device-timezone";
+-import { describeCron, validateCron } from "@/utils/schedule-format";
+ 
+-type CronCadence = Extract<ScheduleCadence, { type: "cron" }>;
++type UpdateCadence = ScheduleFormModel["updateCadence"];
+ 
+ export interface CadenceEditorProps {
+-  value: ScheduleCadence;
+-  onChange: (next: ScheduleCadence) => void;
+-  error?: string;
+-  size?: FieldControlSize;
++  model: ScheduleFormModel;
++  cadence: ScheduleCadenceState;
++  size: FieldControlSize;
++  showEnds: boolean;
+ }
+ 
+-const PRESET_OPTIONS: SelectFieldOption<string>[] = CADENCE_PRESET_OPTIONS.map((option) => ({
+-  id: option.id,
+-  value: option.id,
+-  label: option.label,
+-  testID: `schedule-cadence-preset-${option.id}`,
++const MODE_LABELS: Record<CadenceMode, string> = {
++  interval: "Interval",
++  daily: "Daily",
++  weekly: "Weekly",
++  monthly: "Monthly",
++  cron: "Cron",
++};
++
++const MODE_OPTIONS: SegmentedControlOption<CadenceMode>[] = CADENCE_MODES.map((mode) => ({
++  value: mode,
++  label: MODE_LABELS[mode],
++  testID: `schedule-cadence-mode-${mode}`,
+ }));
+ 
+-function getCronPreview(expression: string, timezone: string, error: string | null): string | null {
+-  if (error || !expression) {
+-    return null;
++const ENDS_OPTIONS: SegmentedControlOption<EndsKind>[] = [
++  { value: "never", label: "Never", testID: "schedule-ends-never" },
++  { value: "date", label: "On a date", testID: "schedule-ends-date" },
++  { value: "runs", label: "After runs", testID: "schedule-ends-runs" },
++];
++
++const MONTHLY_KIND_OPTIONS: SegmentedControlOption<MonthlyKind>[] = [
++  { value: "day", label: "On day", testID: "schedule-monthly-kind-day" },
++  { value: "nth", label: "On the", testID: "schedule-monthly-kind-nth" },
++];
++
++const UNIT_OPTIONS: SelectFieldOption<IntervalUnit>[] = [
++  { id: "minutes", value: "minutes", label: "minutes", testID: "schedule-interval-unit-minutes" },
++  { id: "hours", value: "hours", label: "hours", testID: "schedule-interval-unit-hours" },
++];
++
++const WEEK_PRESETS: { id: WeekDayPreset; label: string }[] = [
++  { id: "weekdays", label: "Weekdays" },
++  { id: "weekends", label: "Weekends" },
++  { id: "all", label: "Every day" },
++];
++
++function numberOptions(
++  values: readonly number[],
++  label: (value: number) => string,
++  prefix: string,
++): SelectFieldOption<number>[] {
++  return values.map((value) => ({
++    id: String(value),
++    value,
++    label: label(value),
++    testID: `${prefix}-${value}`,
++  }));
++}
++
++function minuteLabel(value: number): string {
++  return `:${String(value).padStart(2, "0")}`;
++}
++
++/** A stable `(value) => update(draft => reduce(draft, value))` for one control. */
++function useReduce<TDraft, TValue>(
++  update: (reduce: (draft: TDraft) => TDraft) => void,
++  reduce: (draft: TDraft, value: TValue) => TDraft,
++): (value: TValue) => void {
++  return useCallback((value: TValue) => update((draft) => reduce(draft, value)), [update, reduce]);
++}
++
++const setFromHour = (draft: CadenceDraft, fromHour: number) =>
++  setIntervalHours(draft, { fromHour });
++const setToHour = (draft: CadenceDraft, toHour: number) => setIntervalHours(draft, { toHour });
++const setMonthlyKind = (draft: CadenceDraft, kind: MonthlyKind) => setMonthly(draft, { kind });
++const setMonthlyDay = (draft: CadenceDraft, day: number) => setMonthly(draft, { day });
++const setMonthlyNth = (draft: CadenceDraft, nth: number) => setMonthly(draft, { nth });
++const setMonthlyWeekday = (draft: CadenceDraft, weekday: number) => setMonthly(draft, { weekday });
++
++const MINUTE_STEP_OPTIONS = numberOptions(MINUTE_STEPS, String, "schedule-interval-every");
++const HOUR_STEP_OPTIONS = numberOptions(HOUR_STEPS, String, "schedule-interval-every");
++const FROM_HOUR_OPTIONS = numberOptions(
++  Array.from({ length: 24 }, (_, hour) => hour),
++  formatHourLabel,
++  "schedule-interval-from",
++);
++const TO_HOUR_OPTIONS = numberOptions(
++  Array.from({ length: 24 }, (_, hour) => hour + 1),
++  formatHourLabel,
++  "schedule-interval-to",
++);
++const DAY_OF_MONTH_OPTIONS = numberOptions(
++  Array.from({ length: 31 }, (_, index) => index + 1),
++  ordinal,
++  "schedule-monthly-day",
++);
++const NTH_OPTIONS = numberOptions(
++  [1, 2, 3, 4],
++  (value) => NTH_LABELS[value],
++  "schedule-monthly-nth",
++);
++const WEEKDAY_OPTIONS = numberOptions(
++  WEEKDAY_ORDER,
++  (value) => WEEKDAY_NAMES[value],
++  "schedule-monthly-weekday",
++);
++
++const FALLBACK_TIME_ZONES = [
++  "UTC",
++  "America/Los_Angeles",
++  "America/Denver",
++  "America/Phoenix",
++  "America/Chicago",
++  "America/New_York",
++  "America/Sao_Paulo",
++  "Europe/London",
++  "Europe/Berlin",
++  "Europe/Kyiv",
++  "Asia/Kolkata",
++  "Asia/Singapore",
++  "Asia/Tokyo",
++  "Australia/Sydney",
++  "Pacific/Auckland",
++];
++
++function listTimeZones(): string[] {
++  const supportedValuesOf = (Intl as { supportedValuesOf?: (key: string) => string[] })
++    .supportedValuesOf;
++  let zones: string[] = [];
++  try {
++    zones = supportedValuesOf?.("timeZone") ?? [];
++  } catch {
++    // Engines without Intl.supportedValuesOf get the short list.
+   }
+-  return describeCron({ type: "cron", expression, timezone }) ?? expression;
++  // Some engines list legacy names only (Asia/Calcutta, not Asia/Kolkata), so
++  // the common current names are always offered too.
++  return [...new Set([...FALLBACK_TIME_ZONES, ...zones])];
+ }
+ 
+-function buildCronCadence(expression: string, timezone: string): CronCadence {
+-  return { type: "cron", expression, timezone };
++function describeEvery(everyMs: number): string {
++  const minutes = Math.round(everyMs / 60_000);
++  if (minutes % 1440 === 0) {
++    const days = minutes / 1440;
++    return days === 1 ? "every day" : `every ${days} days`;
++  }
++  if (minutes % 60 === 0) {
++    const hours = minutes / 60;
++    return hours === 1 ? "every hour" : `every ${hours} hours`;
++  }
++  return minutes === 1 ? "every minute" : `every ${minutes} minutes`;
++}
++
++export function CadenceEditor({
++  model,
++  cadence,
++  size,
++  showEnds,
++}: CadenceEditorProps): ReactElement {
++  const { draft, compiled } = cadence;
++  const update = model.updateCadence;
++  const handleMode = useCallback(
++    (mode: CadenceMode) => update((current) => setCadenceMode(current, mode)),
++    [update],
++  );
++  const handleEditAsCron = useCallback(
++    () => update((current) => setCadenceMode(current, "cron")),
++    [update],
++  );
++  const showTimes = draft.mode === "daily" || draft.mode === "weekly" || draft.mode === "monthly";
++
++  return (
++    <>
++      <Field label="Cadence" testID="schedule-cadence">
++        <View style={styles.stack}>
++          <SegmentedControl
++            options={MODE_OPTIONS}
++            value={draft.mode}
++            onValueChange={handleMode}
++            size={size}
++            testID="schedule-cadence-mode"
++          />
++          {draft.legacyEveryMs !== null ? (
++            <Text style={styles.hint} testID="schedule-cadence-legacy">
++              {`Runs ${describeEvery(draft.legacyEveryMs)} after the previous run. Changing the cadence replaces it.`}
++            </Text>
++          ) : null}
++          {draft.mode === "interval" ? (
++            <IntervalPanel
++              draft={draft}
++              update={update}
++              size={size}
++              error={compiled.errors.interval}
++            />
++          ) : null}
++          {draft.mode === "weekly" ? (
++            <WeekDaysPanel draft={draft} update={update} error={compiled.errors.weekDays} />
++          ) : null}
++          {draft.mode === "monthly" ? (
++            <MonthlyPanel draft={draft} update={update} size={size} />
++          ) : null}
++          {showTimes ? (
++            <TimesPanel draft={draft} update={update} size={size} error={compiled.errors.times} />
++          ) : null}
++          {draft.mode === "cron" ? (
++            <CronPanel
++              draft={draft}
++              update={update}
++              size={size}
++              error={compiled.errors.cron ?? cadence.blocker}
++            />
++          ) : null}
++          <TimeZoneField draft={draft} update={update} size={size} now={cadence.now} />
++        </View>
++      </Field>
++
++      <PreviewCard cadence={cadence} onEditAsCron={handleEditAsCron} />
++
++      {showEnds ? (
++        <EndsField model={model} ends={cadence.ends} error={cadence.endsError} size={size} />
++      ) : null}
++    </>
++  );
+ }
+ 
+-export function CadenceEditor({ value, onChange, error, size = "md" }: CadenceEditorProps) {
++// ---------------------------------------------------------------- interval
++
++function IntervalPanel({
++  draft,
++  update,
++  size,
++  error,
++}: {
++  draft: CadenceDraft;
++  update: UpdateCadence;
++  size: FieldControlSize;
++  error: string | undefined;
++}): ReactElement {
++  const { interval } = draft;
++  const handleEvery = useReduce(update, setIntervalEvery);
++  const handleUnit = useReduce(update, setIntervalUnit);
++  const handleOffset = useReduce(update, setIntervalOffset);
++  const handleWindowed = useReduce(update, setIntervalWindowed);
++  const handleFrom = useReduce(update, setFromHour);
++  const handleTo = useReduce(update, setToHour);
++  const handleDay = useReduce(update, toggleIntervalDay);
++  const offsetOptions = useMemo(() => {
++    const values = Array.from({ length: 12 }, (_, index) => index * 5);
++    if (!values.includes(interval.offset)) {
++      values.push(interval.offset);
++      values.sort((a, b) => a - b);
++    }
++    return numberOptions(values, minuteLabel, "schedule-interval-offset");
++  }, [interval.offset]);
++
++  return (
++    <View style={styles.stack}>
++      <View style={styles.row}>
++        <Text style={styles.lead}>Every</Text>
++        <CompactSelect
++          label="Interval"
++          value={interval.every}
++          display={String(interval.every)}
++          options={interval.unit === "minutes" ? MINUTE_STEP_OPTIONS : HOUR_STEP_OPTIONS}
++          onChange={handleEvery}
++          size={size}
++          testID="schedule-interval-every"
++        />
++        <CompactSelect
++          label="Unit"
++          value={interval.unit}
++          display={interval.unit}
++          options={UNIT_OPTIONS}
++          onChange={handleUnit}
++          size={size}
++          testID="schedule-interval-unit"
++        />
++        {interval.unit === "hours" ? (
++          <>
++            <Text style={styles.lead}>at</Text>
++            <CompactSelect
++              label="Minute past the hour"
++              value={interval.offset}
++              display={minuteLabel(interval.offset)}
++              options={offsetOptions}
++              onChange={handleOffset}
++              size={size}
++              testID="schedule-interval-offset"
++            />
++          </>
++        ) : null}
++      </View>
++      <View style={styles.switchRow}>
++        <Text style={styles.body}>Only during set hours</Text>
++        <Switch
++          value={interval.windowed}
++          onValueChange={handleWindowed}
++          accessibilityLabel="Only during set hours"
++          testID="schedule-interval-window"
++        />
++      </View>
++      {interval.windowed ? (
++        <View style={styles.stack}>
++          <View style={styles.row}>
++            <Text style={styles.lead}>From</Text>
++            <CompactSelect
++              label="From hour"
++              value={interval.fromHour}
++              display={formatHourLabel(interval.fromHour)}
++              options={FROM_HOUR_OPTIONS}
++              onChange={handleFrom}
++              size={size}
++              testID="schedule-interval-from"
++            />
++            <Text style={styles.lead}>to</Text>
++            <CompactSelect
++              label="To hour"
++              value={interval.toHour}
++              display={formatHourLabel(interval.toHour)}
++              options={TO_HOUR_OPTIONS}
++              onChange={handleTo}
++              size={size}
++              testID="schedule-interval-to"
++            />
++          </View>
++          <SubLabel>On</SubLabel>
++          <DayToggles days={interval.days} onToggle={handleDay} testID="schedule-interval-days" />
++        </View>
++      ) : null}
++      {error ? <ErrorText testID="schedule-interval-error">{error}</ErrorText> : null}
++    </View>
++  );
++}
++
++// ---------------------------------------------------------------- weekly
++
++function WeekDaysPanel({
++  draft,
++  update,
++  error,
++}: {
++  draft: CadenceDraft;
++  update: UpdateCadence;
++  error: string | undefined;
++}): ReactElement {
++  const handlePreset = useReduce(update, setWeekDayPreset);
++  const handleDay = useReduce(update, toggleWeekDay);
++  return (
++    <View style={styles.stack}>
++      <View style={styles.spaceBetween}>
++        <SubLabel>On</SubLabel>
++        <View style={styles.quickRow}>
++          {WEEK_PRESETS.map((preset) => (
++            <PresetButton key={preset.id} preset={preset} onPick={handlePreset} />
++          ))}
++        </View>
++      </View>
++      <DayToggles days={draft.weekDays} onToggle={handleDay} testID="schedule-weekdays" />
++      {error ? <ErrorText testID="schedule-weekdays-error">{error}</ErrorText> : null}
++    </View>
++  );
++}
++
++function DayToggles({
++  days,
++  onToggle,
++  testID,
++}: {
++  days: readonly number[];
++  onToggle: (day: number) => void;
++  testID: string;
++}): ReactElement {
++  return (
++    <View style={styles.days} testID={testID}>
++      {WEEKDAY_ORDER.map((day) => (
++        <DayToggle
++          key={day}
++          day={day}
++          selected={days.includes(day)}
++          onToggle={onToggle}
++          testID={`${testID}-${day}`}
++        />
++      ))}
++    </View>
++  );
++}
++
++function DayToggle({
++  day,
++  selected,
++  onToggle,
++  testID,
++}: {
++  day: number;
++  selected: boolean;
++  onToggle: (day: number) => void;
++  testID: string;
++}): ReactElement {
++  const handlePress = useCallback(() => onToggle(day), [day, onToggle]);
++  const accessibilityState = useMemo(() => ({ checked: selected }), [selected]);
++  return (
++    <Button
++      variant={selected ? "secondary" : "outline"}
++      size="sm"
++      style={styles.day}
++      textStyle={selected ? styles.daySelectedText : styles.dayText}
++      onPress={handlePress}
++      accessibilityRole="checkbox"
++      accessibilityLabel={WEEKDAY_NAMES[day]}
++      accessibilityState={accessibilityState}
++      testID={testID}
++    >
++      {WEEKDAY_SHORT[day]}
++    </Button>
++  );
++}
++
++function PresetButton({
++  preset,
++  onPick,
++}: {
++  preset: { id: WeekDayPreset; label: string };
++  onPick: (preset: WeekDayPreset) => void;
++}): ReactElement {
++  const handlePress = useCallback(() => onPick(preset.id), [onPick, preset.id]);
++  return (
++    <Button
++      variant="ghost"
++      size="xs"
++      onPress={handlePress}
++      testID={`schedule-weekdays-${preset.id}`}
++    >
++      {preset.label}
++    </Button>
++  );
++}
++
++// ---------------------------------------------------------------- monthly
++
++function MonthlyPanel({
++  draft,
++  update,
++  size,
++}: {
++  draft: CadenceDraft;
++  update: UpdateCadence;
++  size: FieldControlSize;
++}): ReactElement {
++  const { monthly } = draft;
++  const hint = monthDayHint(monthly);
++  const handleKind = useReduce(update, setMonthlyKind);
++  const handleDay = useReduce(update, setMonthlyDay);
++  const handleNth = useReduce(update, setMonthlyNth);
++  const handleWeekday = useReduce(update, setMonthlyWeekday);
++
++  return (
++    <View style={styles.stack}>
++      <View style={styles.row}>
++        <SegmentedControl
++          options={MONTHLY_KIND_OPTIONS}
++          value={monthly.kind}
++          onValueChange={handleKind}
++          size={size}
++          testID="schedule-monthly-kind"
++        />
++        {monthly.kind === "day" ? (
++          <CompactSelect
++            label="Day of month"
++            value={monthly.day}
++            display={ordinal(monthly.day)}
++            options={DAY_OF_MONTH_OPTIONS}
++            onChange={handleDay}
++            size={size}
++            testID="schedule-monthly-day"
++          />
++        ) : (
++          <>
++            <CompactSelect
++              label="Which week"
++              value={monthly.nth}
++              display={NTH_LABELS[monthly.nth]}
++              options={NTH_OPTIONS}
++              onChange={handleNth}
++              size={size}
++              testID="schedule-monthly-nth"
++            />
++            <CompactSelect
++              label="Weekday"
++              value={monthly.weekday}
++              display={WEEKDAY_NAMES[monthly.weekday]}
++              options={WEEKDAY_OPTIONS}
++              onChange={handleWeekday}
++              size={size}
++              testID="schedule-monthly-weekday"
++            />
++          </>
++        )}
++      </View>
++      {hint ? (
++        <Text style={styles.hint} testID="schedule-monthly-hint">
++          {hint}
++        </Text>
++      ) : null}
++    </View>
++  );
++}
++
++// ---------------------------------------------------------------- times
++
++function TimesPanel({
++  draft,
++  update,
++  size,
++  error,
++}: {
++  draft: CadenceDraft;
++  update: UpdateCadence;
++  size: FieldControlSize;
++  error: string | undefined;
++}): ReactElement {
++  const removable = draft.times.length > 1;
++  const handleAdd = useCallback(() => update(addTime), [update]);
++  return (
++    <View style={styles.stack}>
++      <SubLabel>At</SubLabel>
++      <View style={styles.times} testID="schedule-times">
++        {draft.times.map((entry, index) => (
++          <TimeEntryField
++            key={entry.id}
++            entry={entry}
++            index={index}
++            removable={removable}
++            update={update}
++            size={size}
++          />
++        ))}
++        {draft.times.length < MAX_TIMES ? (
++          <Button variant="ghost" size={size} onPress={handleAdd} testID="schedule-time-add">
++            Add time
++          </Button>
++        ) : null}
++      </View>
++      {error ? <ErrorText testID="schedule-times-error">{error}</ErrorText> : null}
++    </View>
++  );
++}
++
++function TimeEntryField({
++  entry,
++  index,
++  removable,
++  update,
++  size,
++}: {
++  entry: CadenceTimeEntry;
++  index: number;
++  removable: boolean;
++  update: UpdateCadence;
++  size: FieldControlSize;
++}): ReactElement {
++  const { id } = entry;
++  const handleText = useCallback(
++    (text: string) => update((current) => setTimeText(current, id, text)),
++    [id, update],
++  );
++  const handleRemove = useCallback(
++    () => update((current) => removeTime(current, id)),
++    [id, update],
++  );
++  return (
++    <View style={styles.time}>
++      <FormTextInput
++        size={size}
++        testID={`schedule-time-${index}`}
++        accessibilityLabel={`Time ${index + 1}`}
++        initialValue={entry.text}
++        resetKey={`schedule-time-${id}`}
++        onChangeText={handleText}
++        placeholder="9:00 AM"
++        autoCapitalize="none"
++        autoCorrect={false}
++        style={styles.timeInput}
++      />
++      {removable ? (
++        <Button
++          variant="ghost"
++          size="xs"
++          leftIcon={X}
++          onPress={handleRemove}
++          accessibilityLabel={`Remove ${entry.value ? formatClockTime(entry.value) : `time ${index + 1}`}`}
++          testID={`schedule-time-remove-${index}`}
++        />
++      ) : null}
++    </View>
++  );
++}
++
++// ---------------------------------------------------------------- cron
++
++const CRON_LEGEND = ["minute", "hour", "day", "month", "weekday"];
++
++function CronPanel({
++  draft,
++  update,
++  size,
++  error,
++}: {
++  draft: CadenceDraft;
++  update: UpdateCadence;
++  size: FieldControlSize;
++  error: string | null | undefined;
++}): ReactElement {
++  const handleText = useReduce(update, setCronText);
++  return (
++    <View style={styles.stackTight}>
++      <FormTextInput
++        size={size}
++        testID="cadence-cron-expression"
++        accessibilityLabel="Cron expression"
++        initialValue={draft.cronText}
++        resetKey={`cadence-cron-${draft.cronRevision}`}
++        onChangeText={handleText}
++        placeholder="0 9 * * 1-5"
++        autoCapitalize="none"
++        autoCorrect={false}
++        spellCheck={false}
++        style={styles.mono}
++      />
++      <View
++        style={styles.cronLegend}
++        accessibilityElementsHidden
++        importantForAccessibility="no-hide-descendants"
++      >
++        {CRON_LEGEND.map((label) => (
++          <Text key={label} style={styles.cronLegendText}>
++            {label}
++          </Text>
++        ))}
++      </View>
++      {error ? (
++        <ErrorText testID="cadence-cron-error">{error}</ErrorText>
++      ) : (
++        <Text style={styles.hint}>
++          Numbers, *, ranges, steps and lists. Weekday 0–6, Sunday is 0.
++        </Text>
++      )}
++    </View>
++  );
++}
++
++// ---------------------------------------------------------------- time zone
++
++function TimeZoneField({
++  draft,
++  update,
++  size,
++  now,
++}: {
++  draft: CadenceDraft;
++  update: UpdateCadence;
++  size: FieldControlSize;
++  now: number;
++}): ReactElement {
+   const deviceTimeZone = useMemo(getDeviceTimeZone, []);
+-  const normalizedValue = normalizeScheduleFormCadence(value, deviceTimeZone);
+-  const [cronText, setCronText] = useState(() => normalizedValue.expression);
+-  const [fieldResetKey, bumpFieldResetKey] = useReducer((key: number) => key + 1, 0);
+-  const cronTimeZone = normalizedValue.timezone ?? deviceTimeZone;
+-  const trimmedCron = cronText.trim();
+-  const localCronError = trimmedCron ? validateCron(trimmedCron) : null;
+-  const effectiveError = error ?? localCronError;
+-  const preview = getCronPreview(trimmedCron, cronTimeZone, effectiveError ?? null);
+-  const currentCadence = useMemo<CronCadence>(
+-    () => buildCronCadence(trimmedCron, cronTimeZone),
+-    [cronTimeZone, trimmedCron],
+-  );
+-  const selectedPresetId = resolveCronPresetId(currentCadence);
+-  const selectedPresetDisplay = resolveCronPresetDisplay(currentCadence);
+-
+-  const handlePresetChange = useCallback(
+-    (presetId: string) => {
+-      const preset = CADENCE_PRESET_OPTIONS.find((option) => option.id === presetId);
+-      if (!preset) {
+-        return;
+-      }
+-      setCronText(preset.expression);
+-      bumpFieldResetKey();
+-      onChange(buildCronCadence(preset.expression, cronTimeZone));
+-    },
+-    [cronTimeZone, onChange],
+-  );
+-
+-  const handleCronChange = useCallback(
+-    (text: string) => {
+-      setCronText(text);
+-      onChange(buildCronCadence(text.trim(), cronTimeZone));
+-    },
+-    [cronTimeZone, onChange],
+-  );
+-
+-  let feedback: ReactNode = null;
+-  if (effectiveError) {
+-    feedback = <Text style={styles.error}>{effectiveError}</Text>;
+-  } else if (preview) {
+-    feedback = <Text style={styles.preview}>{preview}</Text>;
++  const handleZone = useReduce(update, setCadenceTimezone);
++  const allZones = useMemo(listTimeZones, []);
++  const offsetAt = Math.floor(now / 3_600_000) * 3_600_000;
++  const options = useMemo<SelectFieldOption<string>[]>(() => {
++    const zones = [
++      ...[draft.timezone, deviceTimeZone].filter(
++        (zone, index, list) => !allZones.includes(zone) && list.indexOf(zone) === index,
++      ),
++      ...allZones,
++    ];
++    return zones.map((zone) => ({
++      id: zone,
++      value: zone,
++      label: zone === deviceTimeZone ? `${zone} (this device)` : zone,
++      description: formatUtcOffset(zone, offsetAt),
++      testID: `schedule-timezone-${zone}`,
++    }));
++  }, [allZones, deviceTimeZone, draft.timezone, offsetAt]);
++  const display = useMemo(
++    () => ({
++      label: draft.timezone === deviceTimeZone ? `${draft.timezone} (this device)` : draft.timezone,
++      description: formatUtcOffset(draft.timezone, offsetAt),
++    }),
++    [deviceTimeZone, draft.timezone, offsetAt],
++  );
++  return (
++    <View style={styles.stackTight}>
++      <SubLabel>Time zone</SubLabel>
++      <SelectField
++        label="Time zone"
++        value={draft.timezone}
++        selectedDisplay={display}
++        options={options}
++        onChange={handleZone}
++        placeholder="Select time zone"
++        emptyText="No time zones found"
++        searchable
++        searchPlaceholder="Search time zones"
++        title="Time zone"
++        size={size}
++        field={false}
++        triggerTestID="schedule-timezone-trigger"
++      />
++    </View>
++  );
++}
++
++// ---------------------------------------------------------------- preview
++
++type ReadyPreviewState = Extract<CadencePreviewState, { status: "ready" }>;
++
++function previewSubtitle(input: {
++  preview: CadencePreview;
++  state: ReadyPreviewState;
++  now: number;
++  timezone: string;
++}): string {
++  const { preview, state, now, timezone } = input;
++  if (preview.status === "never") {
++    return "No upcoming runs";
++  }
++  if (preview.status === "ended" || preview.nextRunAt === null) {
++    return "No runs left before it ends";
++  }
++  const time = formatRunTime(preview.nextRunAt, timezone).replace(/ \S+$/, "");
++  let text = `Next run ${formatRunDay(preview.nextRunAt, now, timezone)} at ${time}, ${formatRelative(preview.nextRunAt, now)}`;
++  if (state.maxRuns !== null) {
++    const noun = state.maxRuns === 1 ? "run" : "runs";
++    text += state.remainingRunsKnown
++      ? ` · Ends after ${state.maxRuns} ${noun}`
++      : ` · Ends after ${state.maxRuns} ${noun} in total`;
++  } else if (state.expiresAt !== null) {
++    text += ` · Ends after ${formatRunDate(state.expiresAt - 1, timezone).replace(/^\w+, /, "")}`;
+   }
++  return text;
++}
++
++function previewTimezone(cadence: ScheduleCadenceState): string {
++  const value = cadence.cadence;
++  return value?.type === "cron" ? (value.timezone ?? "UTC") : cadence.draft.timezone;
++}
++
++function PreviewCard({
++  cadence,
++  onEditAsCron,
++}: {
++  cadence: ScheduleCadenceState;
++  onEditAsCron: () => void;
++}): ReactElement {
++  const state = cadence.preview;
++  if (state.status === "loading") {
++    return (
++      <View
++        style={styles.card}
++        testID="schedule-preview-loading"
++        accessibilityLabel="Loading upcoming runs"
++      >
++        <View style={styles.cardHead}>
++          <View style={[styles.skeleton, styles.skeletonTitle]} />
++          <View style={[styles.skeleton, styles.skeletonSub]} />
++        </View>
++        <PreviewStrip days={null} label="Loading upcoming runs" />
++        {[0, 1, 2].map((index) => (
++          <View key={index} style={styles.runRow}>
++            <View style={[styles.skeleton, styles.skeletonRun]} />
++          </View>
++        ))}
++      </View>
++    );
++  }
++  if (state.status === "invalid") {
++    return (
++      <View style={styles.card} testID="schedule-preview">
++        <View style={styles.cardHead}>
++          <Text style={styles.cardTitle} testID="schedule-preview-summary">
++            Not scheduled yet
++          </Text>
++          <Text style={styles.cardSub}>Fix the cadence above to see upcoming runs</Text>
++        </View>
++        <PreviewStrip days={null} label="No runs to show" />
++      </View>
++    );
++  }
++
++  const timezone = previewTimezone(cadence);
++  const { preview } = state;
++  const value = cadence.cadence;
++  const summary =
++    value?.type === "every"
++      ? `Every ${describeEvery(value.everyMs).replace(/^every /, "")}`
++      : (cadence.compiled.summary ?? "Custom cron schedule");
++  const stripCount = preview.stripRunCountCapped
++    ? "more than 1,500 runs"
++    : `${preview.stripRunCount} ${preview.stripRunCount === 1 ? "run" : "runs"}`;
+ 
+   return (
+-    <Field label="Cadence">
+-      <View style={styles.stack}>
+-        <SelectField
+-          label="Cadence"
+-          value={selectedPresetId === "custom" ? null : selectedPresetId}
+-          selectedDisplay={selectedPresetDisplay}
+-          options={PRESET_OPTIONS}
+-          onChange={handlePresetChange}
+-          placeholder="Select cadence"
+-          emptyText="No cadences found"
+-          searchable={false}
+-          title="Cadence"
+-          size={size}
+-          triggerTestID="schedule-cadence-preset-trigger"
+-          field={false}
++    <View style={styles.card} testID="schedule-preview">
++      <View style={styles.cardHead}>
++        <Text
++          style={styles.cardTitle}
++          accessibilityLiveRegion="polite"
++          testID="schedule-preview-summary"
++        >
++          {summary}
++        </Text>
++        <Text style={styles.cardSub} testID="schedule-preview-next">
++          {previewSubtitle({ preview, state, now: cadence.now, timezone })}
++        </Text>
++      </View>
++      <PreviewStrip days={preview.days} label={`Overview of the next 14 days: ${stripCount}`} />
++      <View accessibilityLabel="Upcoming runs" testID="schedule-preview-runs">
++        {preview.entries.map((entry) => (
++          <PreviewRunRow
++            key={`${entry.kind}-${entry.at}`}
++            entry={entry}
++            now={cadence.now}
++            timezone={timezone}
++          />
++        ))}
++      </View>
++      {cadence.draft.mode !== "cron" && value?.type === "cron" ? (
++        <View style={styles.cardFoot}>
++          <Text style={styles.code} selectable testID="schedule-preview-cron">
++            {value.expression}
++          </Text>
++          <Button
++            variant="ghost"
++            size="xs"
++            onPress={onEditAsCron}
++            testID="schedule-preview-edit-cron"
++          >
++            Edit as cron
++          </Button>
++        </View>
++      ) : null}
++    </View>
++  );
++}
++
++function PreviewRunRow({
++  entry,
++  now,
++  timezone,
++}: {
++  entry: CadencePreviewEntry;
++  now: number;
++  timezone: string;
++}): ReactElement {
++  if (entry.kind === "skipped") {
++    const label = formatClockTime(entry.wallTime);
++    return (
++      <View>
++        <View style={styles.runRow} testID="schedule-preview-run-skipped">
++          <Text style={[styles.runDate, styles.runSkipped]}>
++            {formatRunDate(entry.at, timezone)}
++          </Text>
++          <Text style={[styles.runTime, styles.runSkipped]}>{label}</Text>
++          <Text style={styles.runRel}>skipped</Text>
++        </View>
++        <Text style={styles.runNote}>
++          {`Clocks spring forward, so ${label} doesn't exist and this run is skipped`}
++        </Text>
++      </View>
++    );
++  }
++  return (
++    <View>
++      <View style={styles.runRow} testID="schedule-preview-run">
++        <Text style={styles.runDate}>{formatRunDate(entry.at, timezone)}</Text>
++        <Text style={styles.runTime}>{formatRunTime(entry.at, timezone)}</Text>
++        <Text style={styles.runRel}>{entry.last ? "last run" : formatRelative(entry.at, now)}</Text>
++      </View>
++      {entry.repeat ? (
++        <Text style={styles.runNote}>
++          Clocks fall back, so this time happens twice and the schedule runs twice
++        </Text>
++      ) : null}
++    </View>
++  );
++}
++
++const AXIS_HOURS = [6, 12, 18];
++const EMPTY_COLUMNS: null[] = Array.from({ length: 14 }, () => null);
++
++function axisLabel(hour: number): string {
++  if (hour === 12) {
++    return "12p";
++  }
++  return hour < 12 ? `${hour}a` : `${hour - 12}p`;
++}
++
++function percent(value: number): `${number}%` {
++  return `${value * 100}%`;
++}
++
++function PreviewStrip({
++  days,
++  label,
++}: {
++  days: readonly CadencePreviewDay[] | null;
++  label: string;
++}): ReactElement {
++  const columns: readonly (CadencePreviewDay | null)[] = days ?? EMPTY_COLUMNS;
++  return (
++    <View
++      style={styles.strip}
++      accessibilityRole="image"
++      accessibilityLabel={label}
++      testID="schedule-preview-strip"
++    >
++      <View style={styles.stripChart}>
++        <View style={styles.axis}>
++          {AXIS_HOURS.map((hour) => (
++            <Text key={hour} style={[styles.axisLabel, { top: percent(hour / 24) }]}>
++              {axisLabel(hour)}
++            </Text>
++          ))}
++        </View>
++        {columns.map((day, index) => (
++          <View
++            key={day ? `${day.year}-${day.month}-${day.day}` : index}
++            style={[styles.column, day?.pastEnd ? styles.columnPastEnd : null]}
++          >
++            {AXIS_HOURS.map((hour) => (
++              <View key={hour} style={[styles.gridLine, { top: percent(hour / 24) }]} />
++            ))}
++            {day ? <StripMarks marks={day.marks} /> : null}
++          </View>
++        ))}
++      </View>
++      {days ? (
++        <View style={styles.dayLabels}>
++          <View style={styles.axis} />
++          {days.map((day) => (
++            <View key={`${day.year}-${day.month}-${day.day}`} style={styles.dayLabel}>
++              <Text style={day.isToday ? styles.dayLabelToday : styles.dayLabelText}>
++                {WEEKDAY_SHORT[day.weekday][0]}
++              </Text>
++              <Text style={day.isToday ? styles.dayLabelToday : styles.dayLabelText}>
++                {day.day}
++              </Text>
++            </View>
++          ))}
++        </View>
++      ) : null}
++    </View>
++  );
++}
++
++function StripMarks({ marks }: { marks: readonly CadencePreviewMark[] }): ReactElement {
++  // Dense cadences put many marks on one pixel row; draw each row once and
++  // let the next run and DST notes win over plain runs.
++  const visible = useMemo(() => {
++    const rows = new Map<number, CadencePreviewMark>();
++    for (const mark of marks) {
++      const row = Math.round((mark.minuteOfDay / 1440) * 144);
++      const existing = rows.get(row);
++      if (!existing || mark.tone === "next" || (existing.tone === "run" && mark.tone !== "run")) {
++        rows.set(row, mark);
++      }
++    }
++    return [...rows.values()];
++  }, [marks]);
++  return (
++    <>
++      {visible.map((mark) => (
++        <View
++          key={`${mark.minuteOfDay}-${mark.tone}`}
++          style={[styles.mark, MARK_STYLES[mark.tone], { top: percent(mark.minuteOfDay / 1440) }]}
+         />
++      ))}
++    </>
++  );
++}
+ 
+-        <FormTextInput
++// ---------------------------------------------------------------- ends
++
++function EndsField({
++  model,
++  ends,
++  error,
++  size,
++}: {
++  model: ScheduleFormModel;
++  ends: EndsDraft;
++  error: string | null;
++  size: FieldControlSize;
++}): ReactElement {
++  const update = model.updateEnds;
++  const handleKind = useReduce(update, setEndsKind);
++  const handleDate = useReduce(update, setEndsDate);
++  const handleRuns = useReduce(update, setEndsRuns);
++  return (
++    <Field label="Ends" testID="schedule-ends">
++      <View style={styles.stack}>
++        <SegmentedControl
++          options={ENDS_OPTIONS}
++          value={ends.kind}
++          onValueChange={handleKind}
+           size={size}
+-          testID="cadence-cron-expression"
+-          accessibilityLabel="Cron expression"
+-          initialValue={cronText}
+-          resetKey={`cadence-cron-${fieldResetKey}`}
+-          onChangeText={handleCronChange}
+-          placeholder="0 9 * * *"
+-          autoCapitalize="none"
+-          autoCorrect={false}
+-          spellCheck={false}
+-          style={styles.cronInput}
++          testID="schedule-ends-kind"
+         />
+-        {feedback}
++        {ends.kind === "date" ? (
++          <View style={styles.row}>
++            <Text style={styles.lead}>After</Text>
++            <FormTextInput
++              size={size}
++              testID="schedule-ends-date-input"
++              accessibilityLabel="End date"
++              initialValue={ends.dateText}
++              resetKey="schedule-ends-date"
++              onChangeText={handleDate}
++              placeholder="2026-12-31"
++              autoCapitalize="none"
++              autoCorrect={false}
++              style={styles.dateInput}
++            />
++          </View>
++        ) : null}
++        {ends.kind === "runs" ? (
++          <View style={styles.row}>
++            <Text style={styles.lead}>After</Text>
++            <FormTextInput
++              size={size}
++              testID="schedule-max-runs-input"
++              accessibilityLabel="Number of runs"
++              initialValue={ends.runsText}
++              resetKey="schedule-ends-runs"
++              onChangeText={handleRuns}
++              placeholder="10"
++              keyboardType="number-pad"
++              style={styles.runsInput}
++            />
++            <Text style={styles.lead}>runs</Text>
++          </View>
++        ) : null}
++        {error ? <ErrorText testID="schedule-ends-error">{error}</ErrorText> : null}
+       </View>
+     </Field>
+   );
+ }
+ 
++// ---------------------------------------------------------------- small parts
++
++function CompactSelect<T extends string | number>({
++  label,
++  value,
++  display,
++  options,
++  onChange,
++  size,
++  testID,
++}: {
++  label: string;
++  value: T;
++  display: string;
++  options: SelectFieldOption<T>[];
++  onChange: (value: T) => void;
++  size: FieldControlSize;
++  testID: string;
++}): ReactElement {
++  const selectedDisplay = useMemo(() => ({ label: display }), [display]);
++  return (
++    <View style={styles.compactSelect}>
++      <SelectField
++        label={label}
++        value={value}
++        selectedDisplay={selectedDisplay}
++        options={options}
++        onChange={onChange}
++        placeholder={label}
++        emptyText="No options"
++        searchable={false}
++        title={label}
++        size={size}
++        field={false}
++        triggerTestID={testID}
++        getValueKey={String}
++      />
++    </View>
++  );
++}
++
++function SubLabel({ children }: { children: string }): ReactElement {
++  return <Text style={styles.subLabel}>{children}</Text>;
++}
++
++function ErrorText({ children, testID }: { children: string; testID: string }): ReactElement {
++  return (
++    <Text style={styles.error} accessibilityRole="alert" testID={testID}>
++      {children}
++    </Text>
++  );
++}
++
+ const styles = StyleSheet.create((theme) => ({
+   stack: {
+     gap: theme.spacing[3],
+   },
+-  cronInput: {
+-    fontFamily: theme.fontFamily.mono,
++  stackTight: {
++    gap: theme.spacing[1.5],
++  },
++  row: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    alignItems: "center",
++    gap: theme.spacing[2],
++  },
++  spaceBetween: {
++    flexDirection: "row",
++    alignItems: "center",
++    justifyContent: "space-between",
++    gap: theme.spacing[2],
++  },
++  quickRow: {
++    flexDirection: "row",
++    gap: theme.spacing[1],
++  },
++  switchRow: {
++    flexDirection: "row",
++    alignItems: "center",
++    justifyContent: "space-between",
++    gap: theme.spacing[3],
++  },
++  lead: {
++    fontSize: theme.fontSize.base,
++    color: theme.colors.foregroundMuted,
++  },
++  body: {
++    fontSize: theme.fontSize.base,
++    color: theme.colors.foreground,
++  },
++  subLabel: {
++    fontSize: theme.fontSize.sm,
++    color: theme.colors.foregroundMuted,
+   },
+-  preview: {
++  hint: {
+     fontSize: theme.fontSize.sm,
+     color: theme.colors.foregroundMuted,
+   },
+@@ -138,4 +1211,221 @@ const styles = StyleSheet.create((theme) => ({
+     fontSize: theme.fontSize.sm,
+     color: theme.colors.palette.red[300],
+   },
++  compactSelect: {
++    minWidth: 88,
++  },
++  days: {
++    flexDirection: "row",
++    gap: theme.spacing[1],
++  },
++  day: {
++    flex: 1,
++    minWidth: 0,
++    paddingHorizontal: 0,
++  },
++  dayText: {
++    color: theme.colors.foregroundMuted,
++  },
++  daySelectedText: {
++    color: theme.colors.foreground,
++  },
++  times: {
++    flexDirection: "row",
++    flexWrap: "wrap",
++    alignItems: "center",
++    gap: theme.spacing[2],
++  },
++  time: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[0.5],
++  },
++  timeInput: {
++    width: 104,
++  },
++  mono: {
++    fontFamily: theme.fontFamily.mono,
++  },
++  cronLegend: {
++    flexDirection: "row",
++    gap: theme.spacing[3],
++    paddingHorizontal: theme.spacing[1],
++  },
++  cronLegendText: {
++    fontSize: theme.fontSize.sm,
++    color: theme.colors.foregroundMuted,
++    fontFamily: theme.fontFamily.mono,
++  },
++  dateInput: {
++    width: 140,
++  },
++  runsInput: {
++    width: 96,
++  },
++  card: {
++    borderWidth: 1,
++    borderColor: theme.colors.border,
++    borderRadius: theme.borderRadius.lg,
++    backgroundColor: theme.colors.surface1,
++    overflow: "hidden",
++  },
++  cardHead: {
++    paddingHorizontal: theme.spacing[4],
++    paddingTop: theme.spacing[3],
++    paddingBottom: theme.spacing[2],
++    gap: theme.spacing[1],
++  },
++  cardTitle: {
++    fontSize: theme.fontSize.base,
++    color: theme.colors.foreground,
++  },
++  cardSub: {
++    fontSize: theme.fontSize.sm,
++    color: theme.colors.foregroundMuted,
++  },
++  cardFoot: {
++    flexDirection: "row",
++    alignItems: "center",
++    justifyContent: "space-between",
++    gap: theme.spacing[2],
++    paddingHorizontal: theme.spacing[4],
++    paddingVertical: theme.spacing[2],
++    borderTopWidth: 1,
++    borderTopColor: theme.colors.border,
++  },
++  code: {
++    flexShrink: 1,
++    fontFamily: theme.fontFamily.mono,
++    fontSize: theme.fontSize.sm,
++    color: theme.colors.foregroundMuted,
++  },
++  strip: {
++    paddingHorizontal: theme.spacing[4],
++    paddingBottom: theme.spacing[3],
++    gap: theme.spacing[1],
++  },
++  stripChart: {
++    flexDirection: "row",
++    height: 72,
++    gap: 3,
++  },
++  axis: {
++    width: 22,
++  },
++  axisLabel: {
++    position: "absolute",
++    right: 2,
++    marginTop: -6,
++    fontSize: 9,
++    color: theme.colors.foregroundMuted,
++  },
++  column: {
++    flex: 1,
++    borderRadius: theme.borderRadius.base,
++    backgroundColor: theme.colors.surface2,
++  },
++  columnPastEnd: {
++    opacity: 0.35,
++  },
++  gridLine: {
++    position: "absolute",
++    left: 0,
++    right: 0,
++    height: 1,
++    backgroundColor: theme.colors.border,
++  },
++  mark: {
++    position: "absolute",
++    left: 2,
++    right: 2,
++    height: 2,
++    marginTop: -1,
++    borderRadius: 1,
++  },
++  markRun: {
++    backgroundColor: theme.colors.foregroundMuted,
++  },
++  markNext: {
++    backgroundColor: theme.colors.accent,
++  },
++  markWarn: {
++    backgroundColor: theme.colors.statusWarning,
++  },
++  markSkipped: {
++    backgroundColor: theme.colors.statusDanger,
++  },
++  dayLabels: {
++    flexDirection: "row",
++    gap: 3,
++  },
++  dayLabel: {
++    flex: 1,
++    alignItems: "center",
++  },
++  dayLabelText: {
++    fontSize: 9,
++    color: theme.colors.foregroundMuted,
++  },
++  dayLabelToday: {
++    fontSize: 9,
++    color: theme.colors.foreground,
++  },
++  runRow: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++    paddingHorizontal: theme.spacing[4],
++    paddingVertical: 10,
++    borderTopWidth: 1,
++    borderTopColor: theme.colors.border,
++  },
++  runDate: {
++    flex: 1,
++    fontSize: theme.fontSize.base,
++    color: theme.colors.foreground,
++  },
++  runTime: {
++    fontSize: theme.fontSize.base,
++    color: theme.colors.foreground,
++    fontVariant: ["tabular-nums"],
++  },
++  runRel: {
++    minWidth: 64,
++    textAlign: "right",
++    fontSize: theme.fontSize.sm,
++    color: theme.colors.foregroundMuted,
++  },
++  runSkipped: {
++    color: theme.colors.foregroundMuted,
++    textDecorationLine: "line-through",
++  },
++  runNote: {
++    paddingHorizontal: theme.spacing[4],
++    paddingBottom: theme.spacing[2],
++    fontSize: theme.fontSize.sm,
++    color: theme.colors.statusWarning,
++  },
++  skeleton: {
++    backgroundColor: theme.colors.surface3,
++    borderRadius: theme.borderRadius.base,
++  },
++  skeletonTitle: {
++    width: 180,
++    height: 14,
++  },
++  skeletonSub: {
++    width: 120,
++    height: 10,
++  },
++  skeletonRun: {
++    width: 110,
++    height: 12,
++  },
+ }));
++
++const MARK_STYLES: Record<CadencePreviewMark["tone"], (typeof styles)["markRun"]> = {
++  next: styles.markNext,
++  run: styles.markRun,
++  repeat: styles.markWarn,
++  skipped: styles.markSkipped,
++};
+diff --git a/packages/app/src/components/schedules/schedule-form-sheet.tsx b/packages/app/src/components/schedules/schedule-form-sheet.tsx
+index 230a41e2e..ba7e2802b 100644
+--- a/packages/app/src/components/schedules/schedule-form-sheet.tsx
++++ b/packages/app/src/components/schedules/schedule-form-sheet.tsx
+@@ -13,10 +13,11 @@ import { Text, View } from "react-native";
+ import { Brain, Folder, GitBranch } from "lucide-react-native";
+ import { StyleSheet } from "react-native-unistyles";
+ import type { AgentProvider } from "@getpaseo/protocol/agent-types";
+-import type { ScheduleCadence, ScheduleSummary } from "@getpaseo/protocol/schedule/types";
++import type { ScheduleSummary } from "@getpaseo/protocol/schedule/types";
+ import { useStoreWithEqualityFn } from "zustand/traditional";
+ import { AdaptiveModalSheet, type SheetHeader } from "@/components/adaptive-modal-sheet";
+ import { ComboboxItem } from "@/components/ui/combobox";
++import { Alert } from "@/components/ui/alert";
+ import { Button } from "@/components/ui/button";
+ import { CombinedModelSelector } from "@/components/combined-model-selector";
+ import { useIsCompactFormFactor } from "@/constants/layout";
+@@ -42,11 +43,12 @@ import {
+ import { useScheduleMutations } from "@/hooks/use-schedule-mutations";
+ import { useAggregatedAgents } from "@/hooks/use-aggregated-agents";
+ import { useProjects } from "@/hooks/use-projects";
+-import { useHosts } from "@/runtime/host-runtime";
++import { useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
+ import { useSessionStore } from "@/stores/session-store";
+ import { buildScheduleProjectTargets } from "@/schedules/schedule-project-targets";
+ import { useScheduleFormModel } from "@/schedules/use-schedule-form-model";
+ import { useScheduleFormProviderSnapshot } from "@/schedules/use-schedule-form-provider-snapshot";
++import { useScheduleCadenceInputs } from "@/schedules/use-schedule-cadence-inputs";
+ import type {
+   ScheduleFormDisplay,
+   ScheduleFormHost,
+@@ -54,7 +56,6 @@ import type {
+   ScheduleFormSnapshot,
+   ScheduleFormState,
+ } from "@/schedules/schedule-form-model";
+-import { validateCron } from "@/utils/schedule-format";
+ import { toErrorMessage } from "@/utils/error-messages";
+ import { getDeviceTimeZone } from "@/utils/device-timezone";
+ 
+@@ -66,16 +67,31 @@ export interface ScheduleFormSheetProps {
+   schedule?: ScheduleSummary;
+ }
+ 
+-function parseMaxRuns(raw: string): number | null {
+-  const parsed = Number.parseInt(raw, 10);
+-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
++function workspaceLifecycleFields(state: ScheduleFormState): {
++  archiveOnFinish?: boolean;
++  isolation?: "local" | "worktree";
++} {
++  return {
++    ...(state.submitArchiveOnFinish !== undefined
++      ? { archiveOnFinish: state.submitArchiveOnFinish }
++      : {}),
++    ...(state.submitIsolation !== undefined ? { isolation: state.submitIsolation } : {}),
++  };
++}
++
++function createEndsFields(ends: ScheduleFormState["cadence"]["submitEnds"]): {
++  maxRuns?: number;
++  expiresAt?: string;
++} {
++  return {
++    ...(ends?.maxRuns != null ? { maxRuns: ends.maxRuns } : {}),
++    ...(ends?.expiresAt != null ? { expiresAt: ends.expiresAt } : {}),
++  };
+ }
+ 
+-function requireCronCadence(
+-  cadence: Extract<ScheduleCadence, { type: "cron" }> | undefined,
+-): Extract<ScheduleCadence, { type: "cron" }> {
++function requireCadence<T>(cadence: T | undefined): T {
+   if (!cadence) {
+-    throw new Error("Choose a cron cadence before creating this schedule");
++    throw new Error("Choose a cadence before creating this schedule");
+   }
+   return cadence;
+ }
+@@ -272,10 +288,19 @@ function OpenScheduleFormSheet({
+     serverId: mutationServerId,
+   });
+ 
++  useScheduleCadenceInputs({
++    model,
++    mode,
++    serverId: mutationServerId,
++    scheduleId: schedule?.id ?? null,
++  });
++  const hostConnected = useHostRuntimeIsConnected(mutationServerId);
++  const hostLabel =
++    state.hosts.find((host) => host.serverId === mutationServerId)?.label ?? "This host";
++  const hostOffline = Boolean(mutationServerId) && !hostConnected;
++
+   const isSubmitting = isCreating || isUpdating;
+-  const cadenceError =
+-    state.cadence.type === "cron" ? validateCron(state.cadence.expression) : null;
+-  const canSubmit = state.canSubmit && cadenceError === null && !isSubmitting;
++  const canSubmit = state.canSubmit && !hostOffline && !isSubmitting;
+   const agentTargetLabel = useMemo(() => {
+     if (!schedule || schedule.target.type !== "agent") {
+       return null;
+@@ -315,15 +340,16 @@ function OpenScheduleFormSheet({
+   ]);
+ 
+   const submitAgentTarget = useCallback(async (): Promise<boolean> => {
+-    if (!schedule || !state.submitCadence) {
++    const cadence = state.cadence.submitCadence;
++    if (!schedule || !cadence) {
+       return false;
+     }
+     await updateSchedule({
+       id: schedule.id,
+-      cadence: state.submitCadence,
++      cadence,
+     });
+     return true;
+-  }, [schedule, state.submitCadence, updateSchedule]);
++  }, [schedule, state.cadence.submitCadence, updateSchedule]);
+ 
+   const submitNewAgent = useCallback(async (): Promise<boolean> => {
+     const provider = state.selectedProvider;
+@@ -333,25 +359,22 @@ function OpenScheduleFormSheet({
+     }
+ 
+     await persistPreferences();
+-    const maxRuns = parseMaxRuns(state.maxRuns);
++    const { submitCadence, submitEnds } = state.cadence;
+     if (mode === "edit" && schedule) {
+       await updateSchedule({
+         id: schedule.id,
+         name: state.name.trim() || null,
+         prompt: state.prompt.trim(),
+-        ...(state.submitCadence ? { cadence: state.submitCadence } : {}),
++        ...(submitCadence ? { cadence: submitCadence } : {}),
+         newAgentConfig: {
+           provider,
+           model: state.selectedModel || null,
+           modeId: state.selectedMode || null,
+           thinkingOptionId: state.selectedThinkingOptionId || null,
+           cwd,
+-          ...(state.submitArchiveOnFinish !== undefined
+-            ? { archiveOnFinish: state.submitArchiveOnFinish }
+-            : {}),
+-          ...(state.submitIsolation !== undefined ? { isolation: state.submitIsolation } : {}),
++          ...workspaceLifecycleFields(state),
+         },
+-        maxRuns,
++        ...(submitEnds ? { maxRuns: submitEnds.maxRuns, expiresAt: submitEnds.expiresAt } : {}),
+       });
+       return true;
+     }
+@@ -359,7 +382,7 @@ function OpenScheduleFormSheet({
+     await createSchedule({
+       prompt: state.prompt.trim(),
+       name: state.name.trim() || undefined,
+-      cadence: requireCronCadence(state.submitCadence),
++      cadence: requireCadence(submitCadence),
+       target: {
+         type: "new-agent",
+         config: {
+@@ -368,14 +391,11 @@ function OpenScheduleFormSheet({
+           model: state.selectedModel || undefined,
+           modeId: state.selectedMode || undefined,
+           thinkingOptionId: state.selectedThinkingOptionId || undefined,
+-          ...(state.submitArchiveOnFinish !== undefined
+-            ? { archiveOnFinish: state.submitArchiveOnFinish }
+-            : {}),
+-          ...(state.submitIsolation !== undefined ? { isolation: state.submitIsolation } : {}),
++          ...workspaceLifecycleFields(state),
+           title: state.name.trim() || undefined,
+         },
+       },
+-      ...(maxRuns != null ? { maxRuns } : {}),
++      ...createEndsFields(submitEnds),
+     });
+     return true;
+   }, [createSchedule, mode, persistPreferences, schedule, state, updateSchedule]);
+@@ -426,11 +446,11 @@ function OpenScheduleFormSheet({
+           loading={isSubmitting}
+           testID="schedule-form-submit"
+         >
+-          {mode === "edit" ? "Save changes" : "Create schedule"}
++          {submitLabel({ mode, failed: state.submitError !== null })}
+         </Button>
+       </View>
+     ),
+-    [canSubmit, handleSubmitPress, isSubmitting, mode, onClose],
++    [canSubmit, handleSubmitPress, isSubmitting, mode, onClose, state.submitError],
+   );
+ 
+   return (
+@@ -448,9 +468,13 @@ function OpenScheduleFormSheet({
+         providerSnapshot={providerSnapshot}
+         agentTargetLabel={agentTargetLabel}
+         controlSize={controlSize}
+-        cadenceError={cadenceError}
+         mutationServerId={mutationServerId}
+       />
++      <ScheduleFormAlert
++        offlineHostLabel={hostOffline ? hostLabel : null}
++        submitError={state.submitError}
++        mode={mode}
++      />
+     </AdaptiveModalSheet>
+   );
+ }
+@@ -461,30 +485,61 @@ interface ScheduleFormFieldsProps {
+   providerSnapshot: ReturnType<typeof useScheduleFormProviderSnapshot>;
+   agentTargetLabel: string | null;
+   controlSize: FieldControlSize;
+-  cadenceError: string | null;
+   mutationServerId: string;
+ }
+ 
++function submitLabel(input: { mode: "create" | "edit"; failed: boolean }): string {
++  if (input.failed) {
++    return "Try again";
++  }
++  return input.mode === "edit" ? "Save changes" : "Create schedule";
++}
++
++function ScheduleFormAlert({
++  offlineHostLabel,
++  submitError,
++  mode,
++}: {
++  offlineHostLabel: string | null;
++  submitError: string | null;
++  mode: "create" | "edit";
++}): ReactElement | null {
++  if (offlineHostLabel) {
++    return (
++      <Alert
++        variant="warning"
++        title={`${offlineHostLabel} is offline`}
++        description={`Schedules are saved on their host. Reconnect ${offlineHostLabel} or pick another host to save.`}
++        testID="schedule-form-offline"
++      />
++    );
++  }
++  if (submitError) {
++    return (
++      <Alert
++        variant="error"
++        title={mode === "edit" ? "Unable to save schedule" : "Unable to create schedule"}
++        description={submitError}
++        testID="schedule-form-submit-error"
++      />
++    );
++  }
++  return null;
++}
++
+ function ScheduleFormFields({
+   model,
+   state,
+   providerSnapshot,
+   agentTargetLabel,
+   controlSize,
+-  cadenceError,
+   mutationServerId,
+ }: ScheduleFormFieldsProps): ReactElement {
+   if (state.targetKind === "agent") {
+     return (
+       <>
+         <ScheduleAgentTargetField label={agentTargetLabel} size={controlSize} />
+-        <CadenceEditor
+-          value={state.cadence}
+-          onChange={model.setCadence}
+-          error={cadenceError ?? undefined}
+-          size={controlSize}
+-        />
+-        {state.submitError ? <Text style={styles.submitError}>{state.submitError}</Text> : null}
++        <CadenceEditor model={model} cadence={state.cadence} size={controlSize} showEnds={false} />
+       </>
+     );
+   }
+@@ -528,26 +583,7 @@ function ScheduleFormFields({
+         mutationServerId={mutationServerId}
+       />
+ 
+-      <CadenceEditor
+-        value={state.cadence}
+-        onChange={model.setCadence}
+-        error={cadenceError ?? undefined}
+-        size={controlSize}
+-      />
+-
+-      <Field label="Max runs">
+-        <FormTextInput
+-          size={controlSize}
+-          testID="schedule-max-runs-input"
+-          accessibilityLabel="Max runs"
+-          initialValue={state.maxRuns}
+-          onChangeText={model.setMaxRuns}
+-          placeholder="Unlimited"
+-          keyboardType="number-pad"
+-        />
+-      </Field>
+-
+-      {state.submitError ? <Text style={styles.submitError}>{state.submitError}</Text> : null}
++      <CadenceEditor model={model} cadence={state.cadence} size={controlSize} showEnds />
+     </>
+   );
+ }
+diff --git a/packages/app/src/schedules/cadence-builder.test.ts b/packages/app/src/schedules/cadence-builder.test.ts
+new file mode 100644
+index 000000000..4669d16c5
+--- /dev/null
++++ b/packages/app/src/schedules/cadence-builder.test.ts
+@@ -0,0 +1,135 @@
++import { describe, expect, it } from "vitest";
++import {
++  addTime,
++  compileCadence,
++  createCadenceDraft,
++  createDefaultCadenceDraft,
++  describeCronError,
++  draftFromExpression,
++  parseClockTime,
++  setCadenceMode,
++  setCronText,
++  setIntervalWindowed,
++  setMonthly,
++  setTimeText,
++  toggleWeekDay,
++} from "./cadence-builder";
++
++describe("cadence builder", () => {
++  it.each([
++    ["* * * * *", "interval", "Every minute"],
++    ["*/15 * * * *", "interval", "Every 15 minutes"],
++    ["*/20 9-16 * * 1-5", "interval", "Every 20 minutes from 9:00 AM to 5:00 PM, weekdays"],
++    ["0 * * * *", "interval", "Every hour"],
++    ["30 */4 * * *", "interval", "Every 4 hours at :30"],
++    ["0 9 * * *", "daily", "Every day at 9:00 AM"],
++    ["0 9,13,17 * * *", "daily", "Every day at 9:00 AM, 1:00 PM and 5:00 PM"],
++    ["30 8 * * 1,3,5", "weekly", "Mondays, Wednesdays and Fridays at 8:30 AM"],
++    ["0 9 * * 1-5", "weekly", "Weekdays at 9:00 AM"],
++    ["0 9 31 * *", "monthly", "Monthly on the 31st at 9:00 AM"],
++    ["0 10 8-14 * 2", "monthly", "Monthly on the second Tuesday at 10:00 AM"],
++  ])("opens %s in %s mode and compiles it back unchanged", (expression, mode, summary) => {
++    const draft = draftFromExpression(expression, "America/Denver");
++    expect(draft?.mode).toBe(mode);
++    const compiled = compileCadence(draft!);
++    expect(compiled.expression).toBe(expression);
++    expect(compiled.summary).toBe(summary);
++  });
++
++  it.each([
++    "5 4 */3 * *",
++    "0 9 * 1 *",
++    "*/7 * * * *",
++    "0 9 2-8 * 2",
++    "0 9 1,15 * *",
++    "7 */5 * * *",
++  ])("keeps %s as custom cron because no builder mode reproduces it", (expression) => {
++    const draft = createCadenceDraft({
++      cadence: { type: "cron", expression, timezone: "UTC" },
++      deviceTimeZone: "America/Denver",
++    });
++    expect(draft.mode).toBe("cron");
++    expect(compileCadence(draft).expression).toBe(expression);
++  });
++
++  it("opens a cron cadence without a time zone in UTC, where the daemon runs it", () => {
++    const draft = createCadenceDraft({
++      cadence: { type: "cron", expression: "0 9 * * *" },
++      deviceTimeZone: "America/Denver",
++    });
++    expect(draft.timezone).toBe("UTC");
++  });
++
++  it("starts new schedules daily at 9:00 AM in the device time zone", () => {
++    const draft = createCadenceDraft({ cadence: undefined, deviceTimeZone: "Europe/Berlin" });
++    expect(compileCadence(draft).expression).toBe("0 9 * * *");
++    expect(draft.timezone).toBe("Europe/Berlin");
++  });
++
++  it("requires one minute across times, which a single cron rule needs", () => {
++    let draft = createDefaultCadenceDraft("UTC");
++    draft = addTime(draft);
++    draft = setTimeText(draft, draft.times[1].id, "5:30 PM");
++    expect(compileCadence(draft).errors.times).toBe(
++      "All times need the same minute, like 9:00 AM and 5:00 PM",
++    );
++    draft = setTimeText(draft, draft.times[1].id, "17:00");
++    expect(compileCadence(draft).expression).toBe("0 9,17 * * *");
++  });
++
++  it("reports unreadable times and empty day choices", () => {
++    let draft = createDefaultCadenceDraft("UTC");
++    draft = setTimeText(draft, draft.times[0].id, "25:00");
++    expect(compileCadence(draft).errors.times).toBe("Use a time like 9:00 AM");
++    draft = setCadenceMode(createDefaultCadenceDraft("UTC"), "weekly");
++    draft = toggleWeekDay(draft, 1);
++    expect(compileCadence(draft).errors.weekDays).toBe("Pick at least one day");
++  });
++
++  it("windows an interval to hours and days", () => {
++    let draft = setCadenceMode(createDefaultCadenceDraft("UTC"), "interval");
++    draft = setIntervalWindowed(draft, true);
++    expect(compileCadence(draft).expression).toBe("*/15 9-16 * * 1-5");
++  });
++
++  it("compiles the nth weekday as day-of-month AND weekday", () => {
++    let draft = setCadenceMode(createDefaultCadenceDraft("UTC"), "monthly");
++    draft = setMonthly(draft, { kind: "nth", nth: 4, weekday: 5 });
++    expect(compileCadence(draft).expression).toBe("0 9 22-28 * 5");
++  });
++
++  it("fills the cron field from the builder but keeps typed cron text", () => {
++    let draft = setCadenceMode(createDefaultCadenceDraft("UTC"), "cron");
++    expect(draft.cronText).toBe("0 9 * * *");
++    draft = setCronText(draft, "5 4 */3 * *");
++    draft = setCadenceMode(setCadenceMode(draft, "daily"), "cron");
++    expect(draft.cronText).toBe("5 4 */3 * *");
++    draft = setCadenceMode(addTime(setCadenceMode(draft, "daily")), "cron");
++    expect(draft.cronText).toBe("0 9,13 * * *");
++  });
++
++  it("explains cron errors by field", () => {
++    expect(describeCronError("Invalid cron day-of-week value", "0 9 * * MON-FRI")).toBe(
++      "Weekday must use numbers (0–6, Sunday is 0). Names like MON-FRI aren't supported.",
++    );
++    expect(describeCronError("Cron expressions must have 5 fields", "0 9 * *")).toBe(
++      "Use 5 fields: minute hour day month weekday. This has 4.",
++    );
++    expect(describeCronError("Invalid cron hour value", "0 24 * * *")).toBe("Hour must be 0–23");
++    expect(describeCronError("Invalid cron minute step", "*/0 * * * *")).toBe(
++      "Minute step must be a whole number above 0",
++    );
++  });
++
++  it.each([
++    ["9", { hour: 9, minute: 0 }],
++    ["9:30 pm", { hour: 21, minute: 30 }],
++    ["12:00 AM", { hour: 0, minute: 0 }],
++    ["21:05", { hour: 21, minute: 5 }],
++    ["0930", { hour: 9, minute: 30 }],
++    ["13 pm", null],
++    ["9:60", null],
++  ])("reads %s as a clock time", (text, expected) => {
++    expect(parseClockTime(text)).toEqual(expected);
++  });
++});
+diff --git a/packages/app/src/schedules/cadence-builder.ts b/packages/app/src/schedules/cadence-builder.ts
+new file mode 100644
+index 000000000..42319a674
+--- /dev/null
++++ b/packages/app/src/schedules/cadence-builder.ts
+@@ -0,0 +1,791 @@
++import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
++import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
++import { parseCronExpression } from "@getpaseo/protocol/schedule/cron-expression";
++
++// The cadence builder: plain data plus pure reducers, owned by the schedule
++// form model. Every builder mode compiles to one five-field cron expression
++// the daemon already runs. A saved expression opens in a builder mode only
++// when compiling that mode reproduces the exact expression; anything else
++// opens as Cron, so editing never rewrites a schedule the user did not touch.
++
++export type CronCadence = Extract<ScheduleCadence, { type: "cron" }>;
++export type CadenceMode = "interval" | "daily" | "weekly" | "monthly" | "cron";
++export type IntervalUnit = "minutes" | "hours";
++export type MonthlyKind = "day" | "nth";
++
++export interface CadenceTime {
++  hour: number;
++  minute: number;
++}
++
++export interface CadenceTimeEntry {
++  /** Stable identity for the row, so editing one time never remounts another. */
++  id: number;
++  text: string;
++  value: CadenceTime | null;
++}
++
++export interface IntervalDraft {
++  every: number;
++  unit: IntervalUnit;
++  /** Minute past the hour for hour intervals. */
++  offset: number;
++  windowed: boolean;
++  fromHour: number;
++  /** Exclusive end hour, 1–24. */
++  toHour: number;
++  days: number[];
++}
++
++export interface MonthlyDraft {
++  kind: MonthlyKind;
++  day: number;
++  nth: number;
++  weekday: number;
++}
++
++export interface CadenceDraft {
++  mode: CadenceMode;
++  interval: IntervalDraft;
++  times: CadenceTimeEntry[];
++  weekDays: number[];
++  monthly: MonthlyDraft;
++  cronText: string;
++  /** The user typed the cron text, so switching to Cron must not overwrite it. */
++  cronEdited: boolean;
++  /** A builder control changed since the cron text was last filled in. */
++  builderChanged: boolean;
++  /** Bumped when the builder fills the cron text, so the input shows the new text. */
++  cronRevision: number;
++  timezone: string;
++  /** A legacy rolling interval the user has not changed. */
++  legacyEveryMs: number | null;
++}
++
++export interface CadenceErrors {
++  interval?: string;
++  times?: string;
++  weekDays?: string;
++  cron?: string;
++}
++
++export interface CompiledCadence {
++  expression: string | null;
++  summary: string | null;
++  errors: CadenceErrors;
++  /** Wall-clock times of the clock modes, for DST notes in the preview. */
++  clockTimes: CadenceTime[];
++}
++
++export const CADENCE_MODES: readonly CadenceMode[] = [
++  "interval",
++  "daily",
++  "weekly",
++  "monthly",
++  "cron",
++];
++export const MINUTE_STEPS: readonly number[] = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
++export const HOUR_STEPS: readonly number[] = [1, 2, 3, 4, 6, 8, 12];
++export const MAX_TIMES = 6;
++/** Monday-first display order of cron weekdays (Sunday is 0). */
++export const WEEKDAY_ORDER: readonly number[] = [1, 2, 3, 4, 5, 6, 0];
++export const WEEKDAY_NAMES = [
++  "Sunday",
++  "Monday",
++  "Tuesday",
++  "Wednesday",
++  "Thursday",
++  "Friday",
++  "Saturday",
++] as const;
++export const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
++export const NTH_LABELS: Record<number, string> = {
++  1: "first",
++  2: "second",
++  3: "third",
++  4: "fourth",
++};
++const WEEKDAYS = [1, 2, 3, 4, 5];
++const WEEKENDS = [0, 6];
++const ALL_DAYS = [0, 1, 2, 3, 4, 5, 6];
++
++// ---------------------------------------------------------------- formatting
++
++export function ordinal(value: number): string {
++  const suffixes = ["th", "st", "nd", "rd"];
++  const mod = value % 100;
++  return `${value}${suffixes[(mod - 20) % 10] ?? suffixes[mod] ?? suffixes[0]}`;
++}
++
++export function formatClockTime(time: CadenceTime): string {
++  const period = time.hour < 12 ? "AM" : "PM";
++  const hour = time.hour % 12 === 0 ? 12 : time.hour % 12;
++  return `${hour}:${String(time.minute).padStart(2, "0")} ${period}`;
++}
++
++export function formatHourLabel(hour: number): string {
++  if (hour === 24) {
++    return "Midnight";
++  }
++  return formatClockTime({ hour, minute: 0 });
++}
++
++function joinList(items: readonly string[]): string {
++  if (items.length <= 1) {
++    return items.join("");
++  }
++  if (items.length === 2) {
++    return `${items[0]} and ${items[1]}`;
++  }
++  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
++}
++
++function sortedUnique(values: readonly number[]): number[] {
++  return [...new Set(values)].sort((a, b) => a - b);
++}
++
++/** Compress sorted values into cron list syntax: runs of 3+ become ranges. */
++export function compressCronList(values: readonly number[]): string {
++  const sorted = sortedUnique(values);
++  const parts: string[] = [];
++  let index = 0;
++  while (index < sorted.length) {
++    let end = index;
++    while (end + 1 < sorted.length && sorted[end + 1] === sorted[end] + 1) {
++      end += 1;
++    }
++    if (end - index >= 2) {
++      parts.push(`${sorted[index]}-${sorted[end]}`);
++    } else {
++      for (let i = index; i <= end; i += 1) {
++        parts.push(String(sorted[i]));
++      }
++    }
++    index = end + 1;
++  }
++  return parts.join(",");
++}
++
++export function describeDays(days: readonly number[]): string {
++  const key = sortedUnique(days).join(",");
++  if (key === ALL_DAYS.join(",")) {
++    return "Every day";
++  }
++  if (key === WEEKDAYS.join(",")) {
++    return "Weekdays";
++  }
++  if (key === WEEKENDS.join(",")) {
++    return "Weekends";
++  }
++  return joinList(
++    WEEKDAY_ORDER.filter((day) => days.includes(day)).map((day) => `${WEEKDAY_NAMES[day]}s`),
++  );
++}
++
++function describeTimes(times: readonly CadenceTime[]): string {
++  return joinList(
++    [...times]
++      .sort((a, b) => a.hour * 60 + a.minute - (b.hour * 60 + b.minute))
++      .map(formatClockTime),
++  );
++}
++
++// ---------------------------------------------------------------- time text
++
++/** Parse "9", "9:30", "9:30 pm", "21:30" or "0930". Returns null when unreadable. */
++export function parseClockTime(text: string): CadenceTime | null {
++  const match = text
++    .trim()
++    .toLowerCase()
++    .match(/^(\d{1,2})(?::?(\d{2}))?\s*(a|am|p|pm)?$/);
++  if (!match) {
++    return null;
++  }
++  let hour = Number.parseInt(match[1], 10);
++  const minute = match[2] === undefined ? 0 : Number.parseInt(match[2], 10);
++  const period = match[3];
++  if (minute > 59) {
++    return null;
++  }
++  if (period) {
++    if (hour < 1 || hour > 12) {
++      return null;
++    }
++    hour = (hour % 12) + (period.startsWith("p") ? 12 : 0);
++  } else if (hour > 23) {
++    return null;
++  }
++  return { hour, minute };
++}
++
++function timeEntry(id: number, value: CadenceTime): CadenceTimeEntry {
++  return { id, text: formatClockTime(value), value };
++}
++
++function nextTimeId(times: readonly CadenceTimeEntry[]): number {
++  return times.reduce((max, entry) => Math.max(max, entry.id), 0) + 1;
++}
++
++// ---------------------------------------------------------------- compile
++
++function compileClockTimes(input: {
++  times: readonly CadenceTimeEntry[];
++  dayOfMonth: string;
++  dayOfWeek: string;
++  errors: CadenceErrors;
++}): { expression: string | null; times: CadenceTime[] } {
++  if (input.times.length === 0) {
++    input.errors.times = "Add at least one time";
++    return { expression: null, times: [] };
++  }
++  if (input.times.some((entry) => entry.value === null)) {
++    input.errors.times = "Use a time like 9:00 AM";
++    return { expression: null, times: [] };
++  }
++  const times = input.times.map((entry) => entry.value as CadenceTime);
++  const minutes = new Set(times.map((time) => time.minute));
++  if (minutes.size > 1) {
++    input.errors.times = "All times need the same minute, like 9:00 AM and 5:00 PM";
++    return { expression: null, times };
++  }
++  const minute = times[0].minute;
++  const hours = compressCronList(times.map((time) => time.hour));
++  return {
++    expression: `${minute} ${hours} ${input.dayOfMonth} * ${input.dayOfWeek}`,
++    times,
++  };
++}
++
++function compileInterval(draft: CadenceDraft, errors: CadenceErrors): CompiledCadence {
++  const interval = draft.interval;
++  if (interval.windowed && interval.toHour <= interval.fromHour) {
++    errors.interval = "End hour must be after start hour";
++  } else if (interval.windowed && interval.days.length === 0) {
++    errors.interval = "Pick at least one day";
++  }
++  if (errors.interval) {
++    return { expression: null, summary: null, errors, clockTimes: [] };
++  }
++
++  const hourRange = interval.windowed ? `${interval.fromHour}-${interval.toHour - 1}` : "*";
++  const dayOfWeek = interval.windowed ? compressCronList(interval.days) : "*";
++  let expression: string;
++  let summary: string;
++  if (interval.unit === "minutes") {
++    const minute = interval.every === 1 ? "*" : `*/${interval.every}`;
++    expression = `${minute} ${hourRange} * * ${dayOfWeek}`;
++    summary = interval.every === 1 ? "Every minute" : `Every ${interval.every} minutes`;
++  } else {
++    let hour: string;
++    if (interval.every === 1) {
++      hour = hourRange;
++    } else if (interval.windowed) {
++      hour = `${hourRange}/${interval.every}`;
++    } else {
++      hour = `*/${interval.every}`;
++    }
++    expression = `${interval.offset} ${hour} * * ${dayOfWeek}`;
++    summary = interval.every === 1 ? "Every hour" : `Every ${interval.every} hours`;
++    if (interval.offset) {
++      summary += ` at :${String(interval.offset).padStart(2, "0")}`;
++    }
++  }
++  if (interval.windowed) {
++    summary += ` from ${formatHourLabel(interval.fromHour)} to ${formatHourLabel(interval.toHour)}`;
++    if (interval.days.length < 7) {
++      summary += `, ${describeDays(interval.days).toLowerCase()}`;
++    }
++  }
++  return { expression, summary, errors, clockTimes: [] };
++}
++
++export function compileCadence(draft: CadenceDraft): CompiledCadence {
++  const errors: CadenceErrors = {};
++  switch (draft.mode) {
++    case "interval":
++      return compileInterval(draft, errors);
++    case "daily": {
++      const result = compileClockTimes({
++        times: draft.times,
++        dayOfMonth: "*",
++        dayOfWeek: "*",
++        errors,
++      });
++      return {
++        expression: result.expression,
++        summary: result.expression ? `Every day at ${describeTimes(result.times)}` : null,
++        errors,
++        clockTimes: result.times,
++      };
++    }
++    case "weekly": {
++      if (draft.weekDays.length === 0) {
++        errors.weekDays = "Pick at least one day";
++        return { expression: null, summary: null, errors, clockTimes: [] };
++      }
++      const result = compileClockTimes({
++        times: draft.times,
++        dayOfMonth: "*",
++        dayOfWeek: compressCronList(draft.weekDays),
++        errors,
++      });
++      return {
++        expression: result.expression,
++        summary: result.expression
++          ? `${describeDays(draft.weekDays)} at ${describeTimes(result.times)}`
++          : null,
++        errors,
++        clockTimes: result.times,
++      };
++    }
++    case "monthly": {
++      const monthly = draft.monthly;
++      const nthStart = (monthly.nth - 1) * 7 + 1;
++      const result = compileClockTimes({
++        times: draft.times,
++        dayOfMonth: monthly.kind === "day" ? String(monthly.day) : `${nthStart}-${nthStart + 6}`,
++        dayOfWeek: monthly.kind === "day" ? "*" : String(monthly.weekday),
++        errors,
++      });
++      const day =
++        monthly.kind === "day"
++          ? ordinal(monthly.day)
++          : `${NTH_LABELS[monthly.nth]} ${WEEKDAY_NAMES[monthly.weekday]}`;
++      return {
++        expression: result.expression,
++        summary: result.expression
++          ? `Monthly on the ${day} at ${describeTimes(result.times)}`
++          : null,
++        errors,
++        clockTimes: result.times,
++      };
++    }
++    case "cron": {
++      const expression = normalizeCronText(draft.cronText);
++      if (!expression) {
++        errors.cron = "Enter a cron expression";
++        return { expression: null, summary: null, errors, clockTimes: [] };
++      }
++      try {
++        parseCronExpression(expression);
++      } catch (error) {
++        errors.cron = describeCronError(error instanceof Error ? error.message : "", expression);
++        return { expression: null, summary: null, errors, clockTimes: [] };
++      }
++      return {
++        expression,
++        summary: describeCronExpression(expression) ?? "Custom cron schedule",
++        errors,
++        clockTimes: [],
++      };
++    }
++  }
++}
++
++export function normalizeCronText(text: string): string {
++  return text.trim().split(/\s+/).filter(Boolean).join(" ");
++}
++
++const CRON_FIELD_HELP: Record<string, { label: string; range: string }> = {
++  minute: { label: "Minute", range: "0–59" },
++  hour: { label: "Hour", range: "0–23" },
++  "day-of-month": { label: "Day", range: "1–31" },
++  month: { label: "Month", range: "1–12" },
++  "day-of-week": { label: "Weekday", range: "0–6, Sunday is 0" },
++};
++const CRON_FIELD_ORDER = ["minute", "hour", "day-of-month", "month", "day-of-week"];
++
++/** Turn a parser message into copy that names the field and its allowed values. */
++export function describeCronError(message: string, expression: string): string {
++  const fields = expression.trim().split(/\s+/);
++  if (message.includes("5 fields")) {
++    return `Use 5 fields: minute hour day month weekday. This has ${fields.length}.`;
++  }
++  const field = message.match(/cron (minute|hour|day-of-month|month|day-of-week)/)?.[1];
++  if (!field) {
++    return message || "Invalid cron expression";
++  }
++  const help = CRON_FIELD_HELP[field];
++  const raw = fields[CRON_FIELD_ORDER.indexOf(field)] ?? "";
++  if (/[a-z]/i.test(raw)) {
++    return `${help.label} must use numbers (${help.range}). Names like ${raw.toUpperCase()} aren't supported.`;
++  }
++  if (message.includes("step")) {
++    return `${help.label} step must be a whole number above 0`;
++  }
++  return `${help.label} must be ${help.range}`;
++}
++
++/** Describe the cron shapes the builder can produce; anything else returns null. */
++export function describeCronExpression(expression: string): string | null {
++  const draft = draftFromExpression(expression, "UTC");
++  if (!draft) {
++    return null;
++  }
++  return compileCadence(draft).summary;
++}
++
++// ---------------------------------------------------------------- seed from cron
++
++function parseLiteralList(field: string, min: number, max: number): number[] | null {
++  if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(field)) {
++    return null;
++  }
++  const values: number[] = [];
++  for (const part of field.split(",")) {
++    const [start, end] = part.split("-").map((value) => Number.parseInt(value, 10));
++    const last = end ?? start;
++    if (start > last || start < min || last > max) {
++      return null;
++    }
++    for (let value = start; value <= last; value += 1) {
++      values.push(value);
++    }
++  }
++  return sortedUnique(values);
++}
++
++function parseHourRange(field: string): { from: number; to: number } | null {
++  const match = field.match(/^(\d+)-(\d+)$/);
++  if (!match) {
++    return null;
++  }
++  const from = Number.parseInt(match[1], 10);
++  const last = Number.parseInt(match[2], 10);
++  return from <= last && last <= 23 ? { from, to: last + 1 } : null;
++}
++
++function minuteIntervalCandidate(input: {
++  minute: string;
++  hour: string;
++  days: number[] | null;
++}): Partial<IntervalDraft> | null {
++  const every = input.minute === "*" ? 1 : Number(input.minute.match(/^\*\/(\d+)$/)?.[1]);
++  if (!MINUTE_STEPS.includes(every)) {
++    return null;
++  }
++  const range = input.hour === "*" ? null : parseHourRange(input.hour);
++  if (input.hour !== "*" && !range) {
++    return null;
++  }
++  return {
++    unit: "minutes",
++    every,
++    windowed: range !== null || input.days !== null,
++    ...(range ? { fromHour: range.from, toHour: range.to } : {}),
++    ...(input.days ? { days: input.days } : {}),
++  };
++}
++
++function hourIntervalCandidate(input: {
++  minute: string;
++  hour: string;
++  days: number[] | null;
++}): Partial<IntervalDraft> | null {
++  const offset = /^\d+$/.test(input.minute) ? Number.parseInt(input.minute, 10) : Number.NaN;
++  const stepMatch = input.hour.match(/^(\*|\d+-\d+)(?:\/(\d+))?$/);
++  if (!(offset <= 59) || !stepMatch) {
++    return null;
++  }
++  const every = stepMatch[2] === undefined ? 1 : Number.parseInt(stepMatch[2], 10);
++  const range = stepMatch[1] === "*" ? null : parseHourRange(stepMatch[1]);
++  if ((stepMatch[1] !== "*" && !range) || !HOUR_STEPS.includes(every)) {
++    return null;
++  }
++  return {
++    unit: "hours",
++    every,
++    offset,
++    windowed: range !== null || input.days !== null,
++    ...(range ? { fromHour: range.from, toHour: range.to } : {}),
++    ...(input.days ? { days: input.days } : {}),
++  };
++}
++
++function intervalCandidate(fields: string[]): Partial<IntervalDraft> | null {
++  const [minute, hour, dayOfMonth, month, dayOfWeek] = fields;
++  if (dayOfMonth !== "*" || month !== "*") {
++    return null;
++  }
++  const days = dayOfWeek === "*" ? null : parseLiteralList(dayOfWeek, 0, 6);
++  if (dayOfWeek !== "*" && !days) {
++    return null;
++  }
++  return (
++    minuteIntervalCandidate({ minute, hour, days }) ?? hourIntervalCandidate({ minute, hour, days })
++  );
++}
++
++function clockTimesCandidate(minute: string, hour: string): CadenceTime[] | null {
++  if (!/^\d+$/.test(minute)) {
++    return null;
++  }
++  const hours = parseLiteralList(hour, 0, 23);
++  if (!hours || hours.length > MAX_TIMES) {
++    return null;
++  }
++  const minuteValue = Number.parseInt(minute, 10);
++  return minuteValue > 59 ? null : hours.map((value) => ({ hour: value, minute: minuteValue }));
++}
++
++function candidateDrafts(expression: string, base: CadenceDraft): CadenceDraft[] {
++  const fields = expression.split(" ");
++  if (fields.length !== 5) {
++    return [];
++  }
++  const [minute, hour, dayOfMonth, month, dayOfWeek] = fields;
++  const drafts: CadenceDraft[] = [];
++  const interval = intervalCandidate(fields);
++  if (interval) {
++    drafts.push({ ...base, mode: "interval", interval: { ...base.interval, ...interval } });
++  }
++  const clock = month === "*" ? clockTimesCandidate(minute, hour) : null;
++  if (!clock) {
++    return drafts;
++  }
++  const times = clock.map((time, index) => timeEntry(index + 1, time));
++  if (dayOfMonth === "*" && dayOfWeek === "*") {
++    drafts.push({ ...base, mode: "daily", times });
++  }
++  const weekDays = dayOfMonth === "*" ? parseLiteralList(dayOfWeek, 0, 6) : null;
++  if (weekDays) {
++    drafts.push({ ...base, mode: "weekly", times, weekDays });
++  }
++  if (/^\d+$/.test(dayOfMonth) && dayOfWeek === "*") {
++    const day = Number.parseInt(dayOfMonth, 10);
++    if (day >= 1 && day <= 31) {
++      drafts.push({
++        ...base,
++        mode: "monthly",
++        times,
++        monthly: { ...base.monthly, kind: "day", day },
++      });
++    }
++  }
++  const nthMatch = dayOfMonth.match(/^(\d+)-(\d+)$/);
++  const nthStart = nthMatch ? Number.parseInt(nthMatch[1], 10) : Number.NaN;
++  const nth = (nthStart - 1) / 7 + 1;
++  if (Number.isInteger(nth) && nth >= 1 && nth <= 4 && /^[0-6]$/.test(dayOfWeek)) {
++    drafts.push({
++      ...base,
++      mode: "monthly",
++      times,
++      monthly: {
++        ...base.monthly,
++        kind: "nth",
++        nth,
++        weekday: Number.parseInt(dayOfWeek, 10),
++      },
++    });
++  }
++  return drafts;
++}
++
++/**
++ * Open a cron expression in the builder mode that reproduces it exactly, or
++ * return null when no builder mode does.
++ */
++export function draftFromExpression(expression: string, timezone: string): CadenceDraft | null {
++  const normalized = normalizeCronText(expression);
++  const base = createDefaultCadenceDraft(timezone);
++  for (const candidate of candidateDrafts(normalized, base)) {
++    if (compileCadence(candidate).expression === normalized) {
++      return { ...candidate, cronText: normalized };
++    }
++  }
++  return null;
++}
++
++// ---------------------------------------------------------------- construct
++
++export function createDefaultCadenceDraft(timezone: string): CadenceDraft {
++  return {
++    mode: "daily",
++    interval: {
++      every: 15,
++      unit: "minutes",
++      offset: 0,
++      windowed: false,
++      fromHour: 9,
++      toHour: 17,
++      days: [...WEEKDAYS],
++    },
++    times: [timeEntry(1, { hour: 9, minute: 0 })],
++    weekDays: [1],
++    monthly: { kind: "day", day: 1, nth: 1, weekday: 1 },
++    cronText: "",
++    cronEdited: false,
++    builderChanged: false,
++    cronRevision: 0,
++    timezone,
++    legacyEveryMs: null,
++  };
++}
++
++/**
++ * Seed the builder from a saved cadence. A cron cadence without a time zone
++ * runs in UTC on the daemon, so it opens in UTC, not the device zone.
++ */
++export function createCadenceDraft(input: {
++  cadence: ScheduleCadence | undefined;
++  deviceTimeZone: string;
++}): CadenceDraft {
++  const { cadence, deviceTimeZone } = input;
++  if (!cadence) {
++    return createDefaultCadenceDraft(deviceTimeZone);
++  }
++  if (cadence.type === "every") {
++    // `*/1` is how the protocol spells every minute; the builder writes `*`.
++    const equivalent = everyMsToFiveFieldCron(cadence.everyMs)?.replace(/^\*\/1 /, "* ");
++    const seeded =
++      (equivalent ? draftFromExpression(equivalent, deviceTimeZone) : null) ??
++      createDefaultCadenceDraft(deviceTimeZone);
++    return { ...seeded, legacyEveryMs: cadence.everyMs };
++  }
++  const timezone = cadence.timezone ?? "UTC";
++  const expression = normalizeCronText(cadence.expression);
++  return (
++    draftFromExpression(expression, timezone) ?? {
++      ...createDefaultCadenceDraft(timezone),
++      mode: "cron",
++      cronText: expression,
++      cronEdited: true,
++    }
++  );
++}
++
++export function cadenceFromDraft(draft: CadenceDraft): CronCadence | null {
++  const { expression } = compileCadence(draft);
++  return expression ? { type: "cron", expression, timezone: draft.timezone } : null;
++}
++
++// ---------------------------------------------------------------- reducers
++
++function touched(draft: CadenceDraft, patch: Partial<CadenceDraft>): CadenceDraft {
++  return { ...draft, ...patch, builderChanged: true, legacyEveryMs: null };
++}
++
++export function setCadenceMode(draft: CadenceDraft, mode: CadenceMode): CadenceDraft {
++  if (mode === draft.mode) {
++    return draft;
++  }
++  if (mode === "cron") {
++    // Carry the builder's expression into the cron field unless the user has
++    // typed their own and the builder has not changed since.
++    const compiled = compileCadence(draft).expression;
++    const refill = compiled && (!draft.cronEdited || draft.builderChanged);
++    return {
++      ...draft,
++      mode,
++      legacyEveryMs: null,
++      ...(refill
++        ? {
++            cronText: compiled,
++            cronEdited: false,
++            builderChanged: false,
++            cronRevision: draft.cronRevision + 1,
++          }
++        : {}),
++    };
++  }
++  // Switching modes is not a builder edit: typed cron text survives a round trip.
++  return { ...draft, mode, legacyEveryMs: null };
++}
++
++export function setIntervalEvery(draft: CadenceDraft, every: number): CadenceDraft {
++  return touched(draft, { interval: { ...draft.interval, every } });
++}
++
++export function setIntervalUnit(draft: CadenceDraft, unit: IntervalUnit): CadenceDraft {
++  if (unit === draft.interval.unit) {
++    return draft;
++  }
++  return touched(draft, {
++    interval: { ...draft.interval, unit, every: unit === "minutes" ? 15 : 1 },
++  });
++}
++
++export function setIntervalOffset(draft: CadenceDraft, offset: number): CadenceDraft {
++  return touched(draft, { interval: { ...draft.interval, offset } });
++}
++
++export function setIntervalWindowed(draft: CadenceDraft, windowed: boolean): CadenceDraft {
++  return touched(draft, { interval: { ...draft.interval, windowed } });
++}
++
++export function setIntervalHours(
++  draft: CadenceDraft,
++  hours: { fromHour?: number; toHour?: number },
++): CadenceDraft {
++  return touched(draft, { interval: { ...draft.interval, ...hours } });
++}
++
++function toggle(days: readonly number[], day: number): number[] {
++  return days.includes(day) ? days.filter((value) => value !== day) : sortedUnique([...days, day]);
++}
++
++export function toggleIntervalDay(draft: CadenceDraft, day: number): CadenceDraft {
++  return touched(draft, {
++    interval: { ...draft.interval, days: toggle(draft.interval.days, day) },
++  });
++}
++
++export function toggleWeekDay(draft: CadenceDraft, day: number): CadenceDraft {
++  return touched(draft, { weekDays: toggle(draft.weekDays, day) });
++}
++
++export type WeekDayPreset = "weekdays" | "weekends" | "all";
++
++export function setWeekDayPreset(draft: CadenceDraft, preset: WeekDayPreset): CadenceDraft {
++  const weekDays = { weekdays: WEEKDAYS, weekends: WEEKENDS, all: ALL_DAYS }[preset];
++  return touched(draft, { weekDays: [...weekDays] });
++}
++
++export function setTimeText(draft: CadenceDraft, id: number, text: string): CadenceDraft {
++  return touched(draft, {
++    times: draft.times.map((entry) =>
++      entry.id === id ? { ...entry, text, value: parseClockTime(text) } : entry,
++    ),
++  });
++}
++
++export function addTime(draft: CadenceDraft): CadenceDraft {
++  if (draft.times.length >= MAX_TIMES) {
++    return draft;
++  }
++  let last: CadenceTime = { hour: 8, minute: 0 };
++  for (const entry of draft.times) {
++    last = entry.value ?? last;
++  }
++  const next = { hour: Math.min(23, last.hour + 4), minute: last.minute };
++  return touched(draft, { times: [...draft.times, timeEntry(nextTimeId(draft.times), next)] });
++}
++
++export function removeTime(draft: CadenceDraft, id: number): CadenceDraft {
++  if (draft.times.length <= 1) {
++    return draft;
++  }
++  return touched(draft, { times: draft.times.filter((entry) => entry.id !== id) });
++}
++
++export function setMonthly(draft: CadenceDraft, patch: Partial<MonthlyDraft>): CadenceDraft {
++  return touched(draft, { monthly: { ...draft.monthly, ...patch } });
++}
++
++export function setCronText(draft: CadenceDraft, cronText: string): CadenceDraft {
++  return { ...draft, cronText, cronEdited: true, legacyEveryMs: null };
++}
++
++export function setCadenceTimezone(draft: CadenceDraft, timezone: string): CadenceDraft {
++  return { ...draft, timezone, legacyEveryMs: null };
++}
++
++export function monthDayHint(monthly: MonthlyDraft): string | null {
++  if (monthly.kind !== "day" || monthly.day < 29) {
++    return null;
++  }
++  if (monthly.day === 29) {
++    return "Skips February except in leap years";
++  }
++  return `Skips months without a ${ordinal(monthly.day)}`;
++}
+diff --git a/packages/app/src/schedules/cadence-preview.test.ts b/packages/app/src/schedules/cadence-preview.test.ts
+new file mode 100644
+index 000000000..02a64fbff
+--- /dev/null
++++ b/packages/app/src/schedules/cadence-preview.test.ts
+@@ -0,0 +1,209 @@
++import { describe, expect, it } from "vitest";
++import { computeCadencePreview, formatRunTime, formatUtcOffset } from "./cadence-preview";
++import {
++  createEndsDraft,
++  endsError,
++  followTimezone,
++  resolveEndsSubmit,
++  setEndsDate,
++  setEndsKind,
++  setEndsRuns,
++} from "./schedule-ends";
++
++const NOW = Date.parse("2026-10-29T16:15:00.000Z"); // Thu Oct 29 2026, 10:15 AM in Denver
++const DENVER = "America/Denver";
++
++function cron(expression: string, timezone = DENVER) {
++  return { type: "cron" as const, expression, timezone };
++}
++
++function iso(at: number) {
++  return new Date(at).toISOString();
++}
++
++describe("cadence preview", () => {
++  it("lists the next runs the daemon will make", () => {
++    const preview = computeCadencePreview({
++      source: cron("0 9,13,17 * * *"),
++      now: NOW,
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [],
++    });
++    expect(preview.status).toBe("upcoming");
++    expect(preview.entries.map((entry) => iso(entry.at))).toEqual([
++      "2026-10-29T19:00:00.000Z",
++      "2026-10-29T23:00:00.000Z",
++      "2026-10-30T15:00:00.000Z",
++      "2026-10-30T19:00:00.000Z",
++      "2026-10-30T23:00:00.000Z",
++    ]);
++    expect(preview.days).toHaveLength(14);
++    expect(preview.days[0]).toMatchObject({ month: 10, day: 29, isToday: true });
++    expect(preview.days[0].marks.map((mark) => mark.tone)).toEqual(["next", "run"]);
++    expect(preview.stripRunCount).toBe(41);
++  });
++
++  it("flags the repeated run when clocks fall back", () => {
++    const preview = computeCadencePreview({
++      source: cron("30 1 * * *"),
++      now: Date.parse("2026-10-31T16:00:00.000Z"),
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [{ hour: 1, minute: 30 }],
++    });
++    const [first, second, third] = preview.entries;
++    expect(first).toMatchObject({ kind: "run", repeat: false });
++    expect(second).toMatchObject({ kind: "run", repeat: true });
++    expect(iso(second.at)).toBe("2026-11-01T08:30:00.000Z");
++    expect(formatRunTime(first.at, DENVER)).toBe("1:30 AM MDT");
++    expect(formatRunTime(second.at, DENVER)).toBe("1:30 AM MST");
++    expect(third).toMatchObject({ kind: "run", repeat: false });
++  });
++
++  it("shows a skipped run when clocks spring forward past the wall time", () => {
++    const preview = computeCadencePreview({
++      source: cron("30 2 * * *"),
++      now: Date.parse("2027-03-10T17:00:00.000Z"),
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [{ hour: 2, minute: 30 }],
++    });
++    const kinds = preview.entries.map((entry) => entry.kind);
++    expect(kinds).toEqual(["run", "run", "run", "skipped", "run"]);
++    const skipped = preview.entries[3];
++    expect(skipped).toMatchObject({ kind: "skipped", wallTime: { hour: 2, minute: 30 } });
++    expect(iso(preview.entries[4].at)).toBe("2027-03-15T08:30:00.000Z");
++    expect(preview.days[4].marks.map((mark) => mark.tone)).toEqual(["skipped"]);
++  });
++
++  it("skips months without the day", () => {
++    const preview = computeCadencePreview({
++      source: cron("0 9 31 * *"),
++      now: NOW,
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [{ hour: 9, minute: 0 }],
++    });
++    expect(preview.entries.map((entry) => iso(entry.at).slice(0, 10))).toEqual([
++      "2026-10-31",
++      "2026-12-31",
++      "2027-01-31",
++      "2027-03-31",
++      "2027-05-31",
++    ]);
++  });
++
++  it("stops at the remaining run count and marks the last run", () => {
++    const preview = computeCadencePreview({
++      source: cron("0 9 * * 1-5"),
++      now: NOW,
++      expiresAt: null,
++      remainingRuns: 2,
++      clockTimes: [{ hour: 9, minute: 0 }],
++    });
++    expect(preview.entries).toHaveLength(2);
++    expect(preview.entries[1]).toMatchObject({ kind: "run", last: true });
++    expect(preview.days.findIndex((day) => day.pastEnd)).toBe(5);
++  });
++
++  it("reports ended and never states", () => {
++    expect(
++      computeCadencePreview({
++        source: cron("0 9 * * *"),
++        now: NOW,
++        expiresAt: NOW + 60_000,
++        remainingRuns: null,
++        clockTimes: [],
++      }).status,
++    ).toBe("ended");
++    expect(
++      computeCadencePreview({
++        source: cron("0 9 30 2 *", "UTC"),
++        now: NOW,
++        expiresAt: null,
++        remainingRuns: null,
++        clockTimes: [],
++      }).status,
++    ).toBe("never");
++  });
++
++  it("extends a legacy rolling interval from its next run", () => {
++    const preview = computeCadencePreview({
++      source: {
++        type: "every",
++        everyMs: 90 * 60_000,
++        nextRunAt: NOW + 10 * 60_000,
++        timezone: DENVER,
++      },
++      now: NOW,
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [],
++    });
++    expect(preview.entries.slice(0, 2).map((entry) => iso(entry.at))).toEqual([
++      "2026-10-29T16:25:00.000Z",
++      "2026-10-29T17:55:00.000Z",
++    ]);
++  });
++
++  it("formats UTC offsets, including half hours", () => {
++    expect(formatUtcOffset(DENVER, NOW)).toBe("UTC−6");
++    expect(formatUtcOffset("Asia/Kolkata", NOW)).toBe("UTC+5:30");
++    expect(formatUtcOffset("UTC", NOW)).toBe("UTC+0");
++  });
++});
++
++describe("schedule ends", () => {
++  it("ends after the chosen date at local midnight in the cadence zone", () => {
++    const draft = setEndsDate(
++      setEndsKind(
++        createEndsDraft({ expiresAt: null, maxRuns: null, timezone: DENVER, now: NOW }),
++        "date",
++      ),
++      "2026-12-31",
++    );
++    expect(resolveEndsSubmit({ draft, timezone: DENVER, mode: "create" })).toEqual({
++      expiresAt: "2027-01-01T07:00:00.000Z",
++      maxRuns: null,
++    });
++  });
++
++  it("leaves saved limits alone until Ends changes", () => {
++    const saved = createEndsDraft({
++      expiresAt: "2027-01-01T07:00:00.000Z",
++      maxRuns: 5,
++      timezone: DENVER,
++      now: NOW,
++    });
++    expect(saved).toMatchObject({ kind: "runs", runsText: "5", dateText: "2026-12-31" });
++    expect(resolveEndsSubmit({ draft: saved, timezone: DENVER, mode: "edit" })).toBeNull();
++    expect(
++      resolveEndsSubmit({ draft: setEndsKind(saved, "never"), timezone: DENVER, mode: "edit" }),
++    ).toEqual({ expiresAt: null, maxRuns: null });
++  });
++
++  it("moves an end date with the time zone", () => {
++    const saved = createEndsDraft({
++      expiresAt: "2027-01-01T07:00:00.000Z",
++      maxRuns: null,
++      timezone: DENVER,
++      now: NOW,
++    });
++    expect(
++      resolveEndsSubmit({ draft: followTimezone(saved), timezone: "UTC", mode: "edit" }),
++    ).toEqual({
++      expiresAt: "2027-01-01T00:00:00.000Z",
++      maxRuns: null,
++    });
++  });
++
++  it("validates runs and dates", () => {
++    const base = createEndsDraft({ expiresAt: null, maxRuns: null, timezone: DENVER, now: NOW });
++    expect(endsError(setEndsRuns(setEndsKind(base, "runs"), "0"))).toBe("Enter 1 or more runs");
++    expect(endsError(setEndsDate(setEndsKind(base, "date"), "2026-02-30"))).toBe(
++      "Use a date like 2026-12-31",
++    );
++    expect(endsError(base)).toBeNull();
++  });
++});
+diff --git a/packages/app/src/schedules/cadence-preview.ts b/packages/app/src/schedules/cadence-preview.ts
+new file mode 100644
+index 000000000..c53dbe3a0
+--- /dev/null
++++ b/packages/app/src/schedules/cadence-preview.ts
+@@ -0,0 +1,459 @@
++import { parseCronExpression } from "@getpaseo/protocol/schedule/cron-expression";
++import {
++  createCronDatePartsReader,
++  findNextCronMatch,
++  type CronDateParts,
++  type CronDatePartsReader,
++} from "@getpaseo/protocol/schedule/cron-next-run";
++import { formatClockTime, type CadenceTime } from "./cadence-builder";
++
++// Upcoming runs for the cadence preview. Cron runs come from the daemon's own
++// matcher (`findNextCronMatch`), so the list shows what the daemon will do,
++// including its DST behavior: a repeated fall-back wall time runs twice and a
++// spring-forward wall time that does not exist is skipped.
++
++const MS_PER_MINUTE = 60_000;
++const MS_PER_DAY = 86_400_000;
++export const PREVIEW_LIST_LENGTH = 5;
++export const PREVIEW_STRIP_DAYS = 14;
++const PREVIEW_STRIP_RUN_CAP = 1500;
++
++export type CadencePreviewSource =
++  | { type: "cron"; expression: string; timezone: string }
++  | { type: "every"; everyMs: number; nextRunAt: number | null; timezone: string };
++
++export interface CadencePreviewInput {
++  source: CadencePreviewSource;
++  now: number;
++  /** Runs at or after this instant do not happen. */
++  expiresAt: number | null;
++  /** Runs left before the schedule completes; null is unlimited. */
++  remainingRuns: number | null;
++  /** Wall-clock times of a clock-time builder mode, for spring-forward notes. */
++  clockTimes: readonly CadenceTime[];
++}
++
++export type CadencePreviewEntry =
++  | { kind: "run"; at: number; repeat: boolean; last: boolean }
++  | { kind: "skipped"; at: number; wallTime: CadenceTime };
++
++export interface CadencePreviewMark {
++  minuteOfDay: number;
++  tone: "next" | "run" | "repeat" | "skipped";
++}
++
++export interface CadencePreviewDay {
++  year: number;
++  month: number;
++  day: number;
++  weekday: number;
++  isToday: boolean;
++  pastEnd: boolean;
++  marks: CadencePreviewMark[];
++}
++
++export interface CadencePreview {
++  /** never: no minute in the next 366 days matches; ended: the end comes first. */
++  status: "upcoming" | "never" | "ended";
++  nextRunAt: number | null;
++  entries: CadencePreviewEntry[];
++  days: CadencePreviewDay[];
++  stripRunCount: number;
++  stripRunCountCapped: boolean;
++}
++
++const readerCache = new Map<string, CronDatePartsReader>();
++
++function reader(timezone: string): CronDatePartsReader {
++  let read = readerCache.get(timezone);
++  if (!read) {
++    read = createCronDatePartsReader(timezone);
++    readerCache.set(timezone, read);
++  }
++  return read;
++}
++
++function dayKey(parts: Pick<CronDateParts, "year" | "month" | "dayOfMonth">): number {
++  return Date.UTC(parts.year, parts.month - 1, parts.dayOfMonth) / MS_PER_DAY;
++}
++
++function wallClockUtc(parts: CronDateParts): number {
++  return Date.UTC(parts.year, parts.month - 1, parts.dayOfMonth, parts.hour, parts.minute);
++}
++
++/**
++ * Every instant whose wall time in `timezone` is the given local time: none
++ * inside a spring-forward gap, two inside a repeated fall-back hour.
++ */
++export function wallTimeInstants(input: {
++  year: number;
++  month: number;
++  day: number;
++  hour: number;
++  minute: number;
++  timezone: string;
++}): number[] {
++  const read = reader(input.timezone);
++  const wall = Date.UTC(input.year, input.month - 1, input.day, input.hour, input.minute);
++  const offsetAt = (t: number) => wallClockUtc(read(new Date(t))) - t;
++  const offsets = new Set([
++    offsetAt(wall - 2 * MS_PER_DAY),
++    offsetAt(wall),
++    offsetAt(wall + 2 * MS_PER_DAY),
++  ]);
++  const instants = new Set<number>();
++  for (const offset of offsets) {
++    const candidate = wall - offset;
++    if (wallClockUtc(read(new Date(candidate))) === wall) {
++      instants.add(candidate);
++    }
++  }
++  return [...instants].sort((a, b) => a - b);
++}
++
++/** Midnight that starts `date` (YYYY-MM-DD) in `timezone`, or the first instant after it. */
++export function startOfLocalDay(
++  date: { year: number; month: number; day: number },
++  timezone: string,
++): number {
++  for (let minute = 0; minute < 24 * 60; minute += 30) {
++    const instants = wallTimeInstants({
++      ...date,
++      hour: Math.floor(minute / 60),
++      minute: minute % 60,
++      timezone,
++    });
++    if (instants.length > 0) {
++      return instants[0];
++    }
++  }
++  return Date.UTC(date.year, date.month - 1, date.day);
++}
++
++export function readLocalParts(at: number, timezone: string): CronDateParts {
++  return reader(timezone)(new Date(at));
++}
++
++/** Offset of `timezone` from UTC at `at`, like "UTC−6" or "UTC+5:30". */
++export function formatUtcOffset(timezone: string, at: number): string {
++  const minuteStart = Math.floor(at / MS_PER_MINUTE) * MS_PER_MINUTE;
++  const offsetMinutes = Math.round(
++    (wallClockUtc(reader(timezone)(new Date(minuteStart))) - minuteStart) / MS_PER_MINUTE,
++  );
++  if (offsetMinutes === 0) {
++    return "UTC+0";
++  }
++  const sign = offsetMinutes < 0 ? "−" : "+";
++  const absolute = Math.abs(offsetMinutes);
++  const hours = Math.floor(absolute / 60);
++  const minutes = absolute % 60;
++  return `UTC${sign}${hours}${minutes ? `:${String(minutes).padStart(2, "0")}` : ""}`;
++}
++
++interface RunCollector {
++  next: (after: number) => number | null;
++}
++
++function createCollector(source: CadencePreviewSource, now: number): RunCollector {
++  if (source.type === "every") {
++    // The daemon schedules each rolling run from the one before it.
++    const first = source.nextRunAt ?? now + source.everyMs;
++    return {
++      next: (after) => {
++        if (after < first) {
++          return first;
++        }
++        return first + (Math.floor((after - first) / source.everyMs) + 1) * source.everyMs;
++      },
++    };
++  }
++  const cron = parseCronExpression(source.expression);
++  const readDateParts = reader(source.timezone);
++  return {
++    next: (after) =>
++      findNextCronMatch({ cron, readDateParts, after: new Date(after) })?.getTime() ?? null,
++  };
++}
++
++function collectRuns(input: {
++  collector: RunCollector;
++  now: number;
++  limit: number;
++  until: number;
++  expiresAt: number | null;
++  remainingRuns: number | null;
++}): { runs: number[]; hasAny: boolean } {
++  const runs: number[] = [];
++  const first = input.collector.next(input.now);
++  const cap = Math.min(input.limit, input.remainingRuns ?? Number.POSITIVE_INFINITY);
++  let next = first;
++  while (runs.length < cap && next !== null) {
++    if (next > input.until || (input.expiresAt !== null && next >= input.expiresAt)) {
++      break;
++    }
++    runs.push(next);
++    next = input.collector.next(next);
++  }
++  return { runs, hasAny: first !== null };
++}
++
++function isRepeat(previous: CronDateParts | null, parts: CronDateParts): boolean {
++  return (
++    previous !== null &&
++    dayKey(previous) === dayKey(parts) &&
++    previous.hour === parts.hour &&
++    previous.minute === parts.minute
++  );
++}
++
++interface SkippedWallTime {
++  at: number;
++  dayKey: number;
++  wallTime: CadenceTime;
++}
++
++/** Clock times the cadence asks for on days where the wall time does not exist. */
++function findSkippedWallTimes(input: {
++  source: CadencePreviewSource;
++  clockTimes: readonly CadenceTime[];
++  fromDay: { year: number; month: number; day: number };
++  dayCount: number;
++}): SkippedWallTime[] {
++  if (input.source.type !== "cron" || input.clockTimes.length === 0) {
++    return [];
++  }
++  const { timezone } = input.source;
++  const cron = parseCronExpression(input.source.expression);
++  const skipped: SkippedWallTime[] = [];
++  for (let offset = 0; offset < input.dayCount; offset += 1) {
++    const date = new Date(
++      Date.UTC(input.fromDay.year, input.fromDay.month - 1, input.fromDay.day + offset),
++    );
++    const year = date.getUTCFullYear();
++    const month = date.getUTCMonth() + 1;
++    const day = date.getUTCDate();
++    if (
++      !cron.month.matches(month) ||
++      !cron.dayOfMonth.matches(day) ||
++      !cron.dayOfWeek.matches(date.getUTCDay())
++    ) {
++      continue;
++    }
++    for (const time of input.clockTimes) {
++      if (!cron.hour.matches(time.hour) || !cron.minute.matches(time.minute)) {
++        continue;
++      }
++      if (wallTimeInstants({ year, month, day, ...time, timezone }).length > 0) {
++        continue;
++      }
++      const after =
++        wallTimeInstants({
++          year,
++          month,
++          day,
++          hour: Math.min(23, time.hour + 1),
++          minute: 0,
++          timezone,
++        })[0] ??
++        startOfLocalDay({ year, month, day }, timezone) +
++          (time.hour * 60 + time.minute) * MS_PER_MINUTE;
++      skipped.push({ at: after, dayKey: dayKey({ year, month, dayOfMonth: day }), wallTime: time });
++    }
++  }
++  return skipped;
++}
++
++export function computeCadencePreview(input: CadencePreviewInput): CadencePreview {
++  const { source, now } = input;
++  const timezone = source.timezone;
++  const collector = createCollector(source, now);
++  const todayParts = readLocalParts(now, timezone);
++  const today = { year: todayParts.year, month: todayParts.month, day: todayParts.dayOfMonth };
++  const todayKey = dayKey(todayParts);
++  const stripEnd = startOfLocalDay(
++    (() => {
++      const end = new Date(Date.UTC(today.year, today.month - 1, today.day + PREVIEW_STRIP_DAYS));
++      return { year: end.getUTCFullYear(), month: end.getUTCMonth() + 1, day: end.getUTCDate() };
++    })(),
++    timezone,
++  );
++
++  const list = collectRuns({
++    collector,
++    now,
++    limit: PREVIEW_LIST_LENGTH,
++    until: Number.POSITIVE_INFINITY,
++    expiresAt: input.expiresAt,
++    remainingRuns: input.remainingRuns,
++  });
++  const strip = collectRuns({
++    collector,
++    now,
++    limit: PREVIEW_STRIP_RUN_CAP,
++    until: stripEnd - 1,
++    expiresAt: input.expiresAt,
++    remainingRuns: input.remainingRuns,
++  });
++
++  let status: CadencePreview["status"] = "upcoming";
++  if (!list.hasAny) {
++    status = "never";
++  } else if (list.runs.length === 0) {
++    status = "ended";
++  }
++
++  const lastDayKey =
++    list.runs.length > 0
++      ? dayKey(readLocalParts(list.runs[list.runs.length - 1], timezone))
++      : todayKey;
++  const skipped = findSkippedWallTimes({
++    source,
++    clockTimes: input.clockTimes,
++    fromDay: today,
++    dayCount: Math.max(PREVIEW_STRIP_DAYS, lastDayKey - todayKey + 1),
++  }).filter((entry) => entry.at > now && (input.expiresAt === null || entry.at < input.expiresAt));
++
++  const runsExhausted =
++    input.remainingRuns !== null && list.runs.length >= input.remainingRuns && list.runs.length > 0;
++  const runEntries: CadencePreviewEntry[] = [];
++  let previous: CronDateParts | null = null;
++  list.runs.forEach((at, index) => {
++    const parts = readLocalParts(at, timezone);
++    runEntries.push({
++      kind: "run",
++      at,
++      repeat: isRepeat(previous, parts),
++      last: runsExhausted && index === list.runs.length - 1,
++    });
++    previous = parts;
++  });
++  const listEnd = list.runs.at(-1) ?? now;
++  const entries = [
++    ...runEntries,
++    ...skipped
++      .filter((entry) => entry.at <= listEnd)
++      .map(
++        (entry): CadencePreviewEntry => ({
++          kind: "skipped",
++          at: entry.at,
++          wallTime: entry.wallTime,
++        }),
++      ),
++  ]
++    .sort((a, b) => a.at - b.at)
++    .slice(0, PREVIEW_LIST_LENGTH);
++
++  const endDayKey =
++    input.expiresAt !== null
++      ? dayKey(readLocalParts(input.expiresAt - 1, timezone)) + 1
++      : Number.POSITIVE_INFINITY;
++  const runsEndDayKey =
++    input.remainingRuns !== null &&
++    strip.runs.length >= input.remainingRuns &&
++    strip.runs.length > 0
++      ? dayKey(readLocalParts(strip.runs[strip.runs.length - 1], timezone)) + 1
++      : Number.POSITIVE_INFINITY;
++  const firstEndKey = Math.min(endDayKey, runsEndDayKey);
++
++  const days: CadencePreviewDay[] = Array.from({ length: PREVIEW_STRIP_DAYS }, (_, offset) => {
++    const date = new Date(Date.UTC(today.year, today.month - 1, today.day + offset));
++    return {
++      year: date.getUTCFullYear(),
++      month: date.getUTCMonth() + 1,
++      day: date.getUTCDate(),
++      weekday: date.getUTCDay(),
++      isToday: offset === 0,
++      pastEnd: todayKey + offset >= firstEndKey,
++      marks: [],
++    };
++  });
++  let stripPrevious: CronDateParts | null = null;
++  strip.runs.forEach((at, index) => {
++    const parts = readLocalParts(at, timezone);
++    const day = days[dayKey(parts) - todayKey];
++    if (day) {
++      let tone: CadencePreviewMark["tone"] = index === 0 ? "next" : "run";
++      if (isRepeat(stripPrevious, parts)) {
++        tone = "repeat";
++      }
++      day.marks.push({ minuteOfDay: parts.hour * 60 + parts.minute, tone });
++    }
++    stripPrevious = parts;
++  });
++  for (const entry of skipped) {
++    const day = days[entry.dayKey - todayKey];
++    if (day && !day.pastEnd) {
++      day.marks.push({
++        minuteOfDay: entry.wallTime.hour * 60 + entry.wallTime.minute,
++        tone: "skipped",
++      });
++    }
++  }
++
++  return {
++    status,
++    nextRunAt: list.runs[0] ?? null,
++    entries,
++    days,
++    stripRunCount: strip.runs.length,
++    stripRunCountCapped: strip.runs.length >= PREVIEW_STRIP_RUN_CAP,
++  };
++}
++
++// ---------------------------------------------------------------- formatting
++
++const formatterCache = new Map<string, Intl.DateTimeFormat>();
++
++function formatter(timezone: string, kind: "date" | "time"): Intl.DateTimeFormat {
++  const key = `${kind}:${timezone}`;
++  let cached = formatterCache.get(key);
++  if (!cached) {
++    cached = new Intl.DateTimeFormat(
++      "en-US",
++      kind === "date"
++        ? { timeZone: timezone, weekday: "short", month: "short", day: "numeric" }
++        : { timeZone: timezone, hour: "numeric", minute: "2-digit", timeZoneName: "short" },
++    );
++    formatterCache.set(key, cached);
++  }
++  return cached;
++}
++
++export function formatRunDate(at: number, timezone: string): string {
++  return formatter(timezone, "date").format(new Date(at));
++}
++
++/** Wall time with the zone abbreviation, like "1:00 PM MDT". */
++export function formatRunTime(at: number, timezone: string): string {
++  return formatter(timezone, "time").format(new Date(at)).replace(/ /g, " ");
++}
++
++export function formatRelative(at: number, now: number): string {
++  const minutes = Math.round((at - now) / MS_PER_MINUTE);
++  if (minutes < 1) {
++    return "now";
++  }
++  if (minutes < 60) {
++    return `in ${minutes} min`;
++  }
++  const hours = Math.round(minutes / 60);
++  if (hours < 36) {
++    return `in ${hours} h`;
++  }
++  return `in ${Math.round(hours / 24)} days`;
++}
++
++export function formatRunDay(at: number, now: number, timezone: string): string {
++  const diff = dayKey(readLocalParts(at, timezone)) - dayKey(readLocalParts(now, timezone));
++  if (diff === 0) {
++    return "today";
++  }
++  if (diff === 1) {
++    return "tomorrow";
++  }
++  return formatRunDate(at, timezone);
++}
++
++export function formatSkippedWallTime(time: CadenceTime): string {
++  return formatClockTime(time);
++}
+diff --git a/packages/app/src/schedules/schedule-cadence-options.test.ts b/packages/app/src/schedules/schedule-cadence-options.test.ts
+deleted file mode 100644
+index 2c7b83bd5..000000000
+--- a/packages/app/src/schedules/schedule-cadence-options.test.ts
++++ /dev/null
+@@ -1,56 +0,0 @@
+-import { describe, expect, it } from "vitest";
+-import {
+-  CADENCE_PRESET_OPTIONS,
+-  normalizeScheduleFormCadence,
+-  resolveCronPresetId,
+-} from "./schedule-cadence-options";
+-
+-describe("schedule cadence form options", () => {
+-  it("offers the approved cron preset vocabulary", () => {
+-    expect(CADENCE_PRESET_OPTIONS.map((option) => option.label)).toEqual([
+-      "Every minute",
+-      "Every hour",
+-      "Daily 9:00",
+-      "Weekdays 9:00",
+-      "Mondays 9:00",
+-    ]);
+-  });
+-
+-  it("maps interval cadences to cron cadences for the form", () => {
+-    expect(
+-      normalizeScheduleFormCadence({ type: "every", everyMs: 60_000 }, "Europe/Madrid"),
+-    ).toEqual({
+-      type: "cron",
+-      expression: "* * * * *",
+-      timezone: "Europe/Madrid",
+-    });
+-    expect(
+-      normalizeScheduleFormCadence({ type: "every", everyMs: 60 * 60_000 }, "Europe/Madrid"),
+-    ).toEqual({
+-      type: "cron",
+-      expression: "0 * * * *",
+-      timezone: "Europe/Madrid",
+-    });
+-    expect(
+-      normalizeScheduleFormCadence({ type: "every", everyMs: 24 * 60 * 60_000 }, "Europe/Madrid"),
+-    ).toEqual({
+-      type: "cron",
+-      expression: "0 9 * * *",
+-      timezone: "Europe/Madrid",
+-    });
+-  });
+-
+-  it("maps unsupported intervals to the closest custom cron expression", () => {
+-    const cadence = normalizeScheduleFormCadence(
+-      { type: "every", everyMs: 5 * 60_000 },
+-      "Europe/Madrid",
+-    );
+-
+-    expect(cadence).toEqual({
+-      type: "cron",
+-      expression: "*/5 * * * *",
+-      timezone: "Europe/Madrid",
+-    });
+-    expect(resolveCronPresetId(cadence)).toBe("custom");
+-  });
+-});
+diff --git a/packages/app/src/schedules/schedule-cadence-options.ts b/packages/app/src/schedules/schedule-cadence-options.ts
+deleted file mode 100644
+index 41d7060af..000000000
+--- a/packages/app/src/schedules/schedule-cadence-options.ts
++++ /dev/null
+@@ -1,62 +0,0 @@
+-import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
+-import { everyMsToParts } from "@/utils/schedule-format";
+-
+-type CronCadence = Extract<ScheduleCadence, { type: "cron" }>;
+-
+-export interface CadencePresetOption {
+-  id: string;
+-  label: string;
+-  expression: string;
+-}
+-
+-export const CUSTOM_CRON_PRESET_ID = "custom";
+-
+-export const CADENCE_PRESET_OPTIONS: CadencePresetOption[] = [
+-  { id: "every-minute", label: "Every minute", expression: "* * * * *" },
+-  { id: "every-hour", label: "Every hour", expression: "0 * * * *" },
+-  { id: "daily-9", label: "Daily 9:00", expression: "0 9 * * *" },
+-  { id: "weekdays-9", label: "Weekdays 9:00", expression: "0 9 * * 1-5" },
+-  { id: "mondays-9", label: "Mondays 9:00", expression: "0 9 * * 1" },
+-];
+-
+-export function resolveCronPresetId(cadence: CronCadence): string {
+-  const expression = cadence.expression.trim();
+-  return (
+-    CADENCE_PRESET_OPTIONS.find((option) => option.expression === expression)?.id ??
+-    CUSTOM_CRON_PRESET_ID
+-  );
+-}
+-
+-export function resolveCronPresetDisplay(cadence: CronCadence): { label: string } {
+-  return {
+-    label:
+-      CADENCE_PRESET_OPTIONS.find((option) => option.id === resolveCronPresetId(cadence))?.label ??
+-      "Custom cron",
+-  };
+-}
+-
+-export function normalizeScheduleFormCadence(
+-  cadence: ScheduleCadence,
+-  timezone: string,
+-): CronCadence {
+-  if (cadence.type === "cron") {
+-    return { ...cadence, timezone: cadence.timezone ?? timezone };
+-  }
+-
+-  return {
+-    type: "cron",
+-    expression: everyMsToCronExpression(cadence.everyMs),
+-    timezone,
+-  };
+-}
+-
+-function everyMsToCronExpression(everyMs: number): string {
+-  const { value, unit } = everyMsToParts(everyMs);
+-  if (unit === "minutes") {
+-    return value === 1 ? "* * * * *" : `*/${Math.min(value, 59)} * * * *`;
+-  }
+-  if (unit === "hours") {
+-    return value === 1 ? "0 * * * *" : `0 */${Math.min(value, 23)} * * *`;
+-  }
+-  return value === 1 ? "0 9 * * *" : `0 9 */${Math.min(value, 31)} * *`;
+-}
+diff --git a/packages/app/src/schedules/schedule-cadence-state.ts b/packages/app/src/schedules/schedule-cadence-state.ts
+new file mode 100644
+index 000000000..9e987a582
+--- /dev/null
++++ b/packages/app/src/schedules/schedule-cadence-state.ts
+@@ -0,0 +1,217 @@
++import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
++import {
++  cadenceFromDraft,
++  compileCadence,
++  createCadenceDraft,
++  type CadenceDraft,
++  type CompiledCadence,
++  type CronCadence,
++} from "./cadence-builder";
++import { computeCadencePreview, type CadencePreview } from "./cadence-preview";
++import {
++  createEndsDraft,
++  endsError,
++  resolveEndsSubmit,
++  resolveExpiresAt,
++  resolveMaxRuns,
++  type EndsDraft,
++  type EndsSubmit,
++} from "./schedule-ends";
++
++// Cadence + Ends slice of the schedule form model. Pure: the form model owns
++// the instance and calls `deriveCadenceState` on every publish.
++
++export type CompletedRunsStatus = "idle" | "pending" | "complete" | "failed";
++
++export interface CompletedRuns {
++  status: CompletedRunsStatus;
++  count: number | null;
++}
++
++export type CadencePreviewState =
++  | { status: "loading" }
++  | { status: "invalid" }
++  | {
++      status: "ready";
++      preview: CadencePreview;
++      /** False when edit could not load how many runs already happened. */
++      remainingRunsKnown: boolean;
++      maxRuns: number | null;
++      expiresAt: number | null;
++    };
++
++export interface ScheduleCadenceInputs {
++  mode: "create" | "edit";
++  draft: CadenceDraft;
++  /** The user changed the cadence; edit submits a cadence only then. */
++  touched: boolean;
++  ends: EndsDraft;
++  completedRuns: CompletedRuns;
++  savedCadence: ScheduleCadence | null;
++  savedNextRunAt: string | null;
++  now: number;
++}
++
++export interface ScheduleCadenceState extends ScheduleCadenceInputs {
++  compiled: CompiledCadence;
++  /** The cadence the form describes: the untouched saved cadence, or the compiled one. */
++  cadence: ScheduleCadence | null;
++  submitCadence: CronCadence | undefined;
++  submitEnds: EndsSubmit | null;
++  endsError: string | null;
++  preview: CadencePreviewState;
++  /** Why the cadence cannot be saved even though every field parses. */
++  blocker: string | null;
++}
++
++export function createScheduleCadenceInputs(input: {
++  mode: "create" | "edit";
++  schedule:
++    | {
++        cadence: ScheduleCadence;
++        expiresAt: string | null;
++        maxRuns: number | null;
++        nextRunAt: string | null;
++      }
++    | undefined;
++  deviceTimeZone: string;
++  now: number;
++}): ScheduleCadenceInputs {
++  const draft = createCadenceDraft({
++    cadence: input.schedule?.cadence,
++    deviceTimeZone: input.deviceTimeZone,
++  });
++  return {
++    mode: input.mode,
++    draft,
++    touched: false,
++    ends: createEndsDraft({
++      expiresAt: input.schedule?.expiresAt,
++      maxRuns: input.schedule?.maxRuns,
++      timezone: draft.timezone,
++      now: input.now,
++    }),
++    completedRuns:
++      input.mode === "edit" ? { status: "pending", count: null } : { status: "complete", count: 0 },
++    savedCadence: input.schedule?.cadence ?? null,
++    savedNextRunAt: input.schedule?.nextRunAt ?? null,
++    now: input.now,
++  };
++}
++
++function resolveCadence(inputs: ScheduleCadenceInputs): ScheduleCadence | null {
++  if (inputs.draft.legacyEveryMs !== null && inputs.savedCadence?.type === "every") {
++    return inputs.savedCadence;
++  }
++  if (!inputs.touched && inputs.savedCadence && inputs.mode === "edit") {
++    const compiled = cadenceFromDraft(inputs.draft);
++    return compiled ?? inputs.savedCadence;
++  }
++  return cadenceFromDraft(inputs.draft);
++}
++
++function previewKey(inputs: ScheduleCadenceInputs, cadence: ScheduleCadence | null): string {
++  return JSON.stringify([
++    cadence,
++    inputs.draft.timezone,
++    inputs.ends.kind,
++    inputs.ends.dateText,
++    inputs.ends.runsText,
++    inputs.ends.touched,
++    inputs.completedRuns,
++    inputs.savedNextRunAt,
++    Math.floor(inputs.now / 60_000),
++  ]);
++}
++
++export interface CadenceStateCache {
++  key: string | null;
++  preview: CadencePreviewState | null;
++}
++
++export function createCadenceStateCache(): CadenceStateCache {
++  return { key: null, preview: null };
++}
++
++function computePreviewState(input: {
++  inputs: ScheduleCadenceInputs;
++  cadence: ScheduleCadence | null;
++  compiled: CompiledCadence;
++}): CadencePreviewState {
++  const { inputs, cadence, compiled } = input;
++  if (!cadence || endsError(inputs.ends)) {
++    return { status: "invalid" };
++  }
++  const maxRuns = resolveMaxRuns(inputs.ends);
++  if (maxRuns !== null && inputs.completedRuns.status === "pending") {
++    return { status: "loading" };
++  }
++  const timezone = cadence.type === "cron" ? (cadence.timezone ?? "UTC") : inputs.draft.timezone;
++  const expiresAt = resolveExpiresAt(inputs.ends, timezone);
++  const remainingRunsKnown = maxRuns === null || inputs.completedRuns.count !== null;
++  const remainingRuns =
++    maxRuns === null ? null : Math.max(0, maxRuns - (inputs.completedRuns.count ?? 0));
++  const savedNextRunAt = inputs.savedNextRunAt ? Date.parse(inputs.savedNextRunAt) : Number.NaN;
++  const preview = computeCadencePreview({
++    source:
++      cadence.type === "every"
++        ? {
++            type: "every",
++            everyMs: cadence.everyMs,
++            nextRunAt: Number.isFinite(savedNextRunAt) ? savedNextRunAt : null,
++            timezone,
++          }
++        : { type: "cron", expression: cadence.expression, timezone },
++    now: inputs.now,
++    expiresAt,
++    remainingRuns: remainingRunsKnown ? remainingRuns : null,
++    clockTimes: cadence.type === "cron" ? compiled.clockTimes : [],
++  });
++  return { status: "ready", preview, remainingRunsKnown, maxRuns, expiresAt };
++}
++
++export function deriveCadenceState(
++  inputs: ScheduleCadenceInputs,
++  cache: CadenceStateCache,
++): ScheduleCadenceState {
++  const compiled = compileCadence(inputs.draft);
++  const cadence = resolveCadence(inputs);
++  const key = previewKey(inputs, cadence);
++  if (cache.key !== key || !cache.preview) {
++    cache.key = key;
++    cache.preview = computePreviewState({ inputs, cadence, compiled });
++  }
++  const preview = cache.preview;
++  const compiledCadence = cadenceFromDraft(inputs.draft);
++  const submitCadence =
++    inputs.mode === "create" || inputs.touched ? (compiledCadence ?? undefined) : undefined;
++  const blocker =
++    preview.status === "ready" && preview.preview.status === "never"
++      ? "This never runs. No date in the next year matches."
++      : null;
++  return {
++    ...inputs,
++    compiled,
++    cadence,
++    submitCadence,
++    submitEnds: resolveEndsSubmit({
++      draft: inputs.ends,
++      timezone: inputs.draft.timezone,
++      mode: inputs.mode,
++    }),
++    endsError: endsError(inputs.ends),
++    preview,
++    blocker,
++  };
++}
++
++/** Whether the cadence and Ends fields allow submitting. */
++export function cadenceAllowsSubmit(state: ScheduleCadenceState): boolean {
++  if (state.endsError || state.blocker) {
++    return false;
++  }
++  if (state.mode === "edit" && !state.touched) {
++    return state.cadence !== null;
++  }
++  return state.submitCadence !== undefined;
++}
+diff --git a/packages/app/src/schedules/schedule-ends.ts b/packages/app/src/schedules/schedule-ends.ts
+new file mode 100644
+index 000000000..0b8f77f16
+--- /dev/null
++++ b/packages/app/src/schedules/schedule-ends.ts
+@@ -0,0 +1,163 @@
++import { readLocalParts, startOfLocalDay } from "./cadence-preview";
++
++// How a schedule ends: never, after a date (expiresAt), or after a number of
++// runs (maxRuns). The daemon counts maxRuns over every finished run, so an
++// edited schedule has `maxRuns - completedRuns` runs left.
++
++export type EndsKind = "never" | "date" | "runs";
++
++export interface EndsDraft {
++  kind: EndsKind;
++  /** YYYY-MM-DD, the last day runs can happen, in the cadence time zone. */
++  dateText: string;
++  runsText: string;
++  /** The user changed Ends; until then edit submits neither field. */
++  touched: boolean;
++  savedExpiresAt: string | null;
++  savedMaxRuns: number | null;
++}
++
++export interface EndsSubmit {
++  expiresAt: string | null;
++  maxRuns: number | null;
++}
++
++export function createEndsDraft(input: {
++  expiresAt: string | null | undefined;
++  maxRuns: number | null | undefined;
++  timezone: string;
++  now: number;
++}): EndsDraft {
++  const savedExpiresAt = input.expiresAt ?? null;
++  const savedMaxRuns = input.maxRuns ?? null;
++  const expiresAt = savedExpiresAt ? Date.parse(savedExpiresAt) : Number.NaN;
++  let kind: EndsKind = "never";
++  if (savedMaxRuns !== null) {
++    kind = "runs";
++  } else if (Number.isFinite(expiresAt)) {
++    kind = "date";
++  }
++  return {
++    kind,
++    dateText: Number.isFinite(expiresAt)
++      ? formatDateText(expiresAt - 1, input.timezone)
++      : defaultEndDate(input.now, input.timezone),
++    runsText: savedMaxRuns !== null ? String(savedMaxRuns) : "10",
++    touched: false,
++    savedExpiresAt,
++    savedMaxRuns,
++  };
++}
++
++function formatDateText(at: number, timezone: string): string {
++  const parts = readLocalParts(at, timezone);
++  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.dayOfMonth).padStart(2, "0")}`;
++}
++
++function defaultEndDate(now: number, timezone: string): string {
++  const parts = readLocalParts(now, timezone);
++  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.dayOfMonth + 30));
++  return formatDateText(
++    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12),
++    "UTC",
++  );
++}
++
++export function parseDateText(text: string): { year: number; month: number; day: number } | null {
++  const match = text.trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
++  if (!match) {
++    return null;
++  }
++  const year = Number.parseInt(match[1], 10);
++  const month = Number.parseInt(match[2], 10);
++  const day = Number.parseInt(match[3], 10);
++  const date = new Date(Date.UTC(year, month - 1, day));
++  if (
++    date.getUTCFullYear() !== year ||
++    date.getUTCMonth() !== month - 1 ||
++    date.getUTCDate() !== day
++  ) {
++    return null;
++  }
++  return { year, month, day };
++}
++
++export function parseRunsText(text: string): number | null {
++  const trimmed = text.trim();
++  if (!/^\d+$/.test(trimmed)) {
++    return null;
++  }
++  const value = Number.parseInt(trimmed, 10);
++  return value >= 1 ? value : null;
++}
++
++export function endsError(draft: EndsDraft): string | null {
++  if (draft.kind === "runs" && parseRunsText(draft.runsText) === null) {
++    return "Enter 1 or more runs";
++  }
++  if (draft.kind === "date" && parseDateText(draft.dateText) === null) {
++    return "Use a date like 2026-12-31";
++  }
++  return null;
++}
++
++/** The instant runs stop: midnight after the end date in the cadence time zone. */
++export function resolveExpiresAt(draft: EndsDraft, timezone: string): number | null {
++  if (draft.kind !== "date") {
++    return null;
++  }
++  if (!draft.touched && draft.savedExpiresAt) {
++    const saved = Date.parse(draft.savedExpiresAt);
++    return Number.isFinite(saved) ? saved : null;
++  }
++  const date = parseDateText(draft.dateText);
++  if (!date) {
++    return null;
++  }
++  const next = new Date(Date.UTC(date.year, date.month - 1, date.day + 1));
++  return startOfLocalDay(
++    { year: next.getUTCFullYear(), month: next.getUTCMonth() + 1, day: next.getUTCDate() },
++    timezone,
++  );
++}
++
++export function resolveMaxRuns(draft: EndsDraft): number | null {
++  return draft.kind === "runs" ? parseRunsText(draft.runsText) : null;
++}
++
++/**
++ * Fields to send. Null means leave the saved values alone: an untouched edit
++ * keeps whatever the daemon has, including both limits set from the CLI.
++ */
++export function resolveEndsSubmit(input: {
++  draft: EndsDraft;
++  timezone: string;
++  mode: "create" | "edit";
++}): EndsSubmit | null {
++  const { draft } = input;
++  if (input.mode === "edit" && !draft.touched) {
++    return null;
++  }
++  const expiresAt = resolveExpiresAt(draft, input.timezone);
++  return {
++    expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
++    maxRuns: resolveMaxRuns(draft),
++  };
++}
++
++/** An end date is a wall date, so a new time zone moves its instant. */
++export function followTimezone(draft: EndsDraft): EndsDraft {
++  return draft.kind === "date" ? { ...draft, touched: true } : draft;
++}
++
++export function setEndsKind(draft: EndsDraft, kind: EndsKind): EndsDraft {
++  return { ...draft, kind, touched: true };
++}
++
++export function setEndsDate(draft: EndsDraft, dateText: string): EndsDraft {
++  return { ...draft, dateText, touched: true };
++}
++
++export function setEndsRuns(draft: EndsDraft, runsText: string): EndsDraft {
++  return { ...draft, runsText, touched: true };
++}
+diff --git a/packages/app/src/schedules/schedule-form-model.test.ts b/packages/app/src/schedules/schedule-form-model.test.ts
+index 9ec61dd7c..99de3f286 100644
+--- a/packages/app/src/schedules/schedule-form-model.test.ts
++++ b/packages/app/src/schedules/schedule-form-model.test.ts
+@@ -510,14 +510,17 @@ describe("schedule form model", () => {
+       },
+     });
+ 
+-    expect(form.getState().cadence).toEqual({
+-      type: "cron",
+-      expression: "* * * * *",
+-      timezone: "Europe/Madrid",
++    expect(form.getState().cadence.draft).toMatchObject({
++      mode: "interval",
++      interval: { unit: "minutes", every: 1, windowed: false },
++      legacyEveryMs: 60_000,
+     });
++    expect(form.getState().cadence.cadence).toEqual({ type: "every", everyMs: 60_000 });
+     form.setName("Renamed without touching cadence");
+ 
+-    expect(form.getState().submitCadence).toBeUndefined();
++    expect(form.getState().cadence.submitCadence).toBeUndefined();
++    expect(form.getState().cadence.submitEnds).toBeNull();
++    expect(form.getState().cadence.blocker).toBeNull();
+   });
+ 
+   it("does not rewrite an unrepresentable legacy interval until cadence changes", () => {
+@@ -539,15 +542,12 @@ describe("schedule form model", () => {
+       },
+     });
+ 
+-    expect(form.getState().cadence).toEqual({
+-      type: "cron",
+-      expression: "*/59 * * * *",
+-      timezone: "Europe/Madrid",
+-    });
++    expect(form.getState().cadence.cadence).toEqual(originalCadence);
++    expect(form.getState().cadence.draft.legacyEveryMs).toBe(90 * 60_000);
+ 
+     form.setName("Renamed without touching cadence");
+ 
+-    expect(form.getState().submitCadence).toBeUndefined();
++    expect(form.getState().cadence.submitCadence).toBeUndefined();
+ 
+     form.setCadence({
+       type: "cron",
+@@ -555,13 +555,105 @@ describe("schedule form model", () => {
+       timezone: "Europe/Madrid",
+     });
+ 
+-    expect(form.getState().submitCadence).toEqual({
++    expect(form.getState().cadence.submitCadence).toEqual({
+       type: "cron",
+       expression: "0 9 * * *",
+       timezone: "Europe/Madrid",
+     });
+   });
+ 
++  it("waits for the finished run count before previewing remaining runs", () => {
++    const form = open({
++      mode: "edit",
++      schedule: scheduleOnHost({
++        serverId: "host-a",
++        serverName: "Host A",
++        cwd: "/repo/a",
++        model: "model-a",
++      }),
++      defaults: {
++        serverId: null,
++        projectTargets: PROJECT_TARGETS,
++        preferences: {},
++        timezone: "Europe/Madrid",
++        now: () => Date.parse("2026-10-29T16:15:00.000Z"),
++      },
++    });
++
++    expect(form.getState().cadence.preview.status).toBe("loading");
++    expect(form.getState().cadence.draft).toMatchObject({ mode: "daily", timezone: "UTC" });
++
++    form.applyCompletedRuns(2);
++
++    const preview = form.getState().cadence.preview;
++    expect(preview.status).toBe("ready");
++    if (preview.status !== "ready") {
++      return;
++    }
++    expect(preview.remainingRunsKnown).toBe(true);
++    expect(preview.preview.entries).toEqual([
++      { kind: "run", at: Date.parse("2026-10-30T09:00:00.000Z"), repeat: false, last: true },
++    ]);
++    expect(form.getState().cadence.submitEnds).toBeNull();
++  });
++
++  it("previews total runs when the finished run count cannot load", () => {
++    const form = open({
++      mode: "edit",
++      schedule: scheduleOnHost({
++        serverId: "host-a",
++        serverName: "Host A",
++        cwd: "/repo/a",
++        model: "model-a",
++      }),
++      defaults: { serverId: null, projectTargets: PROJECT_TARGETS, preferences: {} },
++    });
++
++    form.applyCompletedRuns(null);
++
++    expect(form.getState().cadence.preview).toMatchObject({
++      status: "ready",
++      remainingRunsKnown: false,
++      maxRuns: 3,
++    });
++  });
++
++  it("submits a builder cadence and ends on create", () => {
++    const form = open({
++      mode: "create",
++      defaults: {
++        serverId: "host-a",
++        projectTargets: PROJECT_TARGETS,
++        preferences: {},
++        timezone: "America/Denver",
++        now: () => Date.parse("2026-10-29T16:15:00.000Z"),
++      },
++    });
++
++    form.updateCadence((draft) => ({ ...draft, mode: "weekly", weekDays: [1, 3, 5] }));
++    form.setMaxRuns("4");
++
++    expect(form.getState().cadence).toMatchObject({
++      submitCadence: { type: "cron", expression: "0 9 * * 1,3,5", timezone: "America/Denver" },
++      submitEnds: { maxRuns: 4, expiresAt: null },
++      blocker: null,
++    });
++  });
++
++  it("blocks a cron cadence that never runs", () => {
++    const form = open({
++      mode: "create",
++      defaults: { serverId: "host-a", projectTargets: PROJECT_TARGETS, preferences: {} },
++    });
++
++    form.updateCadence((draft) => ({ ...draft, mode: "cron", cronText: "0 9 30 2 *" }));
++
++    expect(form.getState().cadence.blocker).toBe(
++      "This never runs. No date in the next year matches.",
++    );
++    expect(form.getState().canSubmit).toBe(false);
++  });
++
+   it("requires a cron choice before updating a legacy heartbeat", () => {
+     const form = open({
+       mode: "edit",
+@@ -579,7 +671,9 @@ describe("schedule form model", () => {
+     form.setCadence({ type: "cron", expression: "0 9 * * *", timezone: "Europe/Madrid" });
+ 
+     expect(form.getState()).toMatchObject({
+-      submitCadence: { type: "cron", expression: "0 9 * * *", timezone: "Europe/Madrid" },
++      cadence: {
++        submitCadence: { type: "cron", expression: "0 9 * * *", timezone: "Europe/Madrid" },
++      },
+       canSubmit: true,
+     });
+   });
+diff --git a/packages/app/src/schedules/schedule-form-model.ts b/packages/app/src/schedules/schedule-form-model.ts
+index d7d2a115d..af7b1d19a 100644
+--- a/packages/app/src/schedules/schedule-form-model.ts
++++ b/packages/app/src/schedules/schedule-form-model.ts
+@@ -26,7 +26,16 @@ import {
+ } from "@/provider-selection/resolve-agent-form";
+ import { buildProviderDefinitions } from "@/utils/provider-definitions";
+ import { shortenPath } from "@/utils/shorten-path";
+-import { normalizeScheduleFormCadence } from "./schedule-cadence-options";
++import { createCadenceDraft, type CadenceDraft } from "./cadence-builder";
++import {
++  cadenceAllowsSubmit,
++  createCadenceStateCache,
++  createScheduleCadenceInputs,
++  deriveCadenceState,
++  type ScheduleCadenceInputs,
++  type ScheduleCadenceState,
++} from "./schedule-cadence-state";
++import { followTimezone, setEndsKind, setEndsRuns, type EndsDraft } from "./schedule-ends";
+ import { PROJECT_OPTION_PREFIX, type ScheduleProjectTarget } from "./schedule-project-targets";
+ 
+ export interface ScheduleFormDisplay {
+@@ -49,6 +58,8 @@ export interface ScheduleFormSnapshot {
+     projectTargets: readonly ScheduleProjectTarget[];
+     preferences?: FormPreferences;
+     timezone?: string;
++    /** Clock for the run preview; tests pin it. */
++    now?: () => number;
+   };
+ }
+ 
+@@ -78,7 +89,6 @@ export interface ScheduleFormProjectOption {
+ }
+ 
+ export type ScheduleFormTargetKind = "agent" | "new-agent";
+-type CronCadence = Extract<ScheduleCadence, { type: "cron" }>;
+ type ProviderResolutionStatus = "idle" | "pending" | "complete";
+ 
+ export interface ScheduleFormState {
+@@ -86,9 +96,7 @@ export interface ScheduleFormState {
+   targetKind: ScheduleFormTargetKind;
+   name: string;
+   prompt: string;
+-  maxRuns: string;
+-  cadence: ScheduleCadence;
+-  submitCadence: CronCadence | undefined;
++  cadence: ScheduleCadenceState;
+   hosts: ScheduleFormHost[];
+   projectOptions: ScheduleFormProjectOption[];
+   selectedServerId: string | null;
+@@ -135,12 +143,17 @@ export interface ScheduleFormModel {
+   setPrompt: (value: string) => void;
+   setMaxRuns: (value: string) => void;
+   setCadence: (value: ScheduleCadence) => void;
++  updateCadence: (reduce: (draft: CadenceDraft) => CadenceDraft) => void;
++  updateEnds: (reduce: (draft: EndsDraft) => EndsDraft) => void;
++  /** Finished runs of the edited schedule; null when they could not be loaded. */
++  applyCompletedRuns: (count: number | null) => void;
++  /** Re-read the clock so the preview's "in 3 h" labels stay current. */
++  refreshPreview: () => void;
+   setIsolation: (value: "local" | "worktree") => void;
+   setArchiveOnFinish: (value: boolean) => void;
+   setSubmitError: (value: string | null) => void;
+ }
+ 
+-const DEFAULT_CADENCE: ScheduleCadence = { type: "every", everyMs: 60 * 60 * 1000 };
+ const DEFAULT_TIMEZONE = "UTC";
+ 
+ type ThinkingOption = NonNullable<AgentModelDefinition["thinkingOptions"]>[number];
+@@ -427,20 +440,6 @@ function buildInitialThinkingDisplay(thinkingOptionId: string): ScheduleFormDisp
+   return { label: formatThinkingOptionLabel({ id: thinkingOptionId }) };
+ }
+ 
+-function formatInitialMaxRuns(schedule: ScheduleFormSnapshot["schedule"]): string {
+-  if (schedule?.maxRuns == null) {
+-    return "";
+-  }
+-  return String(schedule.maxRuns);
+-}
+-
+-function resolveInitialSubmitCadence(
+-  schedule: ScheduleFormSnapshot["schedule"],
+-  initialCadence: CronCadence,
+-): CronCadence | undefined {
+-  return schedule ? undefined : initialCadence;
+-}
+-
+ function resolveInitialIsolation(input: {
+   config: ReturnType<typeof newAgentConfig>;
+   preferences: FormPreferences | undefined;
+@@ -543,8 +542,11 @@ function resolveDisclosure(state: ScheduleFormState): ScheduleDisclosureState {
+ }
+ 
+ function resolveCanSubmit(state: ScheduleFormState): boolean {
++  if (!cadenceAllowsSubmit(state.cadence)) {
++    return false;
++  }
+   if (state.targetKind === "agent") {
+-    return state.submitCadence !== undefined;
++    return state.mode === "create" || state.cadence.touched;
+   }
+   if (state.prompt.trim().length === 0) {
+     return false;
+@@ -644,10 +646,12 @@ function buildInitialState(snapshot: ScheduleFormSnapshot): ScheduleFormState {
+     selectedServerId,
+     workingDir,
+   });
+-  const initialCadence = normalizeScheduleFormCadence(
+-    snapshot.schedule?.cadence ?? DEFAULT_CADENCE,
+-    snapshot.defaults.timezone ?? DEFAULT_TIMEZONE,
+-  );
++  const cadenceInputs = createScheduleCadenceInputs({
++    mode: snapshot.mode,
++    schedule: snapshot.schedule,
++    deviceTimeZone: snapshot.defaults.timezone ?? DEFAULT_TIMEZONE,
++    now: (snapshot.defaults.now ?? Date.now)(),
++  });
+   const initialModel = config?.model ?? "";
+   const initialMode = config?.modeId ?? "";
+   const initialThinking = config?.thinkingOptionId ?? "";
+@@ -656,9 +660,7 @@ function buildInitialState(snapshot: ScheduleFormSnapshot): ScheduleFormState {
+     targetKind,
+     name: snapshot.schedule?.name ?? "",
+     prompt: snapshot.schedule?.prompt ?? "",
+-    maxRuns: formatInitialMaxRuns(snapshot.schedule),
+-    cadence: initialCadence,
+-    submitCadence: resolveInitialSubmitCadence(snapshot.schedule, initialCadence),
++    cadence: deriveCadenceState(cadenceInputs, createCadenceStateCache()),
+     hosts: [...snapshot.hosts],
+     projectOptions: buildProjectOptions(snapshot.defaults.projectTargets, selectedServerId),
+     selectedServerId,
+@@ -860,8 +862,15 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
+   let providerEntries: ProviderSnapshotEntry[] = [];
+   let userModified = { ...INITIAL_USER_MODIFIED, isolation: false };
+   const timezone = snapshot.defaults.timezone ?? DEFAULT_TIMEZONE;
++  const now = snapshot.defaults.now ?? Date.now;
++  const cadenceCache = createCadenceStateCache();
+   let state = buildInitialState(snapshot);
+ 
++  function publishCadence(patch: Partial<ScheduleCadenceInputs>): void {
++    const inputs: ScheduleCadenceInputs = { ...state.cadence, ...patch, now: now() };
++    publish({ ...state, cadence: deriveCadenceState(inputs, cadenceCache) });
++  }
++
+   function publish(nextState: ScheduleFormState): void {
+     if (closed) {
+       return;
+@@ -1108,11 +1117,40 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
+       publish({ ...state, prompt: value });
+     },
+     setMaxRuns(value) {
+-      publish({ ...state, maxRuns: value });
++      const ends = state.cadence.ends;
++      publishCadence({
++        ends: value.trim()
++          ? setEndsRuns(setEndsKind(ends, "runs"), value)
++          : setEndsKind(ends, "never"),
++      });
+     },
+     setCadence(value) {
+-      const cadence = normalizeScheduleFormCadence(value, timezone);
+-      publish({ ...state, cadence, submitCadence: cadence });
++      const draft = createCadenceDraft({ cadence: value, deviceTimeZone: timezone });
++      publishCadence({ draft: { ...draft, legacyEveryMs: null }, touched: true });
++    },
++    updateCadence(reduce) {
++      const previous = state.cadence.draft;
++      const draft = reduce(previous);
++      if (draft === previous) {
++        return;
++      }
++      const ends =
++        draft.timezone === previous.timezone
++          ? state.cadence.ends
++          : followTimezone(state.cadence.ends);
++      publishCadence({ draft, ends, touched: true });
++    },
++    updateEnds(reduce) {
++      publishCadence({ ends: reduce(state.cadence.ends) });
++    },
++    applyCompletedRuns(count) {
++      publishCadence({
++        completedRuns:
++          count === null ? { status: "failed", count: null } : { status: "complete", count },
++      });
++    },
++    refreshPreview() {
++      publishCadence({});
+     },
+     setIsolation(value) {
+       userModified = { ...userModified, isolation: true };
+diff --git a/packages/app/src/schedules/use-schedule-cadence-inputs.ts b/packages/app/src/schedules/use-schedule-cadence-inputs.ts
+new file mode 100644
+index 000000000..6341dde3c
+--- /dev/null
++++ b/packages/app/src/schedules/use-schedule-cadence-inputs.ts
+@@ -0,0 +1,56 @@
++import { useEffect } from "react";
++import { useFetchQuery } from "@/data/query";
++import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
++import type { ScheduleFormModel } from "./schedule-form-model";
++
++const PREVIEW_REFRESH_MS = 60_000;
++
++/**
++ * Late inputs of the cadence preview: how many runs the edited schedule has
++ * finished (maxRuns counts them), and a minute clock for relative times.
++ */
++export function useScheduleCadenceInputs(input: {
++  model: ScheduleFormModel;
++  mode: "create" | "edit";
++  serverId: string;
++  scheduleId: string | null;
++}): void {
++  const { model, mode, serverId, scheduleId } = input;
++  const client = useHostRuntimeClient(serverId);
++  const isConnected = useHostRuntimeIsConnected(serverId);
++  const enabled = mode === "edit" && Boolean(scheduleId && client && isConnected);
++  const query = useFetchQuery({
++    queryKey: ["schedule-completed-runs", serverId, scheduleId],
++    enabled,
++    dataShape: "value",
++    staleTimeMs: 0,
++    retry: 1,
++    queryFn: async () => {
++      if (!client || !scheduleId) {
++        throw new Error("Host is not connected");
++      }
++      const payload = await client.scheduleInspect({ id: scheduleId });
++      if (payload.error || !payload.schedule) {
++        throw new Error(payload.error ?? "Schedule not found");
++      }
++      // The daemon counts every finished run toward maxRuns.
++      return payload.schedule.runs.filter((run) => run.status !== "running").length;
++    },
++  });
++
++  useEffect(() => {
++    if (mode !== "edit") {
++      return;
++    }
++    if (query.status === "success") {
++      model.applyCompletedRuns(query.data);
++    } else if (query.status === "error" || (!isConnected && query.status === "pending")) {
++      model.applyCompletedRuns(null);
++    }
++  }, [isConnected, mode, model, query.data, query.status]);
++
++  useEffect(() => {
++    const timer = setInterval(() => model.refreshPreview(), PREVIEW_REFRESH_MS);
++    return () => clearInterval(timer);
++  }, [model]);
++}
+diff --git a/packages/protocol/src/schedule/cron-next-run.test.ts b/packages/protocol/src/schedule/cron-next-run.test.ts
+new file mode 100644
+index 000000000..ba5865a2b
+--- /dev/null
++++ b/packages/protocol/src/schedule/cron-next-run.test.ts
+@@ -0,0 +1,108 @@
++import { describe, expect, it } from "vitest";
++import { parseCronExpression } from "./cron-expression.js";
++import {
++  computeNextCronRunAt,
++  createCronDatePartsReader,
++  CRON_SEARCH_LIMIT_MINUTES,
++} from "./cron-next-run.js";
++
++// The daemon's original matcher: test every minute in turn.
++function walkEveryMinute(expression: string, timezone: string | undefined, after: Date) {
++  const cron = parseCronExpression(expression);
++  const read = createCronDatePartsReader(timezone);
++  let t = Math.floor(after.getTime() / 60_000) * 60_000 + 60_000;
++  for (let i = 0; i < CRON_SEARCH_LIMIT_MINUTES; i += 1) {
++    const p = read(new Date(t));
++    if (
++      cron.minute.matches(p.minute) &&
++      cron.hour.matches(p.hour) &&
++      cron.dayOfMonth.matches(p.dayOfMonth) &&
++      cron.month.matches(p.month) &&
++      cron.dayOfWeek.matches(p.dayOfWeek)
++    ) {
++      return new Date(t);
++    }
++    t += 60_000;
++  }
++  return null;
++}
++
++function nextRuns(expression: string, timezone: string | undefined, from: string, count: number) {
++  const runs: string[] = [];
++  let after = new Date(from);
++  for (let i = 0; i < count; i += 1) {
++    const next = computeNextCronRunAt({ expression, timezone, after });
++    if (!next) {
++      break;
++    }
++    runs.push(next.toISOString());
++    after = next;
++  }
++  return runs;
++}
++
++describe("computeNextCronRunAt", () => {
++  const cases: Array<[string, string | undefined, string]> = [
++    ["30 1 * * *", "America/New_York", "2026-10-31T12:00:00.000Z"],
++    ["30 2 * * *", "America/New_York", "2027-03-13T12:00:00.000Z"],
++    ["0 9 31 * *", "Europe/Berlin", "2026-01-15T00:00:00.000Z"],
++    ["0 10 8-14 * 2", "America/Denver", "2026-10-29T16:15:00.000Z"],
++    ["*/20 9-16 * * 1-5", "Asia/Kolkata", "2026-10-29T16:15:00.000Z"],
++    ["0 0 29 2 *", "UTC", "2026-03-01T00:00:00.000Z"],
++    ["5 4 */3 * *", undefined, "2026-10-29T16:15:00.000Z"],
++    ["0 */4 * * 0,6", "Australia/Lord_Howe", "2026-10-02T00:00:00.000Z"],
++    ["15 0 * * *", "America/Sao_Paulo", "2026-10-29T16:15:00.000Z"],
++  ];
++
++  it.each(cases)("matches the minute walk for %s in %s", (expression, timezone, from) => {
++    let after = new Date(from);
++    for (let i = 0; i < 6; i += 1) {
++      const expected = walkEveryMinute(expression, timezone, after);
++      const actual = computeNextCronRunAt({ expression, timezone, after });
++      expect(actual?.toISOString()).toBe(expected?.toISOString());
++      if (!actual) {
++        break;
++      }
++      after = actual;
++    }
++  });
++
++  it("runs a repeated fall-back wall time twice", () => {
++    expect(nextRuns("30 1 * * *", "America/New_York", "2026-10-31T12:00:00.000Z", 3)).toEqual([
++      "2026-11-01T05:30:00.000Z",
++      "2026-11-01T06:30:00.000Z",
++      "2026-11-02T06:30:00.000Z",
++    ]);
++  });
++
++  it("skips a spring-forward wall time that does not exist", () => {
++    expect(nextRuns("30 2 * * *", "America/New_York", "2027-03-13T12:00:00.000Z", 2)).toEqual([
++      "2027-03-15T06:30:00.000Z",
++      "2027-03-16T06:30:00.000Z",
++    ]);
++  });
++
++  it("skips months without the requested day", () => {
++    expect(nextRuns("0 9 31 * *", "UTC", "2027-01-01T00:00:00.000Z", 3)).toEqual([
++      "2027-01-31T09:00:00.000Z",
++      "2027-03-31T09:00:00.000Z",
++      "2027-05-31T09:00:00.000Z",
++    ]);
++  });
++
++  it("returns null when nothing matches within the search limit", () => {
++    expect(
++      computeNextCronRunAt({
++        expression: "0 9 30 2 *",
++        timezone: "UTC",
++        after: new Date("2026-10-29T00:00:00.000Z"),
++      }),
++    ).toBeNull();
++  });
++
++  it("rejects invalid time zones", () => {
++    expect(() =>
++      computeNextCronRunAt({ expression: "0 9 * * *", timezone: "Not/AZone", after: new Date() }),
++    ).toThrow("Invalid cron time zone: Not/AZone");
++  });
++});
+diff --git a/packages/protocol/src/schedule/cron-next-run.ts b/packages/protocol/src/schedule/cron-next-run.ts
+new file mode 100644
+index 000000000..d597c351b
+--- /dev/null
++++ b/packages/protocol/src/schedule/cron-next-run.ts
+@@ -0,0 +1,143 @@
++import { parseCronExpression, type ParsedCronExpression } from "./cron-expression.js";
++
++/** Wall-clock fields of one instant, read in the cadence time zone. */
++export interface CronDateParts {
++  year: number;
++  minute: number;
++  hour: number;
++  dayOfMonth: number;
++  month: number;
++  dayOfWeek: number;
++}
++
++export type CronDatePartsReader = (date: Date) => CronDateParts;
++
++const MS_PER_MINUTE = 60_000;
++const MINUTES_PER_DAY = 24 * 60;
++
++/** How far ahead the daemon looks for a match before it rejects a cron cadence. */
++export const CRON_SEARCH_LIMIT_MINUTES = 366 * MINUTES_PER_DAY;
++
++export function isValidCronTimeZone(timeZone: string): boolean {
++  try {
++    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(0));
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++/**
++ * Read wall-clock parts in `timeZone`. A cadence without a time zone runs in
++ * UTC, so `undefined` reads UTC fields.
++ */
++export function createCronDatePartsReader(timeZone: string | undefined): CronDatePartsReader {
++  if (timeZone === undefined) {
++    return (date) => ({
++      year: date.getUTCFullYear(),
++      minute: date.getUTCMinutes(),
++      hour: date.getUTCHours(),
++      dayOfMonth: date.getUTCDate(),
++      month: date.getUTCMonth() + 1,
++      dayOfWeek: date.getUTCDay(),
++    });
++  }
++
++  if (!isValidCronTimeZone(timeZone)) {
++    throw new Error(`Invalid cron time zone: ${timeZone}`);
++  }
++
++  const formatter = new Intl.DateTimeFormat("en-US", {
++    timeZone,
++    hourCycle: "h23",
++    year: "numeric",
++    month: "2-digit",
++    day: "2-digit",
++    hour: "2-digit",
++    minute: "2-digit",
++  });
++
++  return (date) => {
++    const values: Record<string, string> = {};
++    for (const part of formatter.formatToParts(date)) {
++      if (part.type !== "literal") {
++        values[part.type] = part.value;
++      }
++    }
++
++    const year = Number.parseInt(values.year, 10);
++    const month = Number.parseInt(values.month, 10);
++    const dayOfMonth = Number.parseInt(values.day, 10);
++
++    return {
++      year,
++      // Some ICU builds report midnight as "24" even with hourCycle h23.
++      minute: Number.parseInt(values.minute, 10),
++      hour: Number.parseInt(values.hour, 10) % 24,
++      dayOfMonth,
++      month,
++      dayOfWeek: new Date(Date.UTC(year, month - 1, dayOfMonth)).getUTCDay(),
++    };
++  };
++}
++
++function matchesDay(cron: ParsedCronExpression, parts: CronDateParts): boolean {
++  // Day-of-month AND day-of-week: every field must match, unlike Vixie cron.
++  return (
++    cron.month.matches(parts.month) &&
++    cron.dayOfMonth.matches(parts.dayOfMonth) &&
++    cron.dayOfWeek.matches(parts.dayOfWeek)
++  );
++}
++
++/**
++ * First minute strictly after `after` that matches `cron`, searching
++ * `CRON_SEARCH_LIMIT_MINUTES` ahead. Returns null when nothing matches.
++ *
++ * Same result as testing every minute in turn. It skips ahead only across
++ * spans that cannot match: the rest of an hour whose hour field does not
++ * match, and most of a day whose date fields do not match. The day skip stops
++ * an hour before midnight so a DST shift cannot carry it past the next day.
++ */
++export function findNextCronMatch(input: {
++  cron: ParsedCronExpression;
++  readDateParts: CronDatePartsReader;
++  after: Date;
++}): Date | null {
++  const { cron, readDateParts } = input;
++  const start = Math.floor(input.after.getTime() / MS_PER_MINUTE) + 1;
++  const limit = start + CRON_SEARCH_LIMIT_MINUTES;
++  let minuteIndex = start;
++
++  while (minuteIndex < limit) {
++    const cursor = new Date(minuteIndex * MS_PER_MINUTE);
++    const parts = readDateParts(cursor);
++    if (!matchesDay(cron, parts)) {
++      const minuteOfDay = parts.hour * 60 + parts.minute;
++      minuteIndex += Math.max(1, MINUTES_PER_DAY - minuteOfDay - 60);
++      continue;
++    }
++    if (!cron.hour.matches(parts.hour)) {
++      minuteIndex += Math.max(1, 60 - parts.minute);
++      continue;
++    }
++    if (cron.minute.matches(parts.minute)) {
++      return cursor;
++    }
++    minuteIndex += 1;
++  }
++
++  return null;
++}
++
++export function computeNextCronRunAt(input: {
++  expression: string;
++  timezone: string | undefined;
++  after: Date;
++}): Date | null {
++  return findNextCronMatch({
++    cron: parseCronExpression(input.expression),
++    readDateParts: createCronDatePartsReader(input.timezone),
++    after: input.after,
++  });
++}
+diff --git a/packages/server/src/server/schedule/cron.ts b/packages/server/src/server/schedule/cron.ts
+index 2ac2e7897..6a51a383a 100644
+--- a/packages/server/src/server/schedule/cron.ts
++++ b/packages/server/src/server/schedule/cron.ts
+@@ -1,86 +1,15 @@
+ import { parseCronExpression } from "@getpaseo/protocol/schedule/cron-expression";
++import {
++  createCronDatePartsReader,
++  findNextCronMatch,
++} from "@getpaseo/protocol/schedule/cron-next-run";
+ import type { ScheduleCadence } from "@getpaseo/protocol/schedule/types";
+ 
+-interface CronDateParts {
+-  minute: number;
+-  hour: number;
+-  dayOfMonth: number;
+-  month: number;
+-  dayOfWeek: number;
+-}
+-
+-function startOfNextMinute(date: Date): Date {
+-  return new Date(
+-    Date.UTC(
+-      date.getUTCFullYear(),
+-      date.getUTCMonth(),
+-      date.getUTCDate(),
+-      date.getUTCHours(),
+-      date.getUTCMinutes() + 1,
+-      0,
+-      0,
+-    ),
+-  );
+-}
+-
+-function assertValidTimeZone(timeZone: string): void {
+-  try {
+-    new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(0));
+-  } catch {
+-    throw new Error(`Invalid cron time zone: ${timeZone}`);
+-  }
+-}
+-
+-function createCronDatePartsReader(timeZone: string | undefined): (date: Date) => CronDateParts {
+-  if (timeZone === undefined) {
+-    return (date: Date) => ({
+-      minute: date.getUTCMinutes(),
+-      hour: date.getUTCHours(),
+-      dayOfMonth: date.getUTCDate(),
+-      month: date.getUTCMonth() + 1,
+-      dayOfWeek: date.getUTCDay(),
+-    });
+-  }
+-
+-  assertValidTimeZone(timeZone);
+-
+-  const formatter = new Intl.DateTimeFormat("en-US", {
+-    timeZone,
+-    hourCycle: "h23",
+-    year: "numeric",
+-    month: "2-digit",
+-    day: "2-digit",
+-    hour: "2-digit",
+-    minute: "2-digit",
+-  });
+-
+-  return (date: Date) => {
+-    const values: Record<string, string> = {};
+-    for (const part of formatter.formatToParts(date)) {
+-      if (part.type !== "literal") {
+-        values[part.type] = part.value;
+-      }
+-    }
+-
+-    const year = Number.parseInt(values.year, 10);
+-    const month = Number.parseInt(values.month, 10);
+-    const dayOfMonth = Number.parseInt(values.day, 10);
+-
+-    return {
+-      minute: Number.parseInt(values.minute, 10),
+-      hour: Number.parseInt(values.hour, 10),
+-      dayOfMonth,
+-      month,
+-      dayOfWeek: new Date(Date.UTC(year, month - 1, dayOfMonth)).getUTCDay(),
+-    };
+-  };
+-}
+-
+ export function validateScheduleCadence(cadence: ScheduleCadence): void {
+   if (cadence.type === "cron") {
+     parseCronExpression(cadence.expression);
+     if (cadence.timezone !== undefined) {
+-      assertValidTimeZone(cadence.timezone);
++      createCronDatePartsReader(cadence.timezone);
+     }
+   }
+ }
+@@ -92,26 +21,15 @@ export function computeNextRunAt(cadence: ScheduleCadence, after: Date): Date {
+     return new Date(after.getTime() + cadence.everyMs);
+   }
+ 
+-  const cron = parseCronExpression(cadence.expression);
+-  const readDateParts = createCronDatePartsReader(cadence.timezone);
+-  const limit = 366 * 24 * 60;
+-  let cursor = startOfNextMinute(after);
+-
+-  for (let index = 0; index < limit; index += 1) {
+-    const { minute, hour, dayOfMonth, month, dayOfWeek } = readDateParts(cursor);
+-
+-    if (
+-      cron.minute.matches(minute) &&
+-      cron.hour.matches(hour) &&
+-      cron.dayOfMonth.matches(dayOfMonth) &&
+-      cron.month.matches(month) &&
+-      cron.dayOfWeek.matches(dayOfWeek)
+-    ) {
+-      return cursor;
+-    }
+-
+-    cursor = new Date(cursor.getTime() + 60_000);
++  // The app previews upcoming runs with the same matcher, so the preview and
++  // the daemon agree on DST, month lengths and the search limit.
++  const next = findNextCronMatch({
++    cron: parseCronExpression(cadence.expression),
++    readDateParts: createCronDatePartsReader(cadence.timezone),
++    after,
++  });
++  if (!next) {
++    throw new Error(`Unable to compute next run time for cron expression: ${cadence.expression}`);
+   }
+-
+-  throw new Error(`Unable to compute next run time for cron expression: ${cadence.expression}`);
++  return next;
+ }
+-- 
+2.50.1 (Apple Git-155)
+
