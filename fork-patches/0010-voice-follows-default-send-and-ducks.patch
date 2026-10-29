@@ -1,0 +1,3543 @@
+From 6def40f98c64ed83be50a84b70d4d9e2a2068ff2 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 18:55:03 -0600
+Subject: [PATCH 3/3] fork: voice follows Default send and ducks instead of
+ interrupting
+
+Speaking in voice mode while the agent works now follows the Default send
+setting: steer folds the transcript into the running turn, queue adds it
+to the composer queue (merging consecutive spoken items), and interrupt
+keeps the old behaviour. Agent speech fades to a whisper while the user
+talks and fades back after, so echo can no longer cancel a run. Queue
+rows get Edit, Remove and Interrupt and send now. The thinking tone fades
+in and out on its own gain stage. Gated on features.voiceSendBehavior;
+native ducking is a guarded no-op until the native gain lands.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../browser/agent-message-submission.spec.ts  |  32 +-
+ packages/app/e2e/support/helpers/composer.ts  |   2 +-
+ packages/app/src/audio/audio-engine-types.ts  |  16 +
+ packages/app/src/audio/audio-engine.native.ts |  13 +
+ packages/app/src/audio/audio-engine.web.ts    |  90 +++++-
+ packages/app/src/audio/cue-layer.test.ts      | 147 +++++++++
+ packages/app/src/audio/cue-layer.ts           |  87 +++++
+ packages/app/src/audio/gain-ramp.test.ts      |  42 +++
+ packages/app/src/audio/gain-ramp.ts           |  27 ++
+ packages/app/src/audio/pcm/index.ts           |   9 +-
+ packages/app/src/audio/play-audio.test.ts     |   7 +-
+ packages/app/src/audio/playback.test.ts       |   1 +
+ packages/app/src/composer/actions.test.ts     | 126 ++++++++
+ packages/app/src/composer/actions.ts          |  69 +++-
+ packages/app/src/composer/index.tsx           | 134 +++++---
+ packages/app/src/contexts/session-context.tsx |  15 +-
+ packages/app/src/contexts/voice-context.tsx   |   8 +
+ .../app/src/design/designs/voice-strip.tsx    |   1 +
+ packages/app/src/i18n/resources/ar.ts         |   4 +-
+ packages/app/src/i18n/resources/en.ts         |   4 +-
+ packages/app/src/i18n/resources/es.ts         |   4 +-
+ packages/app/src/i18n/resources/fr.ts         |   4 +-
+ packages/app/src/i18n/resources/ja.ts         |   4 +-
+ packages/app/src/i18n/resources/ko.ts         |   4 +-
+ packages/app/src/i18n/resources/pt-BR.ts      |   4 +-
+ packages/app/src/i18n/resources/ru.ts         |   4 +-
+ packages/app/src/i18n/resources/zh-CN.ts      |   4 +-
+ packages/app/src/runtime/host-runtime.test.ts |  75 +++++
+ packages/app/src/runtime/host-runtime.ts      |  38 ++-
+ packages/app/src/stores/session-store.ts      |   2 +-
+ packages/app/src/voice/ducker.test.ts         |  95 ++++++
+ packages/app/src/voice/ducker.ts              |  62 ++++
+ packages/app/src/voice/voice-runtime.test.ts  | 305 +++++++++++++++++-
+ packages/app/src/voice/voice-runtime.ts       | 176 +++++++++-
+ packages/client/src/daemon-client.ts          |  15 +-
+ packages/expo-two-way-audio/src/core.ts       |  14 +
+ packages/protocol/src/messages.ts             |  27 ++
+ .../tests/validation/ws-outbound.test.ts      |  17 +
+ .../authorization/operation-permissions.ts    |   1 +
+ packages/server/src/server/session.ts         |  27 +-
+ .../src/server/session/voice/index.test.ts    |   2 +
+ .../server/src/server/session/voice/index.ts  |  17 +-
+ .../voice/spoken-input-disposition.test.ts    |  32 ++
+ .../session/voice/spoken-input-disposition.ts |  31 ++
+ .../session/voice/voice-session.test.ts       | 236 +++++++++++++-
+ .../src/server/session/voice/voice-session.ts | 113 ++++++-
+ .../server/src/server/websocket-server.ts     |   2 +
+ 47 files changed, 2017 insertions(+), 132 deletions(-)
+ create mode 100644 packages/app/src/audio/cue-layer.test.ts
+ create mode 100644 packages/app/src/audio/cue-layer.ts
+ create mode 100644 packages/app/src/audio/gain-ramp.test.ts
+ create mode 100644 packages/app/src/audio/gain-ramp.ts
+ create mode 100644 packages/app/src/voice/ducker.test.ts
+ create mode 100644 packages/app/src/voice/ducker.ts
+ create mode 100644 packages/server/src/server/session/voice/spoken-input-disposition.test.ts
+ create mode 100644 packages/server/src/server/session/voice/spoken-input-disposition.ts
+
+diff --git a/packages/app/e2e/browser/agent-message-submission.spec.ts b/packages/app/e2e/browser/agent-message-submission.spec.ts
+index 38598f4e6..f5b6b0cd3 100644
+--- a/packages/app/e2e/browser/agent-message-submission.spec.ts
++++ b/packages/app/e2e/browser/agent-message-submission.spec.ts
+@@ -386,7 +386,7 @@ async function queueMessage(page: Page, prompt: string): Promise<void> {
+ }
+ 
+ async function expectQueuedSendFailuresRestored(page: Page, prompts: string[]): Promise<void> {
+-  await expect(page.getByRole("button", { name: "Send queued message now" })).toHaveCount(
++  await expect(page.getByRole("button", { name: "Interrupt and send now" })).toHaveCount(
+     prompts.length,
+   );
+   for (const prompt of prompts) {
+@@ -419,7 +419,7 @@ async function expectInterruptedTurnOrderAfterReconnect(
+     await expect(page.getByText("Cycle 1", { exact: true })).toBeVisible();
+     await queueMessage(page, prompt);
+     gate.setAgentStreamSuppressed(true);
+-    await page.getByRole("button", { name: "Send queued message now" }).click();
++    await page.getByRole("button", { name: "Interrupt and send now" }).click();
+     const promptRow = page.getByTestId("user-message").filter({ hasText: prompt });
+     await expect(promptRow).toBeVisible();
+     await gate.waitForServerMessage("send_agent_message_response");
+@@ -637,7 +637,7 @@ async function expectLegacyAssistantStartsAfterInterruptedPrompt(
+     await queueMessage(page, prompt);
+     gate.setAssistantMessageIdsStripped(true);
+     gate.setAgentStreamEventSuppressed("turn_canceled", true);
+-    await page.getByRole("button", { name: "Send queued message now" }).click();
++    await page.getByRole("button", { name: "Interrupt and send now" }).click();
+     const promptRow = page.getByTestId("user-message").filter({ hasText: prompt });
+     const replacementAnswer = page.getByText("(end of synthetic stream)", { exact: true }).last();
+     await expect(promptRow).toBeVisible();
+@@ -1062,7 +1062,7 @@ test.describe("Agent message submission", () => {
+       await submitMessage(page, "Keep running until the queued turn is ready.");
+       await expectRunningAgentChrome(page, title);
+       await queueMessage(page, secondPrompt);
+-      await expect(page.getByRole("button", { name: "Send queued message now" })).toBeVisible();
++      await expect(page.getByRole("button", { name: "Interrupt and send now" })).toBeVisible();
+ 
+       gate.holdNextServerMessage("cancel_agent_response");
+       await page.getByRole("button", { name: "Stop agent", exact: true }).click();
+@@ -1300,6 +1300,26 @@ test.describe("Agent message submission", () => {
+     await replaySteeredSleepTurnInBrowser(page, testInfo, "codex");
+   });
+ 
++  test("removes a queued message without sending it", async ({ page }, testInfo) => {
++    test.setTimeout(120_000);
++    const agent = await startRunningMockAgent(page, {
++      prefix: `remove-queued-${testInfo.workerIndex}-`,
++      model: "one-minute-stream",
++      prompt: "Keep the agent running while a message queues.",
++    });
++    const prompt = "Never send this queued message.";
++    try {
++      await queueMessage(page, prompt);
++      await expect(page.getByText(prompt, { exact: true })).toBeVisible();
++      await page.getByRole("button", { name: "Remove queued message" }).click();
++      await expect(page.getByText(prompt, { exact: true })).toHaveCount(0);
++      await expect(page.getByRole("button", { name: "Interrupt and send now" })).toHaveCount(0);
++      await expect(page.getByTestId("user-message").filter({ hasText: prompt })).toHaveCount(0);
++    } finally {
++      await agent.cleanup();
++    }
++  });
++
+   test("restores overlapping queued sends when their connection fails", async ({
+     page,
+   }, testInfo) => {
+@@ -1314,9 +1334,9 @@ test.describe("Agent message submission", () => {
+     try {
+       await queueMessage(page, prompts[0]);
+       await queueMessage(page, prompts[1]);
+-      await page.getByRole("button", { name: "Send queued message now" }).first().click();
++      await page.getByRole("button", { name: "Interrupt and send now" }).first().click();
+       await gate.waitForRequest(1);
+-      await page.getByRole("button", { name: "Send queued message now" }).first().click();
++      await page.getByRole("button", { name: "Interrupt and send now" }).first().click();
+       await gate.waitForRequest(2);
+       await gate.disconnect();
+       await expectQueuedSendFailuresRestored(page, prompts);
+diff --git a/packages/app/e2e/support/helpers/composer.ts b/packages/app/e2e/support/helpers/composer.ts
+index 19183fee4..4f7a21bcf 100644
+--- a/packages/app/e2e/support/helpers/composer.ts
++++ b/packages/app/e2e/support/helpers/composer.ts
+@@ -88,7 +88,7 @@ export async function sendDraftToQueue(page: Page): Promise<void> {
+ }
+ 
+ export async function expectQueuedMessageButton(page: Page): Promise<void> {
+-  await expect(page.getByRole("button", { name: "Send queued message now" })).toBeVisible({
++  await expect(page.getByRole("button", { name: "Interrupt and send now" })).toBeVisible({
+     timeout: 10_000,
+   });
+ }
+diff --git a/packages/app/src/audio/audio-engine-types.ts b/packages/app/src/audio/audio-engine-types.ts
+index eab5f019b..6e321e945 100644
+--- a/packages/app/src/audio/audio-engine-types.ts
++++ b/packages/app/src/audio/audio-engine-types.ts
+@@ -1,3 +1,5 @@
++import type { CueHandle } from "./cue-layer";
++
+ export interface AudioEngineCallbacks {
+   onCaptureData(pcm: Uint8Array): void;
+   onVolumeLevel(level: number): void;
+@@ -39,6 +41,20 @@ export interface AudioEngine {
+   stop(): void;
+   clearQueue(): void;
+   isPlaying(): boolean;
++
++  /**
++   * Fork 0009: move the gain of all playback toward `gain` from wherever it is now, as a one-pole
++   * approach with this time constant, so a change of direction mid-fade never jumps. A time
++   * constant of 0 sets it at once. Used to duck the agent's speech while the user talks.
++   */
++  setOutputGain(gain: number, timeConstantMs: number): void;
++
++  /**
++   * Fork 0009: play a chained cue (the thinking tone) on its own gain stage ahead of the output
++   * gain, outside the playback queue, fading in over `fadeInMs`. Other playback never waits for
++   * it, so a reply overlaps its fade-out. Engines without one play cues through `play`.
++   */
++  playCue?(source: AudioPlaybackSource, fadeInMs: number): Promise<CueHandle>;
+ }
+ 
+ export interface AudioEngineOptions {
+diff --git a/packages/app/src/audio/audio-engine.native.ts b/packages/app/src/audio/audio-engine.native.ts
+index 891815ece..9e83c3043 100644
+--- a/packages/app/src/audio/audio-engine.native.ts
++++ b/packages/app/src/audio/audio-engine.native.ts
+@@ -80,6 +80,18 @@ export function createAudioEngine(
+       throw new Error("expo-two-way-audio: native initialize() returned false");
+     }
+     refs.initialized = true;
++    if (outputGain !== 1) native.setOutputGain(outputGain, 0);
++  }
++
++  /** The last gain asked for, applied once the native engine exists. */
++  let outputGain = 1;
++  /**
++   * Fork 0009: the native module owns the stepper, so a busy JS thread cannot stall a fade.
++   * Its wrapper no-ops on binaries without it, and playback then stays at full volume.
++   */
++  function setOutputGain(gain: number, timeConstantMs: number): void {
++    outputGain = gain;
++    if (refs.initialized && !refs.destroyed) native.setOutputGain(gain, timeConstantMs);
+   }
+ 
+   /**
+@@ -238,5 +250,6 @@ export function createAudioEngine(
+     stop: playback.stop,
+     clearQueue: playback.clearQueue,
+     isPlaying: playback.isPlaying,
++    setOutputGain,
+   };
+ }
+diff --git a/packages/app/src/audio/audio-engine.web.ts b/packages/app/src/audio/audio-engine.web.ts
+index 81feea9b4..bd2979965 100644
+--- a/packages/app/src/audio/audio-engine.web.ts
++++ b/packages/app/src/audio/audio-engine.web.ts
+@@ -10,6 +10,8 @@ import type {
+ 
+ import { createPlaybackQueue } from "./playback";
+ import { playSegmentChain } from "./segment-chain";
++import { rampAudioParam } from "./gain-ramp";
++import { startCueLayer, type CueHandle } from "./cue-layer";
+ 
+ function getAudioContextCtor(): typeof AudioContext | null {
+   if (typeof window === "undefined") {
+@@ -41,8 +43,12 @@ function pcm16LeToAudioBuffer(
+   return audioBuffer;
+ }
+ 
+-/** A gain stage that ramps from silence to unity, connected to the destination. */
+-function createFadeIn(context: AudioContext, fadeInMs: number | undefined): GainNode | null {
++/** A gain stage that ramps from silence to unity, connected to `output`. */
++function createFadeIn(
++  context: AudioContext,
++  output: AudioNode,
++  fadeInMs: number | undefined,
++): GainNode | null {
+   if (!fadeInMs || fadeInMs <= 0) {
+     return null;
+   }
+@@ -50,7 +56,7 @@ function createFadeIn(context: AudioContext, fadeInMs: number | undefined): Gain
+   const now = context.currentTime;
+   gain.gain.setValueAtTime(0, now);
+   gain.gain.linearRampToValueAtTime(1, now + fadeInMs / 1000);
+-  gain.connect(context.destination);
++  gain.connect(output);
+   return gain;
+ }
+ 
+@@ -75,9 +81,12 @@ export function createAudioEngine(
+     source: MediaStreamAudioSourceNode | null;
+     processor: ScriptProcessorNode | null;
+     gain: GainNode | null;
++    /** Fork 0009: every playback path ends here, so ducking covers all of it. */
++    outputGain: GainNode | null;
+     started: boolean;
+     muted: boolean;
+   } = {
++    outputGain: null,
+     playbackContext: null,
+     captureContext: null,
+     stream: null,
+@@ -95,6 +104,11 @@ export function createAudioEngine(
+       refs.playbackContext = new AudioContextCtor();
+     }
+     const context = refs.playbackContext;
++    if (!refs.outputGain) {
++      refs.outputGain = context.createGain();
++      refs.outputGain.gain.value = pendingOutputGain;
++      refs.outputGain.connect(context.destination);
++    }
+     if (context.state === "suspended") {
+       let timeout: ReturnType<typeof setTimeout> | undefined;
+       try {
+@@ -114,6 +128,23 @@ export function createAudioEngine(
+     return context;
+   }
+ 
++  /** The gain set before the playback context existed, applied when it is created. */
++  let pendingOutputGain = 1;
++
++  function outputOf(context: AudioContext): AudioNode {
++    return refs.outputGain ?? context.destination;
++  }
++
++  function setOutputGain(target: number, timeConstantMs: number): void {
++    const node = refs.outputGain;
++    const context = refs.playbackContext;
++    if (!node || !context) {
++      pendingOutputGain = target;
++      return;
++    }
++    rampAudioParam(node.gain, context.currentTime, target, timeConstantMs);
++  }
++
+   async function ensureCaptureContext(): Promise<AudioContext> {
+     if (refs.captureContext) {
+       if (refs.captureContext.state === "suspended") {
+@@ -158,8 +189,25 @@ export function createAudioEngine(
+     nextSegment: () => ArrayBuffer,
+     signal: AbortSignal,
+   ): Promise<number> {
+-    const fade = createFadeIn(context, audio.fadeInMs);
+-    const output = fade ?? context.destination;
++    const fade = createFadeIn(context, outputOf(context), audio.fadeInMs);
++    return playChainTo(
++      context,
++      fade ?? outputOf(context),
++      type,
++      first,
++      nextSegment,
++      signal,
++    ).finally(() => fade?.disconnect());
++  }
++
++  function playChainTo(
++    context: AudioContext,
++    output: AudioNode,
++    type: string,
++    first: ArrayBuffer,
++    nextSegment: () => ArrayBuffer,
++    signal: AbortSignal,
++  ): Promise<number> {
+     return playSegmentChain<AudioBuffer>(
+       {
+         now: () => context.currentTime,
+@@ -191,7 +239,30 @@ export function createAudioEngine(
+       first,
+       nextSegment,
+       signal,
+-    ).finally(() => fade?.disconnect());
++    );
++  }
++
++  /** Fork 0009: the cue on its own gain stage, feeding the output gain. See `startCueLayer`. */
++  async function playCue(audio: AudioPlaybackSource, fadeInMs: number): Promise<CueHandle> {
++    const context = await ensurePlaybackContext();
++    const first = await audio.arrayBuffer();
++    const type = (audio.type || "").toLowerCase();
++    const next =
++      audio.nextSegment ??
++      (() => {
++        throw new Error("Single-segment cue");
++      });
++    const gain = context.createGain();
++    gain.connect(outputOf(context));
++    return startCueLayer(
++      {
++        now: () => context.currentTime,
++        gain: gain.gain,
++        startChain: (signal) => playChainTo(context, gain, type, first, next, signal),
++        dispose: () => gain.disconnect(),
++      },
++      fadeInMs,
++    );
+   }
+ 
+   async function playAudio(audio: AudioPlaybackSource, signal: AbortSignal): Promise<number> {
+@@ -210,8 +281,8 @@ export function createAudioEngine(
+     source.buffer = audioBuffer;
+     // A looping buffer source repeats sample-exactly; it ends only when the signal aborts.
+     source.loop = audio.loop === true;
+-    const fade = createFadeIn(context, audio.fadeInMs);
+-    source.connect(fade ?? context.destination);
++    const fade = createFadeIn(context, outputOf(context), audio.fadeInMs);
++    source.connect(fade ?? outputOf(context));
+     const disconnect = () => {
+       source.disconnect();
+       fade?.disconnect();
+@@ -291,6 +362,7 @@ export function createAudioEngine(
+ 
+       const playbackContext = refs.playbackContext;
+       refs.playbackContext = null;
++      refs.outputGain = null;
+       if (playbackContext && playbackContext.state !== "closed") {
+         await playbackContext.close().catch(() => undefined);
+       }
+@@ -391,5 +463,7 @@ export function createAudioEngine(
+     stop: playback.stop,
+     clearQueue: playback.clearQueue,
+     isPlaying: playback.isPlaying,
++    setOutputGain,
++    playCue,
+   };
+ }
+diff --git a/packages/app/src/audio/cue-layer.test.ts b/packages/app/src/audio/cue-layer.test.ts
+new file mode 100644
+index 000000000..cb22128d7
+--- /dev/null
++++ b/packages/app/src/audio/cue-layer.test.ts
+@@ -0,0 +1,147 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import type { RampableParam } from "./gain-ramp";
++import { startCueLayer } from "./cue-layer";
++
++/** A cue on a manual clock; records the gain automation and whether the chain was stopped. */
++function setup() {
++  const clock = { now: 10 };
++  const events: Array<[string, ...number[]]> = [];
++  const gain: RampableParam = {
++    cancelScheduledValues: (t) => events.push(["cancel", t]),
++    setValueAtTime: (v, t) => events.push(["set", v, t]),
++    setTargetAtTime: (v, t, tau) => events.push(["target", v, t, tau]),
++  };
++  let chainSignal: AbortSignal | null = null;
++  let endChain: () => void = () => {};
++  let disposed = 0;
++  let chainStarts = 0;
++  const advance = (ms: number) => {
++    clock.now += ms / 1000;
++    vi.advanceTimersByTime(ms);
++  };
++  const port = {
++    now: () => clock.now,
++    gain,
++    startChain(signal: AbortSignal) {
++      chainStarts += 1;
++      chainSignal = signal;
++      return new Promise<void>((resolve) => {
++        endChain = resolve;
++        signal.addEventListener("abort", () => resolve(), { once: true });
++      });
++    },
++    dispose: () => {
++      disposed += 1;
++    },
++  };
++  return {
++    port,
++    events,
++    advance,
++    chainStopped: () => chainSignal?.aborted ?? false,
++    endChain: () => endChain(),
++    disposed: () => disposed,
++    chainStarts: () => chainStarts,
++  };
++}
++
++describe("cue layer", () => {
++  beforeEach(() => {
++    vi.useFakeTimers();
++  });
++
++  afterEach(() => {
++    vi.useRealTimers();
++  });
++
++  it("fades in from silence over about 400 ms", () => {
++    const { port, events } = setup();
++    startCueLayer(port, 400);
++    expect(events).toEqual([
++      ["cancel", 10],
++      ["set", 0, 10],
++      ["target", 1, 10, 0.4 / 3],
++    ]);
++  });
++
++  it("fades out from the current gain, then stops the chain", async () => {
++    const { port, events, advance, chainStopped, disposed } = setup();
++    const cue = startCueLayer(port, 400);
++    advance(1000);
++    events.length = 0;
++
++    cue.release(350);
++    expect(events).toEqual([
++      ["cancel", 11],
++      ["target", 0, 11, 0.07],
++    ]);
++    advance(349);
++    expect(chainStopped()).toBe(false);
++    advance(1);
++    expect(chainStopped()).toBe(true);
++    await cue.ended;
++    expect(disposed()).toBe(1);
++  });
++
++  it("a restart during the fade-out ramps back up on the same chain", () => {
++    const { port, events, advance, chainStopped, chainStarts } = setup();
++    const cue = startCueLayer(port, 400);
++    advance(1000);
++    cue.release(350);
++    advance(150);
++    events.length = 0;
++
++    cue.resume(400);
++    advance(1000);
++
++    expect(events).toEqual([
++      ["cancel", 11.15],
++      ["target", 1, 11.15, 0.4 / 3],
++    ]);
++    expect(chainStopped()).toBe(false);
++    expect(chainStarts()).toBe(1);
++  });
++
++  it("resume does nothing while the cue is not fading out", () => {
++    const { port, events } = setup();
++    const cue = startCueLayer(port, 400);
++    events.length = 0;
++    cue.resume(400);
++    expect(events).toEqual([]);
++  });
++
++  it("a fast stop shortens a fade-out already under way", () => {
++    const { port, events, advance, chainStopped } = setup();
++    const cue = startCueLayer(port, 400);
++    cue.release(350);
++    advance(100);
++    events.length = 0;
++
++    cue.release(40);
++    expect(events).toEqual([
++      ["cancel", 10.1],
++      ["target", 0, 10.1, 0.008],
++    ]);
++    advance(40);
++    expect(chainStopped()).toBe(true);
++  });
++
++  it("a slower release does not stretch a faster one", () => {
++    const { port, events, advance, chainStopped } = setup();
++    const cue = startCueLayer(port, 400);
++    cue.release(40);
++    events.length = 0;
++    cue.release(350);
++    expect(events).toEqual([]);
++    advance(40);
++    expect(chainStopped()).toBe(true);
++  });
++
++  it("ends when the chain ends on its own", async () => {
++    const { port, endChain, disposed } = setup();
++    const cue = startCueLayer(port, 400);
++    endChain();
++    await cue.ended;
++    expect(disposed()).toBe(1);
++  });
++});
+diff --git a/packages/app/src/audio/cue-layer.ts b/packages/app/src/audio/cue-layer.ts
+new file mode 100644
+index 000000000..ebb11bd4b
+--- /dev/null
++++ b/packages/app/src/audio/cue-layer.ts
+@@ -0,0 +1,87 @@
++import { rampAudioParam, type RampableParam } from "./gain-ramp";
++
++/**
++ * Fork 0009: a looping cue (the thinking tone) on its own gain stage, ahead of the output gain
++ * that ducking drives, so the two multiply instead of fighting. It plays outside the playback
++ * queue: a reply never waits behind it, and overlaps its fade-out as a short crossfade.
++ */
++export interface CueHandle {
++  /** Fade out from the current gain, then stop the chain. Again with a shorter fade speeds it up. */
++  release(fadeOutMs: number): void;
++  /** Called during a fade-out: fade back up from the current gain, on the same chain. */
++  resume(fadeInMs: number): void;
++  /** Settles once the cue has stopped: after a release, or because the chain ended. */
++  readonly ended: Promise<void>;
++}
++
++export interface CueLayerPort {
++  /** The clock the gain is automated on, in seconds. */
++  now(): number;
++  gain: RampableParam;
++  /** Start the segment chain; it settles when the chain ends or `signal` aborts. */
++  startChain(signal: AbortSignal): Promise<unknown>;
++  /** Detach the gain stage once the cue has stopped. */
++  dispose(): void;
++}
++
++/** Three time constants reach within 5% of full volume. */
++export const cueFadeInTimeConstantMs = (fadeInMs: number) => fadeInMs / 3;
++/** Five time constants reach -43 dB, where stopping the chain is inaudible. */
++export const cueFadeOutTimeConstantMs = (fadeOutMs: number) => fadeOutMs / 5;
++
++export function startCueLayer(port: CueLayerPort, fadeInMs: number): CueHandle {
++  const controller = new AbortController();
++  let stopTimer: ReturnType<typeof setTimeout> | null = null;
++  let releaseEndsAt: number | null = null;
++  let finished = false;
++  const ended = createLatch();
++  const stop = () => {
++    if (finished) return;
++    finished = true;
++    if (stopTimer) clearTimeout(stopTimer);
++    stopTimer = null;
++    controller.abort();
++    port.dispose();
++    ended.open();
++  };
++
++  const start = port.now();
++  port.gain.cancelScheduledValues(start);
++  port.gain.setValueAtTime(0, start);
++  port.gain.setTargetAtTime(1, start, cueFadeInTimeConstantMs(fadeInMs) / 1000);
++  port.startChain(controller.signal).then(
++    () => stop(),
++    () => stop(),
++  );
++
++  return {
++    ended: ended.promise,
++    release(fadeOutMs) {
++      if (finished) return;
++      const now = port.now();
++      const endsAt = now + Math.max(0, fadeOutMs) / 1000;
++      // A second, slower release must not stretch a fade already under way.
++      if (releaseEndsAt !== null && endsAt >= releaseEndsAt) return;
++      releaseEndsAt = endsAt;
++      rampAudioParam(port.gain, now, 0, cueFadeOutTimeConstantMs(fadeOutMs));
++      if (stopTimer) clearTimeout(stopTimer);
++      stopTimer = setTimeout(stop, Math.max(0, fadeOutMs));
++    },
++    resume(resumeFadeInMs) {
++      if (finished || releaseEndsAt === null) return;
++      releaseEndsAt = null;
++      if (stopTimer) clearTimeout(stopTimer);
++      stopTimer = null;
++      rampAudioParam(port.gain, port.now(), 1, cueFadeInTimeConstantMs(resumeFadeInMs));
++    },
++  };
++}
++
++/** A promise that settles once `open` is called. */
++function createLatch(): { promise: Promise<void>; open: () => void } {
++  const latch = { promise: Promise.resolve(), open: () => {} };
++  latch.promise = new Promise<void>((resolve) => {
++    latch.open = resolve;
++  });
++  return latch;
++}
+diff --git a/packages/app/src/audio/gain-ramp.test.ts b/packages/app/src/audio/gain-ramp.test.ts
+new file mode 100644
+index 000000000..8a1f57179
+--- /dev/null
++++ b/packages/app/src/audio/gain-ramp.test.ts
+@@ -0,0 +1,42 @@
++import { expect, test } from "vitest";
++import { rampAudioParam, type RampableParam } from "./gain-ramp";
++
++function recordingParam() {
++  const events: Array<[string, ...number[]]> = [];
++  const param: RampableParam = {
++    cancelScheduledValues: (t) => events.push(["cancel", t]),
++    setValueAtTime: (v, t) => events.push(["set", v, t]),
++    setTargetAtTime: (v, t, tau) => events.push(["target", v, t, tau]),
++  };
++  return { param, events };
++}
++
++test("approaches the target from the current value with the time constant in seconds", () => {
++  const { param, events } = recordingParam();
++  rampAudioParam(param, 2.5, 0.1, 67);
++  expect(events).toEqual([
++    ["cancel", 2.5],
++    ["target", 0.1, 2.5, 0.067],
++  ]);
++});
++
++test("a reversal mid-fade cancels only future events and starts a new approach now", () => {
++  const { param, events } = recordingParam();
++  rampAudioParam(param, 1, 0.1, 67);
++  rampAudioParam(param, 1.12, 1, 200);
++  expect(events).toEqual([
++    ["cancel", 1],
++    ["target", 0.1, 1, 0.067],
++    ["cancel", 1.12],
++    ["target", 1, 1.12, 0.2],
++  ]);
++});
++
++test("a zero time constant sets the value at once", () => {
++  const { param, events } = recordingParam();
++  rampAudioParam(param, 3, 1, 0);
++  expect(events).toEqual([
++    ["cancel", 3],
++    ["set", 1, 3],
++  ]);
++});
+diff --git a/packages/app/src/audio/gain-ramp.ts b/packages/app/src/audio/gain-ramp.ts
+new file mode 100644
+index 000000000..8c68e1d4f
+--- /dev/null
++++ b/packages/app/src/audio/gain-ramp.ts
+@@ -0,0 +1,27 @@
++/** The part of an `AudioParam` a gain ramp needs. */
++export interface RampableParam {
++  cancelScheduledValues(startTime: number): unknown;
++  setValueAtTime(value: number, startTime: number): unknown;
++  setTargetAtTime(target: number, startTime: number, timeConstant: number): unknown;
++}
++
++/**
++ * Move `param` toward `target` from its value at `now`, as a one-pole approach with this time
++ * constant: three time constants get within 5%. Cancelling drops only events after `now`, and
++ * `setTargetAtTime` starts from the value the running curve has at `now`, so reversing mid-fade
++ * is continuous. A time constant of 0 sets the value at once. `cancelAndHoldAtTime` is not
++ * needed, which matters because Firefox lacks it.
++ */
++export function rampAudioParam(
++  param: RampableParam,
++  now: number,
++  target: number,
++  timeConstantMs: number,
++): void {
++  param.cancelScheduledValues(now);
++  if (timeConstantMs <= 0) {
++    param.setValueAtTime(target, now);
++    return;
++  }
++  param.setTargetAtTime(target, now, timeConstantMs / 1000);
++}
+diff --git a/packages/app/src/audio/pcm/index.ts b/packages/app/src/audio/pcm/index.ts
+index ebd688434..92926558b 100644
+--- a/packages/app/src/audio/pcm/index.ts
++++ b/packages/app/src/audio/pcm/index.ts
+@@ -93,14 +93,19 @@ interface PcmOutput {
+   stopPlayback(): void;
+ }
+ 
+-/** Ramp the first `fadeInMs` of 16 kHz PCM16 up from silence, returning a new buffer. */
++/**
++ * Ramp the first `fadeInMs` of 16 kHz PCM16 up from silence on an equal-power (quarter-sine)
++ * curve, returning a new buffer. The curve leaves silence gently and meets full level with no
++ * kink, so a long fade does not sound like a linear swell.
++ */
+ export function fadeInPcm16(pcm: Uint8Array, fadeInMs: number): Uint8Array {
+   const out = Uint8Array.from(pcm);
+   const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+   const sampleCount = Math.floor(out.length / 2);
+   const fadeSamples = Math.min(sampleCount, Math.round((fadeInMs / 1000) * 16000));
+   for (let i = 0; i < fadeSamples; i++) {
+-    view.setInt16(i * 2, Math.round(view.getInt16(i * 2, true) * (i / fadeSamples)), true);
++    const gain = Math.sin(((i / fadeSamples) * Math.PI) / 2);
++    view.setInt16(i * 2, Math.round(view.getInt16(i * 2, true) * gain), true);
+   }
+   return out;
+ }
+diff --git a/packages/app/src/audio/play-audio.test.ts b/packages/app/src/audio/play-audio.test.ts
+index bc456a36e..27000ae04 100644
+--- a/packages/app/src/audio/play-audio.test.ts
++++ b/packages/app/src/audio/play-audio.test.ts
+@@ -84,7 +84,7 @@ test("voice PCM retains its native output and 16 kHz samples", async () => {
+   expect(duration).toBe(3 / 16000);
+ });
+ 
+-test("voice PCM fade-in ramps only the opening samples up from silence", async () => {
++test("voice PCM fade-in ramps only the opening samples up from silence, equal-power", async () => {
+   // 1 ms at 16 kHz is 16 samples; the 17th onward stays at full level.
+   const samples = new Int16Array(20).fill(1000);
+   const pcm = new Uint8Array(samples.buffer);
+@@ -104,7 +104,8 @@ test("voice PCM fade-in ramps only the opening samples up from silence", async (
+   );
+   const out = new Int16Array(written.buffer, written.byteOffset, written.byteLength / 2);
+   expect(out[0]).toBe(0);
+-  expect(out[8]).toBe(500);
++  // Equal-power: halfway through the fade is sin(pi/4), not half.
++  expect(out[8]).toBe(707);
+   expect(Array.from(out.slice(16))).toEqual([1000, 1000, 1000, 1000]);
+   expect(Array.from(samples)).toEqual(Array.from({ length: 20 }, () => 1000));
+ });
+@@ -112,7 +113,7 @@ test("voice PCM fade-in ramps only the opening samples up from silence", async (
+ test("voice PCM fade-in longer than the clip fades the whole clip", () => {
+   const pcm = new Uint8Array(new Int16Array([1000, 1000]).buffer);
+   const out = fadeInPcm16(pcm, 1000);
+-  expect(Array.from(new Int16Array(out.buffer))).toEqual([0, 500]);
++  expect(Array.from(new Int16Array(out.buffer))).toEqual([0, 707]);
+ });
+ 
+ test("voice PCM cancellation stops native output and rejects", async () => {
+diff --git a/packages/app/src/audio/playback.test.ts b/packages/app/src/audio/playback.test.ts
+index 2627d899c..f51d9783e 100644
+--- a/packages/app/src/audio/playback.test.ts
++++ b/packages/app/src/audio/playback.test.ts
+@@ -97,6 +97,7 @@ test("ending the voice waiting cue leaves a plugin's active audio playing", asyn
+     stop: output.stop,
+     clearQueue: output.clearQueue,
+     isPlaying: output.isPlaying,
++    setOutputGain: () => {},
+   };
+   const runtime = createVoiceRuntime({
+     engine,
+diff --git a/packages/app/src/composer/actions.test.ts b/packages/app/src/composer/actions.test.ts
+index 697f848a0..f7bf44be8 100644
+--- a/packages/app/src/composer/actions.test.ts
++++ b/packages/app/src/composer/actions.test.ts
+@@ -22,12 +22,14 @@ import {
+   cancelComposerAgent,
+   dispatchComposerAgentMessage,
+   editQueuedComposerMessage,
++  enqueueSpokenInput,
+   findForgeItemByOption,
+   isAttachmentSelectedForForgeItem,
+   openComposerAttachment,
+   pickAndPersistImages,
+   queueComposerMessage,
+   removeComposerAttachmentAtIndex,
++  removeQueuedComposerMessage,
+   sendQueuedComposerMessageNow,
+   toggleForgeAttachment,
+   toggleForgeAttachmentFromPicker,
+@@ -183,6 +185,7 @@ interface FakeSendCall {
+     activeTurnBehavior?: "interrupt" | "steer";
+     images: Array<{ data: string; mimeType: string }>;
+     attachments: AgentAttachment[];
++    spokenInput?: boolean;
+   };
+ }
+ 
+@@ -436,6 +439,28 @@ describe("dispatchComposerAgentMessage", () => {
+     expect(client.calls[0]?.options.activeTurnBehavior).toBe("steer");
+   });
+ 
++  it("forwards spoken input only when the message came from voice", async () => {
++    const client = createFakeSendClient();
++    await dispatchComposerAgentMessage({
++      client,
++      agentId: "agent",
++      text: "said aloud",
++      attachments: [],
++      encodeImages: async () => [],
++      submission: createFakeStream(),
++      spokenInput: true,
++    });
++    await dispatchComposerAgentMessage({
++      client,
++      agentId: "agent",
++      text: "typed",
++      attachments: [],
++      encodeImages: async () => [],
++      submission: createFakeStream(),
++    });
++    expect(client.calls.map((call) => call.options.spokenInput)).toEqual([true, undefined]);
++  });
++
+   it("stamps only a steer optimistic row with the daemon active turn ID", async () => {
+     const client = createFakeSendClient();
+     const stream = createFakeStream();
+@@ -825,6 +850,26 @@ describe("sendQueuedComposerMessageNow", () => {
+     expect(submitted).toEqual([{ text: "send me", attachments: [review] }]);
+   });
+ 
++  it("marks a spoken item as spoken input when it is submitted", async () => {
++    const queue = createFakeQueue(
++      new Map([["agent", [{ id: "msg-1", text: "said", attachments: [], source: "voice" }]]]),
++    );
++    const submitted: Array<{
++      text: string;
++      attachments: ComposerAttachment[];
++      spokenInput?: boolean;
++    }> = [];
++    await sendQueuedComposerMessageNow({
++      agentId: "agent",
++      messageId: "msg-1",
++      queue,
++      submitMessage: async (input) => {
++        submitted.push(input);
++      },
++    });
++    expect(submitted).toEqual([{ text: "said", attachments: [], spokenInput: true }]);
++  });
++
+   it("restores the queued entry to the front and surfaces the error message on failure", async () => {
+     const queue = createFakeQueue(
+       new Map([
+@@ -851,6 +896,87 @@ describe("sendQueuedComposerMessageNow", () => {
+   });
+ });
+ 
++describe("enqueueSpokenInput", () => {
++  it("pushes a spoken item when the queue is empty", () => {
++    const queue = createFakeQueue();
++    const result = enqueueSpokenInput({ agentId: "agent", text: "  check the logs ", queue });
++    expect(queue.state.get("agent")).toEqual([
++      { id: result.id, text: "check the logs", attachments: [], source: "voice" },
++    ]);
++  });
++
++  it("merges consecutive spoken items into the tail item", () => {
++    const queue = createFakeQueue(
++      new Map([
++        [
++          "agent",
++          [
++            { id: "typed", text: "typed first", attachments: [] },
++            { id: "spoken", text: "check the logs", attachments: [], source: "voice" },
++          ],
++        ],
++      ]),
++    );
++    const result = enqueueSpokenInput({ agentId: "agent", text: "and the config", queue });
++    expect(result.id).toBe("spoken");
++    expect(queue.state.get("agent")).toEqual([
++      { id: "typed", text: "typed first", attachments: [] },
++      { id: "spoken", text: "check the logs and the config", attachments: [], source: "voice" },
++    ]);
++  });
++
++  it("does not merge into a typed tail item", () => {
++    const queue = createFakeQueue(
++      new Map([["agent", [{ id: "typed", text: "typed first", attachments: [] }]]]),
++    );
++    const result = enqueueSpokenInput({ agentId: "agent", text: "spoken next", queue });
++    expect(queue.state.get("agent")).toEqual([
++      { id: "typed", text: "typed first", attachments: [] },
++      { id: result.id, text: "spoken next", attachments: [], source: "voice" },
++    ]);
++    expect(result.id).not.toBe("typed");
++  });
++
++  it("does not touch another agent's queue", () => {
++    const queue = createFakeQueue(
++      new Map([["other", [{ id: "spoken", text: "theirs", attachments: [], source: "voice" }]]]),
++    );
++    const result = enqueueSpokenInput({ agentId: "agent", text: "mine", queue });
++    expect(queue.state.get("other")).toEqual([
++      { id: "spoken", text: "theirs", attachments: [], source: "voice" },
++    ]);
++    expect(queue.state.get("agent")).toEqual([
++      { id: result.id, text: "mine", attachments: [], source: "voice" },
++    ]);
++  });
++});
++
++describe("removeQueuedComposerMessage", () => {
++  it("removes only the matching item", () => {
++    const queue = createFakeQueue(
++      new Map([
++        [
++          "agent",
++          [
++            { id: "msg-1", text: "first", attachments: [] },
++            { id: "msg-2", text: "second", attachments: [], source: "voice" },
++          ],
++        ],
++      ]),
++    );
++    expect(removeQueuedComposerMessage({ agentId: "agent", messageId: "msg-2", queue })).toBe(true);
++    expect(queue.state.get("agent")).toEqual([{ id: "msg-1", text: "first", attachments: [] }]);
++  });
++
++  it("returns false when the item is gone", () => {
++    const queue = createFakeQueue();
++    expect(removeQueuedComposerMessage({ agentId: "agent", messageId: "missing", queue })).toBe(
++      false,
++    );
++    expect(queue.state.get("agent")).toBeUndefined();
++  });
++});
++
+ describe("removeComposerAttachmentAtIndex", () => {
+   it("removes an image attachment and asks the persister to delete the underlying metadata", () => {
+     const image = imageWithId("img-remove");
+diff --git a/packages/app/src/composer/actions.ts b/packages/app/src/composer/actions.ts
+index f810ef19c..d45306927 100644
+--- a/packages/app/src/composer/actions.ts
++++ b/packages/app/src/composer/actions.ts
+@@ -24,6 +24,8 @@ export interface QueuedComposerMessage {
+   id: string;
+   text: string;
+   attachments: ComposerAttachment[];
++  /** Fork 0009: the item came from voice transcription. */
++  source?: "voice";
+ }
+ 
+ export interface AttachmentPersister {
+@@ -54,6 +56,7 @@ export interface ComposerSendClient {
+       activeTurnBehavior?: ActiveTurnBehavior;
+       images: Array<{ data: string; mimeType: string }>;
+       attachments: ReturnType<typeof splitComposerAttachmentsForSubmit>["attachments"];
++      spokenInput?: boolean;
+     },
+   ) => Promise<unknown>;
+   uploadFile: (input: { fileName: string; mimeType: string; bytes: Uint8Array }) => Promise<{
+@@ -197,6 +200,8 @@ export interface DispatchComposerAgentMessageInput {
+   submission: MessageSubmissionWriter;
+   activeTurnBehavior?: ActiveTurnBehavior;
+   activeTurnId?: string;
++  /** Fork 0009: the text came from voice; the daemon wraps it while voice mode is on. */
++  spokenInput?: boolean;
+ }
+ 
+ export async function dispatchComposerAgentMessage(
+@@ -224,6 +229,7 @@ export async function dispatchComposerAgentMessage(
+       ...(input.activeTurnBehavior ? { activeTurnBehavior: input.activeTurnBehavior } : {}),
+       images: imagesData ?? [],
+       attachments: wirePayload.attachments,
++      ...(input.spokenInput ? { spokenInput: true } : {}),
+     });
+     input.submission.accept(input.agentId, clientMessageId);
+   } catch (error) {
+@@ -261,6 +267,57 @@ export function queueComposerMessage(input: QueueComposerMessageInput): QueueCom
+   return { queued: item };
+ }
+ 
++export interface EnqueueSpokenInputInput {
++  agentId: string;
++  text: string;
++  queue: QueueWriter;
++}
++
++/**
++ * Fork 0009: add a transcript the daemon held back while the agent worked. One spoken thought
++ * often arrives as several transcripts (the VAD ends a segment after a second of silence), so a
++ * transcript joins the tail item when that item is also spoken. Returns the item it landed in.
++ */
++export function enqueueSpokenInput(input: EnqueueSpokenInputInput): QueuedComposerMessage {
++  const text = input.text.trim();
++  const current = input.queue.read(input.agentId);
++  const tail = current.at(-1);
++  const item: QueuedComposerMessage =
++    tail?.source === "voice"
++      ? { ...tail, text: `${tail.text} ${text}` }
++      : { id: generateMessageId(), text, attachments: [], source: "voice" };
++  input.queue.write((prev) => {
++    const next = new Map(prev);
++    const items = prev.get(input.agentId) ?? [];
++    next.set(
++      input.agentId,
++      tail?.source === "voice" ? [...items.slice(0, -1), item] : [...items, item],
++    );
++    return next;
++  });
++  return item;
++}
++
++export interface RemoveQueuedComposerMessageInput {
++  agentId: string;
++  messageId: string;
++  queue: QueueWriter;
++}
++
++/** Drop a queued item. Image attachments are left to draft-store garbage collection. */
++export function removeQueuedComposerMessage(input: RemoveQueuedComposerMessageInput): boolean {
++  if (!input.queue.read(input.agentId).some((q) => q.id === input.messageId)) return false;
++  input.queue.write((prev) => {
++    const next = new Map(prev);
++    next.set(
++      input.agentId,
++      (prev.get(input.agentId) ?? []).filter((q) => q.id !== input.messageId),
++    );
++    return next;
++  });
++  return true;
++}
++
+ export interface EditQueuedComposerMessageInput {
+   agentId: string;
+   messageId: string;
+@@ -295,7 +352,11 @@ export interface SendQueuedComposerMessageNowInput {
+   agentId: string;
+   messageId: string;
+   queue: QueueWriter;
+-  submitMessage: (input: { text: string; attachments: ComposerAttachment[] }) => Promise<void>;
++  submitMessage: (input: {
++    text: string;
++    attachments: ComposerAttachment[];
++    spokenInput?: boolean;
++  }) => Promise<void>;
+   failedToSendMessage?: string;
+ }
+ 
+@@ -318,7 +379,11 @@ export async function sendQueuedComposerMessageNow(
+     return next;
+   });
+   try {
+-    await input.submitMessage({ text: item.text, attachments: item.attachments });
++    await input.submitMessage({
++      text: item.text,
++      attachments: item.attachments,
++      ...(item.source === "voice" ? { spokenInput: true } : {}),
++    });
+     return { status: "submitted" };
+   } catch (error) {
+     input.queue.write((prev) => {
+diff --git a/packages/app/src/composer/index.tsx b/packages/app/src/composer/index.tsx
+index 74d49bce6..ba42d1c5d 100644
+--- a/packages/app/src/composer/index.tsx
++++ b/packages/app/src/composer/index.tsx
+@@ -10,7 +10,6 @@ import { getHostRuntimeStore } from "@/runtime/host-runtime";
+ import { LoadingSpinner } from "@/components/ui/loading-spinner";
+ import {
+   View,
+-  Pressable,
+   Text,
+   StyleSheet as RNStyleSheet,
+   type PressableStateCallbackType,
+@@ -45,6 +44,7 @@ import {
+   Image as ImageIcon,
+   ClipboardPaste,
+   Paperclip,
++  X,
+ } from "lucide-react-native";
+ import * as Clipboard from "expo-clipboard";
+ import { FOOTER_HEIGHT } from "@/constants/layout";
+@@ -54,6 +54,7 @@ import {
+   type DraftAgentControlsProps,
+ } from "@/composer/agent-controls";
+ import { ContextWindowMeter } from "@/components/context-window-meter";
++import { ToolbarButton } from "@/components/ui/pane-content-toolbar";
+ import { useImageAttachmentPicker } from "@/hooks/use-image-attachment-picker";
+ import { selectAgentTurnPresentation, useSessionStore } from "@/stores/session-store";
+ import { useFilePicker } from "@/hooks/use-file-picker";
+@@ -74,6 +75,7 @@ import {
+   cancelComposerAgent,
+   dispatchComposerAgentMessage,
+   editQueuedComposerMessage,
++  removeQueuedComposerMessage,
+   findForgeItemByOption,
+   isAttachmentSelectedForForgeItem,
+   openComposerAttachment,
+@@ -367,17 +369,29 @@ function renderAttachmentTray(args: RenderAttachmentTrayArgs): ReactElement | nu
+   );
+ }
+ 
++interface QueuedMessageRowLabels {
++  edit: string;
++  remove: string;
++  interruptAndSend: string;
++  spoken: string;
++}
++
+ interface RenderQueueTrackArgs {
+   queuedMessages: readonly QueuedMessage[];
+   handleEditQueuedMessage: (id: string) => void;
++  handleRemoveQueuedMessage: (id: string) => void;
+   handleSendQueuedNow: (id: string) => Promise<void>;
+-  editLabel: string;
+-  sendNowLabel: string;
++  labels: QueuedMessageRowLabels;
+ }
+ 
+ function renderQueueTrack(args: RenderQueueTrackArgs): ReactElement | null {
+-  const { queuedMessages, handleEditQueuedMessage, handleSendQueuedNow, editLabel, sendNowLabel } =
+-    args;
++  const {
++    queuedMessages,
++    handleEditQueuedMessage,
++    handleRemoveQueuedMessage,
++    handleSendQueuedNow,
++    labels,
++  } = args;
+   if (queuedMessages.length === 0) return null;
+   return (
+     <View style={styles.queueTrack}>
+@@ -386,9 +400,9 @@ function renderQueueTrack(args: RenderQueueTrackArgs): ReactElement | null {
+           key={item.id}
+           item={item}
+           onEdit={handleEditQueuedMessage}
++          onRemove={handleRemoveQueuedMessage}
+           onSendNow={handleSendQueuedNow}
+-          editLabel={editLabel}
+-          sendNowLabel={sendNowLabel}
++          labels={labels}
+         />
+       ))}
+     </View>
+@@ -663,46 +677,41 @@ function resolveMessageInputPassthroughAction(
+ interface QueuedMessageRowProps {
+   item: QueuedMessage;
+   onEdit: (id: string) => void;
++  onRemove: (id: string) => void;
+   onSendNow: (id: string) => void;
+-  editLabel: string;
+-  sendNowLabel: string;
++  labels: QueuedMessageRowLabels;
+ }
+ 
+-function QueuedMessageRow({
+-  item,
+-  onEdit,
+-  onSendNow,
+-  editLabel,
+-  sendNowLabel,
+-}: QueuedMessageRowProps) {
++function QueuedMessageRow({ item, onEdit, onRemove, onSendNow, labels }: QueuedMessageRowProps) {
+   const handleEdit = useCallback(() => {
+     onEdit(item.id);
+   }, [onEdit, item.id]);
++  const handleRemove = useCallback(() => {
++    onRemove(item.id);
++  }, [onRemove, item.id]);
+   const handleSendNow = useCallback(() => {
+     onSendNow(item.id);
+   }, [onSendNow, item.id]);
+   return (
+     <View style={styles.queueItem}>
++      {item.source === "voice" ? (
++        <View accessible accessibilityLabel={labels.spoken} testID="queued-message-spoken">
++          <ThemedAudioLines size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
++        </View>
++      ) : null}
+       <Text style={styles.queueText} numberOfLines={2} ellipsizeMode="tail">
+         {item.text}
+       </Text>
+       <View style={styles.queueActions}>
+-        <Pressable
+-          onPress={handleEdit}
+-          style={styles.queueActionButton}
+-          accessibilityLabel={editLabel}
+-          accessibilityRole="button"
+-        >
+-          <ThemedPencil size={ICON_SIZE.sm} uniProps={iconForegroundMapping} />
+-        </Pressable>
+-        <Pressable
+-          onPress={handleSendNow}
+-          style={[styles.queueActionButton, styles.queueSendButton]}
+-          accessibilityLabel={sendNowLabel}
+-          accessibilityRole="button"
+-        >
+-          <ThemedArrowUp size={ICON_SIZE.sm} uniProps={iconAccentForegroundMapping} />
+-        </Pressable>
++        <ToolbarButton label={labels.edit} tooltipSide="top" onPress={handleEdit}>
++          <ThemedPencil size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
++        </ToolbarButton>
++        <ToolbarButton label={labels.remove} tooltipSide="top" onPress={handleRemove}>
++          <ThemedX size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
++        </ToolbarButton>
++        <ToolbarButton label={labels.interruptAndSend} tooltipSide="top" onPress={handleSendNow}>
++          <ThemedArrowUp size={ICON_SIZE.sm} uniProps={iconForegroundMutedMapping} />
++        </ToolbarButton>
+       </View>
+     </View>
+   );
+@@ -1473,6 +1482,7 @@ function ComposerContentImpl({
+         text: string,
+         attachments: ComposerAttachment[],
+         activeTurnBehavior: "interrupt" | "steer",
++        options?: { spokenInput?: boolean },
+       ) => Promise<void>)
+     | null
+   >(null);
+@@ -1545,6 +1555,23 @@ function ComposerContentImpl({
+     [appSettings.sendBehavior, cwd, onMessageSent, t],
+   );
+ 
++  const interruptAndSendMessage = useCallback(
++    async (text: string, submitAttachments: ComposerAttachment[], spokenInput?: boolean) => {
++      onMessageSent?.();
++      if (onSubmitMessageRef.current) {
++        await onSubmitMessageRef.current({ text, attachments: submitAttachments, cwd });
++        return;
++      }
++      if (!sendAgentMessageRef.current) {
++        throw new Error(t("workspace.terminal.hostDisconnected"));
++      }
++      await sendAgentMessageRef.current(agentIdRef.current, text, submitAttachments, "interrupt", {
++        spokenInput,
++      });
++    },
++    [cwd, onMessageSent, t],
++  );
++
+   useEffect(() => {
+     agentIdRef.current = agentId;
+   }, [agentId]);
+@@ -1555,11 +1582,13 @@ function ComposerContentImpl({
+       text: string,
+       sendAttachments: ComposerAttachment[],
+       activeTurnBehavior: "interrupt" | "steer",
++      sendOptions?: { spokenInput?: boolean },
+     ) => {
+       if (!client) {
+         throw new Error(t("workspace.terminal.hostDisconnected"));
+       }
+       await dispatchComposerAgentMessage({
++        spokenInput: sendOptions?.spokenInput,
+         client,
+         agentId: targetAgentId,
+         text,
+@@ -1936,23 +1965,30 @@ function ComposerContentImpl({
+     [agentId, queueWriter, replaceUserInput, setSelectedAttachments],
+   );
+ 
++  const handleRemoveQueuedMessage = useCallback(
++    (id: string) => {
++      removeQueuedComposerMessage({ agentId, messageId: id, queue: queueWriter });
++    },
++    [agentId, queueWriter],
++  );
++
+   const handleSendQueuedNow = useCallback(
+     async (id: string) => {
+       if (!sendAgentMessageRef.current && !onSubmitMessageRef.current) return;
+-      // Reuse the regular send path; server-side send atomically interrupts any active run.
++      // "Interrupt and send" interrupts the running turn whatever the Default send setting says.
+       const result = await sendQueuedComposerMessageNow({
+         agentId,
+         messageId: id,
+         queue: queueWriter,
+-        submitMessage: ({ text, attachments: queuedAttachments }) =>
+-          submitMessage(text, queuedAttachments),
++        submitMessage: ({ text, attachments: queuedAttachments, spokenInput }) =>
++          interruptAndSendMessage(text, queuedAttachments, spokenInput),
+         failedToSendMessage: t("composer.errors.failedToSend"),
+       });
+       if (result.status === "failed") {
+         setSendError(result.errorMessage);
+       }
+     },
+-    [agentId, queueWriter, submitMessage, t],
++    [agentId, interruptAndSendMessage, queueWriter, t],
+   );
+ 
+   const handleQueue = useCallback(
+@@ -2336,11 +2372,16 @@ function ComposerContentImpl({
+       renderQueueTrack({
+         queuedMessages,
+         handleEditQueuedMessage,
++        handleRemoveQueuedMessage,
+         handleSendQueuedNow,
+-        editLabel: t("composer.attachments.editQueuedMessage"),
+-        sendNowLabel: t("composer.attachments.sendQueuedMessageNow"),
++        labels: {
++          edit: t("composer.attachments.editQueuedMessage"),
++          remove: t("composer.attachments.removeQueuedMessage"),
++          interruptAndSend: t("composer.attachments.interruptAndSendQueuedMessage"),
++          spoken: t("composer.attachments.spokenQueuedMessage"),
++        },
+       }),
+-    [handleEditQueuedMessage, handleSendQueuedNow, queuedMessages, t],
++    [handleEditQueuedMessage, handleRemoveQueuedMessage, handleSendQueuedNow, queuedMessages, t],
+   );
+ 
+   const autocompleteConfiguration = useMemo(
+@@ -2657,18 +2698,7 @@ const styles = StyleSheet.create((theme: Theme) => ({
+   queueActions: {
+     flexDirection: "row",
+     alignItems: "center",
+-    gap: theme.spacing[2],
+-  },
+-  queueActionButton: {
+-    width: 32,
+-    height: 32,
+-    borderRadius: theme.borderRadius.full,
+-    alignItems: "center",
+-    justifyContent: "center",
+-    backgroundColor: theme.colors.surface2,
+-  },
+-  queueSendButton: {
+-    backgroundColor: theme.colors.accent,
++    gap: theme.spacing[1],
+   },
+   sendErrorText: {
+     color: theme.colors.palette.red[500],
+@@ -2679,6 +2709,7 @@ const styles = StyleSheet.create((theme: Theme) => ({
+ const ThemedAttachmentSpinner = withUnistyles(LoadingSpinner);
+ const ThemedPencil = withUnistyles(Pencil);
+ const ThemedArrowUp = withUnistyles(ArrowUp);
++const ThemedX = withUnistyles(X);
+ const ThemedGitPullRequest = withUnistyles(GitPullRequest);
+ const ThemedCircleDot = withUnistyles(CircleDot);
+ const ThemedAudioLines = withUnistyles(AudioLines);
+@@ -2688,7 +2719,6 @@ const ThemedClipboardPaste = withUnistyles(ClipboardPaste);
+ const ThemedFileText = withUnistyles(FileText);
+ const iconForegroundMapping = (theme: Theme) => ({ color: theme.colors.foreground });
+ const iconForegroundMutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+-const iconAccentForegroundMapping = (theme: Theme) => ({ color: theme.colors.accentForeground });
+ 
+ function renderForgeAttachmentIcon(icon: string): ReactElement {
+   return (
+diff --git a/packages/app/src/contexts/session-context.tsx b/packages/app/src/contexts/session-context.tsx
+index ce669d21c..a6a6adcc5 100644
+--- a/packages/app/src/contexts/session-context.tsx
++++ b/packages/app/src/contexts/session-context.tsx
+@@ -313,11 +313,11 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
+   useEffect(() => {
+     const unregister = voiceRuntime?.registerSession({
+       serverId,
+-      setVoiceMode: async (enabled, agentId) => {
++      setVoiceMode: async (enabled, agentId, sendBehavior) => {
+         if (!client) {
+           throw new Error(t("common.errors.daemonUnavailable"));
+         }
+-        await client.setVoiceMode(enabled, agentId);
++        await client.setVoiceMode(enabled, agentId, sendBehavior);
+       },
+       sendVoiceAudioChunk: async (audioData, mimeType) => {
+         if (!client) {
+@@ -668,6 +668,16 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
+       voiceRuntime?.onServerSpeechStateChanged(serverId, message.payload.isSpeaking);
+     });
+ 
++    // Fork 0009: speech held back while the agent works lands in the queue track.
++    const unsubSpokenInputQueued = client.on("voice.spoken_input.queued", (message) => {
++      if (message.type !== "voice.spoken_input.queued") return;
++      getHostRuntimeStore().enqueueSpokenInput(
++        serverId,
++        message.payload.agentId,
++        message.payload.text,
++      );
++    });
++
+     const unsubTerminalAttention = onFeed("terminal_attention_required", (message) => {
+       if (message.type !== "terminal_attention_required") {
+         return;
+@@ -704,6 +714,7 @@ function SessionProviderInternal({ children, serverId, client }: SessionProvider
+       unsubSpeechReplay();
+       unsubTranscription();
+       unsubVoiceInputState();
++      unsubSpokenInputQueued();
+       unsubTerminalAttention();
+     };
+   }, [
+diff --git a/packages/app/src/contexts/voice-context.tsx b/packages/app/src/contexts/voice-context.tsx
+index b3fc1b582..929c6a17d 100644
+--- a/packages/app/src/contexts/voice-context.tsx
++++ b/packages/app/src/contexts/voice-context.tsx
+@@ -9,6 +9,7 @@ import {
+ } from "react";
+ import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+ import { useSessionStore } from "@/stores/session-store";
++import { useAppSettings } from "@/hooks/use-settings";
+ import { createAudioEngine } from "@/audio";
+ import type { AudioEngine } from "@/audio";
+ import {
+@@ -172,6 +173,13 @@ export function VoiceProvider({ children }: VoiceProviderProps) {
+     };
+   }, [runtime]);
+ 
++  // Fork 0009: voice follows the "Default send" setting.
++  const { settings } = useAppSettings();
++  const sendBehavior = settings.sendBehavior;
++  useEffect(() => {
++    runtime.setSendBehavior(sendBehavior);
++  }, [runtime, sendBehavior]);
++
+   return (
+     <VoiceAudioEngineContext.Provider value={engine}>
+       <VoiceRuntimeContext.Provider value={runtime}>{children}</VoiceRuntimeContext.Provider>
+diff --git a/packages/app/src/design/designs/voice-strip.tsx b/packages/app/src/design/designs/voice-strip.tsx
+index 69f76fd23..adc69a1a3 100644
+--- a/packages/app/src/design/designs/voice-strip.tsx
++++ b/packages/app/src/design/designs/voice-strip.tsx
+@@ -78,6 +78,7 @@ function createStagedVoiceRuntime(initial: VoiceRuntimeSnapshot): StagedVoiceRun
+     onTranscriptionResult: noop,
+     onServerSpeechStateChanged: noop,
+     onTurnEvent: noop,
++    setSendBehavior: noop,
+   };
+ }
+ 
+diff --git a/packages/app/src/i18n/resources/ar.ts b/packages/app/src/i18n/resources/ar.ts
+index 8ded30934..b39bfac07 100644
+--- a/packages/app/src/i18n/resources/ar.ts
++++ b/packages/app/src/i18n/resources/ar.ts
+@@ -162,7 +162,9 @@ export const ar: TranslationResources = {
+       dropImagesHere: "إسقاط الصور هنا",
+       dropFilesHere: "Drop files here",
+       editQueuedMessage: "تحرير الرسالة في قائمة الانتظار",
+-      sendQueuedMessageNow: "إرسال رسالة في قائمة الانتظار الآن",
++      removeQueuedMessage: "إزالة الرسالة من قائمة الانتظار",
++      interruptAndSendQueuedMessage: "المقاطعة والإرسال الآن",
++      spokenQueuedMessage: "رسالة صوتية",
+       openImage: "فتح مرفق الصورة",
+       removeImage: "إزالة مرفق الصورة",
+       removeFile: "Remove file attachment",
+diff --git a/packages/app/src/i18n/resources/en.ts b/packages/app/src/i18n/resources/en.ts
+index 89c364b7c..02a681b81 100644
+--- a/packages/app/src/i18n/resources/en.ts
++++ b/packages/app/src/i18n/resources/en.ts
+@@ -158,7 +158,9 @@ export const en = {
+       dropImagesHere: "Drop images here",
+       dropFilesHere: "Drop files here",
+       editQueuedMessage: "Edit queued message",
+-      sendQueuedMessageNow: "Send queued message now",
++      removeQueuedMessage: "Remove queued message",
++      interruptAndSendQueuedMessage: "Interrupt and send now",
++      spokenQueuedMessage: "Spoken message",
+       openImage: "Open image attachment",
+       removeImage: "Remove image attachment",
+       removeFile: "Remove file attachment",
+diff --git a/packages/app/src/i18n/resources/es.ts b/packages/app/src/i18n/resources/es.ts
+index 16efbf114..80c524bee 100644
+--- a/packages/app/src/i18n/resources/es.ts
++++ b/packages/app/src/i18n/resources/es.ts
+@@ -163,7 +163,9 @@ export const es: TranslationResources = {
+       dropImagesHere: "Suelta imágenes aquí",
+       dropFilesHere: "Drop files here",
+       editQueuedMessage: "Editar mensaje en cola",
+-      sendQueuedMessageNow: "Enviar mensaje en cola ahora",
++      removeQueuedMessage: "Quitar mensaje de la cola",
++      interruptAndSendQueuedMessage: "Interrumpir y enviar ahora",
++      spokenQueuedMessage: "Mensaje hablado",
+       openImage: "Abrir imagen adjunta",
+       removeImage: "Quitar imagen adjunta",
+       removeFile: "Remove file attachment",
+diff --git a/packages/app/src/i18n/resources/fr.ts b/packages/app/src/i18n/resources/fr.ts
+index 11f468fb9..ff0c1f05c 100644
+--- a/packages/app/src/i18n/resources/fr.ts
++++ b/packages/app/src/i18n/resources/fr.ts
+@@ -164,7 +164,9 @@ export const fr: TranslationResources = {
+       dropImagesHere: "Déposez des images ici",
+       dropFilesHere: "Déposez des fichiers ici",
+       editQueuedMessage: "Modifier le message en file d’attente",
+-      sendQueuedMessageNow: "Envoyer maintenant le message en file d’attente",
++      removeQueuedMessage: "Retirer le message de la file d’attente",
++      interruptAndSendQueuedMessage: "Interrompre et envoyer maintenant",
++      spokenQueuedMessage: "Message dicté",
+       openImage: "Ouvrir l’image jointe",
+       removeImage: "Retirer l’image jointe",
+       removeFile: "Retirer le fichier joint",
+diff --git a/packages/app/src/i18n/resources/ja.ts b/packages/app/src/i18n/resources/ja.ts
+index 9ea9788f0..64c54aa23 100644
+--- a/packages/app/src/i18n/resources/ja.ts
++++ b/packages/app/src/i18n/resources/ja.ts
+@@ -163,7 +163,9 @@ export const ja: TranslationResources = {
+       dropImagesHere: "ここに画像をドロップ",
+       dropFilesHere: "ここにファイルをドロップ",
+       editQueuedMessage: "キューに入れたメッセージを編集",
+-      sendQueuedMessageNow: "キューに入れたメッセージを今すぐ送信",
++      removeQueuedMessage: "キューのメッセージを削除",
++      interruptAndSendQueuedMessage: "中断して今すぐ送信",
++      spokenQueuedMessage: "音声メッセージ",
+       openImage: "画像添付ファイルを開く",
+       removeImage: "画像添付ファイルを削除",
+       removeFile: "ファイル添付ファイルを削除",
+diff --git a/packages/app/src/i18n/resources/ko.ts b/packages/app/src/i18n/resources/ko.ts
+index 19f1f819d..1bbbdc14f 100644
+--- a/packages/app/src/i18n/resources/ko.ts
++++ b/packages/app/src/i18n/resources/ko.ts
+@@ -162,7 +162,9 @@ export const ko: TranslationResources = {
+       dropImagesHere: "여기에 이미지를 끌어다 놓으세요",
+       dropFilesHere: "여기에 파일을 끌어다 놓으세요",
+       editQueuedMessage: "대기 중인 메시지 편집",
+-      sendQueuedMessageNow: "대기 중인 메시지 지금 보내기",
++      removeQueuedMessage: "대기 중인 메시지 삭제",
++      interruptAndSendQueuedMessage: "중단하고 지금 보내기",
++      spokenQueuedMessage: "음성 메시지",
+       openImage: "이미지 첨부 열기",
+       removeImage: "이미지 첨부 제거",
+       removeFile: "파일 첨부 제거",
+diff --git a/packages/app/src/i18n/resources/pt-BR.ts b/packages/app/src/i18n/resources/pt-BR.ts
+index 9351095b6..fc0e683d3 100644
+--- a/packages/app/src/i18n/resources/pt-BR.ts
++++ b/packages/app/src/i18n/resources/pt-BR.ts
+@@ -163,7 +163,9 @@ export const ptBR: TranslationResources = {
+       dropImagesHere: "Solte imagens aqui",
+       dropFilesHere: "Solte arquivos aqui",
+       editQueuedMessage: "Editar mensagem na fila",
+-      sendQueuedMessageNow: "Enviar mensagem da fila agora",
++      removeQueuedMessage: "Remover mensagem da fila",
++      interruptAndSendQueuedMessage: "Interromper e enviar agora",
++      spokenQueuedMessage: "Mensagem falada",
+       openImage: "Abrir anexo de imagem",
+       removeImage: "Remover anexo de imagem",
+       removeFile: "Remover anexo de arquivo",
+diff --git a/packages/app/src/i18n/resources/ru.ts b/packages/app/src/i18n/resources/ru.ts
+index 4954f6d66..32c4dbc4d 100644
+--- a/packages/app/src/i18n/resources/ru.ts
++++ b/packages/app/src/i18n/resources/ru.ts
+@@ -163,7 +163,9 @@ export const ru: TranslationResources = {
+       dropImagesHere: "Скиньте изображения сюда",
+       dropFilesHere: "Переместите файлы сюда",
+       editQueuedMessage: "Изменить сообщение из очереди",
+-      sendQueuedMessageNow: "Отправить сообщение из очереди сейчас",
++      removeQueuedMessage: "Убрать сообщение из очереди",
++      interruptAndSendQueuedMessage: "Прервать и отправить сейчас",
++      spokenQueuedMessage: "Голосовое сообщение",
+       openImage: "Открыть прикрепленное изображение",
+       removeImage: "Удалить прикрепленное изображение",
+       removeFile: "Удалить прикрепленный файл",
+diff --git a/packages/app/src/i18n/resources/zh-CN.ts b/packages/app/src/i18n/resources/zh-CN.ts
+index 22e48d696..2d7e99027 100644
+--- a/packages/app/src/i18n/resources/zh-CN.ts
++++ b/packages/app/src/i18n/resources/zh-CN.ts
+@@ -162,7 +162,9 @@ export const zhCN: TranslationResources = {
+       dropImagesHere: "将图片拖放到这里",
+       dropFilesHere: "Drop files here",
+       editQueuedMessage: "编辑排队消息",
+-      sendQueuedMessageNow: "立即发送排队消息",
++      removeQueuedMessage: "移除排队消息",
++      interruptAndSendQueuedMessage: "中断并立即发送",
++      spokenQueuedMessage: "语音消息",
+       openImage: "打开图片附件",
+       removeImage: "移除图片附件",
+       removeFile: "Remove file attachment",
+diff --git a/packages/app/src/runtime/host-runtime.test.ts b/packages/app/src/runtime/host-runtime.test.ts
+index 33e4f1a31..a65f9a45b 100644
+--- a/packages/app/src/runtime/host-runtime.test.ts
++++ b/packages/app/src/runtime/host-runtime.test.ts
+@@ -3326,6 +3326,81 @@ describe("HostRuntimeStore", () => {
+     sessionStore.clearSession(host.serverId);
+   });
+ 
++  it("sends a spoken item at once when the agent is idle by the time it arrives", async () => {
++    const host = makeHost({ serverId: "srv_spoken_idle" });
++    const fakeClient = new FakeDaemonClient();
++    const store = new HostRuntimeStore({
++      deps: {
++        createClient: () => fakeClient as unknown as DaemonClient,
++        connectToDaemon: async () => ({
++          client: fakeClient as unknown as DaemonClient,
++          serverId: host.serverId,
++          hostname: null,
++        }),
++        getClientId: async () => "cid_spoken_idle",
++      },
++    });
++    const sessionStore = useSessionStore.getState();
++    sessionStore.initializeSession(host.serverId, fakeClient as unknown as DaemonClient, 1);
++
++    store.enqueueSpokenInput(host.serverId, "agent", "run the tests");
++    await fakeClient.waitForSentMessages(1);
++
++    const [agentId, text, options] = fakeClient.sentAgentMessages[0] ?? [];
++    expect([agentId, text, options?.activeTurnBehavior, options?.spokenInput]).toEqual([
++      "agent",
++      "run the tests",
++      "steer",
++      true,
++    ]);
++    sessionStore.clearSession(host.serverId);
++  });
++
++  it("holds a spoken item in the queue while the agent's turn is running", async () => {
++    const host = makeHost({ serverId: "srv_spoken_running" });
++    const fakeClient = new FakeDaemonClient();
++    const store = new HostRuntimeStore({
++      deps: {
++        createClient: () => fakeClient as unknown as DaemonClient,
++        connectToDaemon: async () => ({
++          client: fakeClient as unknown as DaemonClient,
++          serverId: host.serverId,
++          hostname: null,
++        }),
++        getClientId: async () => "cid_spoken_running",
++      },
++    });
++    const sessionStore = useSessionStore.getState();
++    sessionStore.initializeSession(host.serverId, fakeClient as unknown as DaemonClient, 1);
++    const entry = makeFetchAgentsEntry({
++      id: "agent",
++      cwd: "/repo",
++      updatedAt: "2026-07-12T10:00:00.000Z",
++    });
++    sessionStore.setAgents(
++      host.serverId,
++      new Map([
++        [
++          "agent",
++          {
++            ...replicaAgent(entry.agent, host.serverId),
++            turn: { phase: "open", turnId: null, startedAt: null, cancellationRequestId: null },
++          },
++        ],
++      ]),
++    );
++
++    store.enqueueSpokenInput(host.serverId, "agent", "check the logs");
++    store.enqueueSpokenInput(host.serverId, "agent", "and the config");
++
++    const queued = useSessionStore.getState().sessions[host.serverId]?.queuedMessages.get("agent");
++    expect(queued?.map(({ text, source }) => ({ text, source }))).toEqual([
++      { text: "check the logs and the config", source: "voice" },
++    ]);
++    expect(fakeClient.sentAgentMessages).toEqual([]);
++    sessionStore.clearSession(host.serverId);
++  });
++
+   it("uses legacy GitHub attachments when draining a queue for an old daemon", async () => {
+     const host = makeHost({ serverId: "srv_legacy_queue_attachment" });
+     const fakeClient = new FakeDaemonClient();
+diff --git a/packages/app/src/runtime/host-runtime.ts b/packages/app/src/runtime/host-runtime.ts
+index bb953220c..baaef615e 100644
+--- a/packages/app/src/runtime/host-runtime.ts
++++ b/packages/app/src/runtime/host-runtime.ts
+@@ -56,6 +56,7 @@ import { readDesktopManagedLocalCredential } from "@/desktop/daemon/local-creden
+ import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+ import { BROWSER_AUTOMATION_COMMAND_NAMES } from "@getpaseo/protocol/browser-automation/rpc-schemas";
+ import {
++  selectAgentTurnPresentation,
+   useSessionStore,
+   toDaemonServerInfo,
+   type Agent,
+@@ -72,7 +73,12 @@ import {
+ } from "@/data/push-router";
+ import { mountBrowserAutomationDaemonClientHandler } from "@/desktop/browser/automation/handler";
+ import { schedulesQueryBaseKey } from "@/schedules/aggregated-schedules";
+-import { dispatchComposerAgentMessage, sendQueuedComposerMessageNow } from "@/composer/actions";
++import {
++  dispatchComposerAgentMessage,
++  enqueueSpokenInput,
++  sendQueuedComposerMessageNow,
++  type QueueWriter,
++} from "@/composer/actions";
+ import { createMessageSubmissionWriter } from "@/composer/submission/writer";
+ import { resolveComposerAttachmentSubmitFormat } from "@/composer/attachments/submit";
+ import { encodeImages } from "@/utils/encode-images";
+@@ -2556,6 +2562,19 @@ export class HostRuntimeStore {
+     }
+   }
+ 
++  /**
++   * Fork 0009: the daemon held a transcript back because the agent was working. If the turn
++   * ended between that decision and this event, the stop-running drain has already passed,
++   * so drain here or the item would sit in the queue until the next turn ends.
++   */
++  enqueueSpokenInput(serverId: string, agentId: string, text: string): void {
++    enqueueSpokenInput({ agentId, text, queue: queueWriterFor(serverId) });
++    const session = useSessionStore.getState().sessions[serverId];
++    if (!selectAgentTurnPresentation(session, agentId).isActive) {
++      this.drainQueuedAgentMessage(serverId, agentId);
++    }
++  }
++
+   drainQueuedAgentMessage(serverId: string, agentId: string): void {
+     const drainKey = `${serverId}:${agentId}`;
+     if (this.queuedAgentDrainInFlight.has(drainKey)) return;
+@@ -2571,12 +2590,8 @@ export class HostRuntimeStore {
+     void sendQueuedComposerMessageNow({
+       agentId,
+       messageId: next.id,
+-      queue: {
+-        read: (queuedAgentId) =>
+-          useSessionStore.getState().sessions[serverId]?.queuedMessages.get(queuedAgentId) ?? [],
+-        write: (update) => useSessionStore.getState().setQueuedMessages(serverId, update),
+-      },
+-      submitMessage: async ({ text, attachments }) => {
++      queue: queueWriterFor(serverId),
++      submitMessage: async ({ text, attachments, spokenInput }) => {
+         const supportsForgeAttachments =
+           useSessionStore.getState().sessions[serverId]?.serverInfo?.features?.forgeSearch === true;
+         await dispatchComposerAgentMessage({
+@@ -2594,6 +2609,7 @@ export class HostRuntimeStore {
+           // into that turn instead of interrupting it; with no turn running, the daemon starts
+           // a normal one.
+           activeTurnBehavior: "steer",
++          spokenInput,
+         });
+       },
+     })
+@@ -3053,3 +3069,11 @@ export function useHostMutations(): HostMutations {
+     [store],
+   );
+ }
++
++function queueWriterFor(serverId: string): QueueWriter {
++  return {
++    read: (agentId) =>
++      useSessionStore.getState().sessions[serverId]?.queuedMessages.get(agentId) ?? [],
++    write: (update) => useSessionStore.getState().setQueuedMessages(serverId, update),
++  };
++}
+diff --git a/packages/app/src/stores/session-store.ts b/packages/app/src/stores/session-store.ts
+index aed06eef1..bf645ca1d 100644
+--- a/packages/app/src/stores/session-store.ts
++++ b/packages/app/src/stores/session-store.ts
+@@ -426,7 +426,7 @@ export interface SessionState {
+   // Queued messages
+   queuedMessages: Map<
+     string,
+-    Array<{ id: string; text: string; attachments: ComposerAttachment[] }>
++    Array<{ id: string; text: string; attachments: ComposerAttachment[]; source?: "voice" }>
+   >;
+ }
+ 
+diff --git a/packages/app/src/voice/ducker.test.ts b/packages/app/src/voice/ducker.test.ts
+new file mode 100644
+index 000000000..182446b85
+--- /dev/null
++++ b/packages/app/src/voice/ducker.test.ts
+@@ -0,0 +1,95 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { createDucker, DUCK_GAIN, DUCK_HOLD_MS } from "./ducker";
++
++function setup() {
++  const calls: Array<[gain: number, timeConstantMs: number]> = [];
++  const ducker = createDucker({ setOutputGain: (gain, tau) => calls.push([gain, tau]) });
++  return { ducker, calls };
++}
++
++describe("ducker", () => {
++  beforeEach(() => {
++    vi.useFakeTimers();
++  });
++
++  afterEach(() => {
++    vi.useRealTimers();
++  });
++
++  it("fades to a whisper on speech, holds, then fades back up", () => {
++    const { ducker, calls } = setup();
++
++    ducker.speechStarted();
++    expect(calls).toEqual([[0.1, 67]]);
++
++    ducker.speechStopped();
++    vi.advanceTimersByTime(DUCK_HOLD_MS - 1);
++    expect(calls).toEqual([[0.1, 67]]);
++
++    vi.advanceTimersByTime(1);
++    expect(calls).toEqual([
++      [0.1, 67],
++      [1, 200],
++    ]);
++    expect(DUCK_GAIN).toBe(0.1);
++  });
++
++  it("stays ducked when speech resumes during the hold", () => {
++    const { ducker, calls } = setup();
++
++    ducker.speechStarted();
++    ducker.speechStopped();
++    vi.advanceTimersByTime(100);
++    ducker.speechStarted();
++    vi.advanceTimersByTime(DUCK_HOLD_MS * 4);
++
++    expect(calls).toEqual([[0.1, 67]]);
++  });
++
++  it("re-ducks from wherever the release has got to", () => {
++    const { ducker, calls } = setup();
++
++    ducker.speechStarted();
++    ducker.speechStopped();
++    vi.advanceTimersByTime(DUCK_HOLD_MS + 150);
++    ducker.speechStarted();
++
++    // Each change is a new target from the current value; the engine never jumps.
++    expect(calls).toEqual([
++      [0.1, 67],
++      [1, 200],
++      [0.1, 67],
++    ]);
++  });
++
++  it("ignores repeated starts and a stop with no start", () => {
++    const { ducker, calls } = setup();
++
++    ducker.speechStopped();
++    vi.advanceTimersByTime(DUCK_HOLD_MS);
++    ducker.speechStarted();
++    ducker.speechStarted();
++
++    expect(calls).toEqual([[0.1, 67]]);
++  });
++
++  it("reset restores full volume at once and cancels a pending release", () => {
++    const { ducker, calls } = setup();
++
++    ducker.speechStarted();
++    ducker.speechStopped();
++    ducker.reset();
++    vi.advanceTimersByTime(DUCK_HOLD_MS * 4);
++
++    expect(calls).toEqual([
++      [0.1, 67],
++      [1, 0],
++    ]);
++  });
++
++  it("reset when nothing is ducked does nothing", () => {
++    const { ducker, calls } = setup();
++    ducker.reset();
++    expect(calls).toEqual([]);
++  });
++});
+diff --git a/packages/app/src/voice/ducker.ts b/packages/app/src/voice/ducker.ts
+new file mode 100644
+index 000000000..dc46697a3
+--- /dev/null
++++ b/packages/app/src/voice/ducker.ts
+@@ -0,0 +1,62 @@
++/**
++ * Fork 0009: while the user speaks in voice mode, the agent's speech fades to a whisper and
++ * comes back after they stop. The engine runs each change as a one-pole approach from the
++ * current gain (`setOutputGain`), so a change of direction mid-fade never jumps.
++ */
++
++/** -20 dB. Still audible as "it is still talking", and 20 dB less echo for the VAD. */
++export const DUCK_GAIN = 0.1;
++/** Fade down in about 200 ms: three time constants reach within 5% of the target. */
++export const DUCK_ATTACK_TIME_CONSTANT_MS = 67;
++/** Rides out network jitter and back-to-back segments; the server already waits 1 s of silence. */
++export const DUCK_HOLD_MS = 250;
++/** Fade up in about 600 ms, slower than the fade down. */
++export const DUCK_RELEASE_TIME_CONSTANT_MS = 200;
++
++export interface DuckerPort {
++  /** A time constant of 0 sets the gain at once. */
++  setOutputGain(gain: number, timeConstantMs: number): void;
++}
++
++export interface Ducker {
++  speechStarted(): void;
++  speechStopped(): void;
++  /** Back to full volume at once. Only for moments when nothing is audible. */
++  reset(): void;
++}
++
++export function createDucker(port: DuckerPort): Ducker {
++  let ducked = false;
++  let hold: ReturnType<typeof setTimeout> | null = null;
++
++  function clearHold(): void {
++    if (hold) clearTimeout(hold);
++    hold = null;
++  }
++
++  return {
++    speechStarted() {
++      if (hold) {
++        clearHold();
++        return;
++      }
++      if (ducked) return;
++      ducked = true;
++      port.setOutputGain(DUCK_GAIN, DUCK_ATTACK_TIME_CONSTANT_MS);
++    },
++    speechStopped() {
++      if (!ducked || hold) return;
++      hold = setTimeout(() => {
++        hold = null;
++        ducked = false;
++        port.setOutputGain(1, DUCK_RELEASE_TIME_CONSTANT_MS);
++      }, DUCK_HOLD_MS);
++    },
++    reset() {
++      clearHold();
++      if (!ducked) return;
++      ducked = false;
++      port.setOutputGain(1, 0);
++    },
++  };
++}
+diff --git a/packages/app/src/voice/voice-runtime.test.ts b/packages/app/src/voice/voice-runtime.test.ts
+index 6f73362c5..6fc732135 100644
+--- a/packages/app/src/voice/voice-runtime.test.ts
++++ b/packages/app/src/voice/voice-runtime.test.ts
+@@ -3,6 +3,7 @@ import type { DaemonServerInfo } from "@/stores/session-store";
+ import type { AudioEngine } from "@/audio";
+ import { createVoiceRuntime, type VoiceSessionAdapter } from "@/voice/voice-runtime";
+ import { REALTIME_VOICE_VAD_CONFIG } from "@/voice/realtime-voice-config";
++import type { CueHandle } from "@/audio/cue-layer";
+ 
+ const CUE_MIME_TYPE = "audio/pcm;rate=16000;bits=16";
+ const THINKING_TONE_MIN_SILENCE_MS = 1500;
+@@ -26,6 +27,7 @@ function createAudioEngineMock(): AudioEngine {
+     stop: vi.fn(),
+     clearQueue: vi.fn(),
+     isPlaying: vi.fn().mockReturnValue(false),
++    setOutputGain: vi.fn(),
+   };
+ }
+ 
+@@ -58,7 +60,7 @@ function createAudioPayload(args: {
+   } as const;
+ }
+ 
+-function createServerInfo(): DaemonServerInfo {
++function createServerInfo(features?: DaemonServerInfo["features"]): DaemonServerInfo {
+   return {
+     serverId: "server-1",
+     hostname: "host",
+@@ -69,9 +71,72 @@ function createServerInfo(): DaemonServerInfo {
+         voice: { enabled: true, reason: "" },
+       },
+     },
++    ...(features ? { features } : {}),
+   };
+ }
+ 
++type TestRuntime = ReturnType<typeof createRuntime>["runtime"];
++
++interface FakeCue {
++  fadeInMs: number;
++  calls: Array<[string, number]>;
++  end: () => void;
++}
++
++function startFakeCue(cues: FakeCue[], fadeInMs: number): CueHandle {
++  const ended = new Deferred();
++  const cue: FakeCue = { fadeInMs, calls: [], end: ended.resolve };
++  cues.push(cue);
++  return {
++    ended: ended.promise,
++    release: (ms) => cue.calls.push(["release", ms]),
++    resume: (ms) => cue.calls.push(["resume", ms]),
++  };
++}
++
++function cueFadeIn(cue: FakeCue) {
++  return cue.fadeInMs;
++}
++
++function cueCalls(cue: FakeCue) {
++  return cue.calls;
++}
++
++class Deferred {
++  resolve: () => void = () => {};
++  readonly promise = new Promise<void>((resolve) => {
++    this.resolve = resolve;
++  });
++}
++
++function expectPlayCalls(engine: AudioEngine, count: number) {
++  return () => expect(engine.play).toHaveBeenCalledTimes(count);
++}
++
++function expectPlayedChunks(adapter: VoiceSessionAdapter, ids: string[]) {
++  return () => expect(vi.mocked(adapter.audioPlayed).mock.calls.flat()).toEqual(ids);
++}
++
++function expectPhase(runtime: TestRuntime, phase: string) {
++  return () => expect(runtime.getSnapshot().phase).toBe(phase);
++}
++
++function muteVoice(runtime: TestRuntime) {
++  runtime.toggleMute();
++}
++
++function disconnectVoiceHost(runtime: TestRuntime) {
++  runtime.updateSessionConnection("server-1", false);
++}
++
++function stopVoiceNow(runtime: TestRuntime) {
++  void runtime.stopVoice();
++}
++
++const legacyServerInfo = () => createServerInfo();
++/** A host that runs the fork 0009 voice send behaviour. */
++const sendBehaviorServerInfo = () => createServerInfo({ voiceSendBehavior: true });
++
+ function createRuntime(options?: {
+   engine?: AudioEngine;
+   getServerInfo?: (serverId: string) => DaemonServerInfo | null;
+@@ -586,4 +651,242 @@ describe("voice runtime", () => {
+     expect(listener).not.toHaveBeenCalled();
+     unsubscribe();
+   });
++
++  describe("send behaviour (fork 0009)", () => {
++    async function startWithBehavior(
++      sendBehavior: "interrupt" | "steer" | "queue",
++      serverInfo: () => DaemonServerInfo = sendBehaviorServerInfo,
++    ) {
++      const adapter = createSessionAdapter();
++      const { runtime, engine } = createRuntime({ getServerInfo: serverInfo });
++      runtime.registerSession(adapter);
++      runtime.setSendBehavior(sendBehavior);
++      await runtime.startVoice("server-1", "agent-1");
++      return { adapter, runtime, engine };
++    }
++
++    it("tells a capable host the send behaviour", async () => {
++      const { adapter } = await startWithBehavior("queue");
++      expect(adapter.setVoiceMode).toHaveBeenCalledWith(true, "agent-1", "queue");
++    });
++
++    it("leaves an older host on interrupt without sending a behaviour", async () => {
++      const { adapter, runtime, engine } = await startWithBehavior("queue", legacyServerInfo);
++      expect(adapter.setVoiceMode).toHaveBeenCalledWith(true, "agent-1");
++      runtime.onAssistantAudioStarted("server-1");
++      runtime.onServerSpeechStateChanged("server-1", true);
++      expect(engine.stop).toHaveBeenCalled();
++      expect(engine.setOutputGain).not.toHaveBeenCalled();
++    });
++
++    it("re-sends voice mode when the setting changes while voice is on", async () => {
++      const { adapter, runtime } = await startWithBehavior("steer");
++      vi.mocked(adapter.setVoiceMode).mockClear();
++
++      runtime.setSendBehavior("queue");
++      await Promise.resolve();
++      runtime.setSendBehavior("queue");
++      await Promise.resolve();
++
++      expect(vi.mocked(adapter.setVoiceMode).mock.calls).toEqual([[true, "agent-1", "queue"]]);
++    });
++
++    it("resyncs the behaviour after the connection recovers", async () => {
++      const { adapter, runtime } = await startWithBehavior("queue");
++      vi.mocked(adapter.setVoiceMode).mockClear();
++
++      runtime.updateSessionConnection("server-1", false);
++      runtime.updateSessionConnection("server-1", true);
++      await Promise.resolve();
++
++      expect(adapter.setVoiceMode).toHaveBeenCalledWith(true, "agent-1", "queue");
++    });
++
++    it.each(["steer", "queue"] as const)(
++      "%s: speech ducks the reply instead of stopping it",
++      async (sendBehavior) => {
++        const { runtime, engine, adapter } = await startWithBehavior(sendBehavior);
++        runtime.onAssistantAudioStarted("server-1");
++        vi.mocked(adapter.setAssistantAudioPlaying).mockClear();
++
++        runtime.onServerSpeechStateChanged("server-1", true);
++
++        expect(engine.stop).not.toHaveBeenCalled();
++        expect(engine.clearQueue).not.toHaveBeenCalled();
++        expect(adapter.setAssistantAudioPlaying).not.toHaveBeenCalled();
++        expect(vi.mocked(engine.setOutputGain).mock.calls).toEqual([[0.1, 67]]);
++        expect(runtime.getSnapshot().phase).toBe("playing");
++
++        runtime.onServerSpeechStateChanged("server-1", false);
++        await vi.advanceTimersByTimeAsync(249);
++        expect(vi.mocked(engine.setOutputGain).mock.calls).toEqual([[0.1, 67]]);
++        await vi.advanceTimersByTimeAsync(1);
++        expect(vi.mocked(engine.setOutputGain).mock.calls).toEqual([
++          [0.1, 67],
++          [1, 200],
++        ]);
++      },
++    );
++
++    it("speech that resumes during the hold leaves the gain ducked", async () => {
++      const { runtime, engine } = await startWithBehavior("queue");
++      runtime.onServerSpeechStateChanged("server-1", true);
++      runtime.onServerSpeechStateChanged("server-1", false);
++      await vi.advanceTimersByTimeAsync(100);
++      runtime.onServerSpeechStateChanged("server-1", true);
++      await vi.advanceTimersByTimeAsync(1000);
++      expect(vi.mocked(engine.setOutputGain).mock.calls).toEqual([[0.1, 67]]);
++    });
++
++    it("keeps queued reply chunks playing through speech", async () => {
++      const { runtime, engine, adapter } = await startWithBehavior("queue");
++      runtime.onTurnEvent("server-1", "agent-1", "turn_started");
++      runtime.handleAudioOutput(
++        "server-1",
++        createAudioPayload({ id: "chunk-0", groupId: "g", chunkIndex: 0, isLastChunk: false }),
++      );
++      await vi.waitFor(expectPlayCalls(engine, 1));
++
++      runtime.onServerSpeechStateChanged("server-1", true);
++      runtime.handleAudioOutput(
++        "server-1",
++        createAudioPayload({ id: "chunk-1", groupId: "g", chunkIndex: 1, isLastChunk: true }),
++      );
++
++      await vi.waitFor(expectPlayedChunks(adapter, ["chunk-0", "chunk-1"]));
++      expect(engine.clearQueue).not.toHaveBeenCalled();
++    });
++
++    it.each([
++      ["mute", muteVoice],
++      ["disconnect", disconnectVoiceHost],
++      ["stop", stopVoiceNow],
++    ])("%s restores full volume at once", async (_label, act) => {
++      const { runtime, engine } = await startWithBehavior("queue");
++      runtime.onServerSpeechStateChanged("server-1", true);
++      act(runtime);
++      await vi.advanceTimersByTimeAsync(1000);
++      expect(vi.mocked(engine.setOutputGain).mock.calls).toEqual([
++        [0.1, 67],
++        [1, 0],
++      ]);
++    });
++
++    it("a canceled turn drops the reply that was playing", async () => {
++      const { runtime, engine, adapter } = await startWithBehavior("queue");
++      runtime.onTurnEvent("server-1", "agent-1", "turn_started");
++      runtime.handleAudioOutput(
++        "server-1",
++        createAudioPayload({ id: "chunk-0", groupId: "g", chunkIndex: 0, isLastChunk: false }),
++      );
++      await vi.waitFor(expectPhase(runtime, "playing"));
++      vi.mocked(adapter.setAssistantAudioPlaying).mockClear();
++
++      runtime.onTurnEvent("server-1", "agent-1", "turn_canceled");
++      runtime.handleAudioOutput(
++        "server-1",
++        createAudioPayload({ id: "chunk-1", groupId: "g", chunkIndex: 1, isLastChunk: true }),
++      );
++
++      expect(engine.stop).toHaveBeenCalled();
++      expect(engine.clearQueue).toHaveBeenCalled();
++      expect(adapter.setAssistantAudioPlaying).toHaveBeenCalledWith(false);
++      expect(runtime.getSnapshot().phase).toBe("listening");
++    });
++
++    it("a transcript during a reply keeps it playing and starts no cue", async () => {
++      const { runtime, engine } = await startWithBehavior("queue");
++      runtime.onTurnEvent("server-1", "agent-1", "turn_started");
++      runtime.onAssistantAudioStarted("server-1");
++      vi.mocked(engine.play).mockClear();
++
++      runtime.onTranscriptionResult("server-1", "and the config");
++      await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS * 2);
++
++      expect(runtime.getSnapshot().phase).toBe("playing");
++      expect(engine.play).not.toHaveBeenCalled();
++    });
++  });
++
++  describe("thinking-tone fades (fork 0009)", () => {
++    /** An engine that plays the cue on its own gain stage, recording what the runtime asks. */
++    function createLayeredEngine() {
++      const engine = createAudioEngineMock();
++      const cues: FakeCue[] = [];
++      engine.playCue = async (_source, fadeInMs) => startFakeCue(cues, fadeInMs);
++      return { engine, cues };
++    }
++
++    async function startWaitingWithCue() {
++      const adapter = createSessionAdapter();
++      const { engine, cues } = createLayeredEngine();
++      const { runtime } = createRuntime({ engine, getServerInfo: sendBehaviorServerInfo });
++      runtime.registerSession(adapter);
++      runtime.setSendBehavior("queue");
++      await runtime.startVoice("server-1", "agent-1");
++      runtime.onTurnEvent("server-1", "agent-1", "turn_started");
++      await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS);
++      return { adapter, engine, cues, runtime };
++    }
++
++    it("fades the cue in over about 400 ms, outside the playback queue", async () => {
++      const { engine, cues } = await startWaitingWithCue();
++      expect(cues.map(cueFadeIn)).toEqual([400]);
++      expect(engine.play).not.toHaveBeenCalled();
++    });
++
++    it("a reply starts at once and overlaps the cue's fade-out", async () => {
++      const { engine, cues, runtime } = await startWaitingWithCue();
++
++      runtime.handleAudioOutput(
++        "server-1",
++        createAudioPayload({ id: "chunk-0", groupId: "g", chunkIndex: 0, isLastChunk: true }),
++      );
++      await vi.waitFor(expectPlayCalls(engine, 1));
++
++      expect(cues[0]?.calls).toEqual([["release", 350]]);
++      expect(vi.mocked(engine.play).mock.calls[0]?.[0].type).toBe(SEGMENT_MIME_TYPE);
++
++      // The reply ended at once, but the cue waits out the silence instead of swelling back
++      // between sentences.
++      await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS - 1);
++      expect(cues).toHaveLength(1);
++      await vi.advanceTimersByTimeAsync(1);
++      expect(cues).toHaveLength(2);
++    });
++
++    it("a restart during the fade-out resumes the same cue", async () => {
++      const { cues, runtime } = await startWaitingWithCue();
++
++      runtime.onServerSpeechStateChanged("server-1", true);
++      runtime.handleCaptureVolume(0.5);
++      runtime.onServerSpeechStateChanged("server-1", false);
++      runtime.handleCaptureVolume(0);
++      await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS * 2);
++
++      expect(cues).toHaveLength(1);
++      expect(cues[0]?.calls).toEqual([
++        ["release", 350],
++        ["resume", 400],
++      ]);
++    });
++
++    it("a cue that has finished fading is started fresh after the silence", async () => {
++      const { cues, runtime } = await startWaitingWithCue();
++
++      runtime.onServerSpeechStateChanged("server-1", true);
++      cues[0]?.end();
++      await vi.advanceTimersByTimeAsync(0);
++      runtime.onServerSpeechStateChanged("server-1", false);
++      await vi.advanceTimersByTimeAsync(THINKING_TONE_MIN_SILENCE_MS);
++
++      expect(cues.map(cueCalls)).toEqual([[["release", 350]], []]);
++    });
++
++    it("stopping voice fades the cue out fast", async () => {
++      const { cues, runtime } = await startWaitingWithCue();
++      await runtime.stopVoice();
++      expect(cues[0]?.calls).toEqual([["release", 40]]);
++    });
++  });
+ });
+diff --git a/packages/app/src/voice/voice-runtime.ts b/packages/app/src/voice/voice-runtime.ts
+index bf9927992..be0b2cdbc 100644
+--- a/packages/app/src/voice/voice-runtime.ts
++++ b/packages/app/src/voice/voice-runtime.ts
+@@ -1,8 +1,13 @@
+ import { Buffer } from "buffer";
+-import type { AgentStreamEventPayload, SessionOutboundMessage } from "@getpaseo/protocol/messages";
++import type {
++  AgentStreamEventPayload,
++  SessionOutboundMessage,
++  VoiceSendBehavior,
++} from "@getpaseo/protocol/messages";
+ import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
+ import type { DaemonServerInfo } from "@/stores/session-store";
+ import type { AudioEngine, AudioPlaybackSource } from "@/audio";
++import type { CueHandle } from "@/audio/cue-layer";
+ import {
+   THINKING_TONE_MIME_TYPE,
+   createThinkingToneSequence,
+@@ -11,6 +16,7 @@ import {
+   type ThinkingToneBank,
+ } from "./thinking-tone";
+ import { shouldPublishDisplayVolume, smoothDisplayVolume } from "./display-volume";
++import { createDucker } from "./ducker";
+ 
+ const PCM_MIME_TYPE = "audio/pcm;rate=16000;bits=16";
+ const KEEP_AWAKE_TAG = "paseo:voice";
+@@ -19,8 +25,12 @@ const KEEP_AWAKE_TAG = "paseo:voice";
+  * order with no gap. Engines chain them sample-exactly; one that resolves instead is re-queued.
+  */
+ const THINKING_TONE_REPEAT_GAP_MS = 0;
+-/** Segments start mid-drone rather than on silence, so the first segment fades in. */
+-const THINKING_TONE_FADE_IN_MS = 80;
++/** Segments start mid-drone rather than on silence, so the cue fades in. */
++const THINKING_TONE_FADE_IN_MS = 400;
++/** The cue fades out when it stops; a reply that starts meanwhile overlaps the fade. */
++const THINKING_TONE_FADE_OUT_MS = 350;
++/** For stops that should be near-instant: voice off, errors, teardown. */
++const THINKING_TONE_FAST_FADE_OUT_MS = 40;
+ /**
+  * A reply is spoken as one TTS segment per sentence, and the daemon starts the next segment
+  * only once the current one has finished playing, so a reply in progress is punctuated by short
+@@ -60,7 +70,8 @@ export interface VoiceRuntimeTelemetrySnapshot {
+ 
+ export interface VoiceSessionAdapter {
+   serverId: string;
+-  setVoiceMode(enabled: boolean, agentId?: string): Promise<void>;
++  /** `sendBehavior` is passed only to hosts with `features.voiceSendBehavior`. */
++  setVoiceMode(enabled: boolean, agentId?: string, sendBehavior?: VoiceSendBehavior): Promise<void>;
+   sendVoiceAudioChunk(audioData: string, mimeType: string): Promise<void>;
+   audioPlayed(chunkId: string): Promise<void>;
+   abortRequest(): Promise<void>;
+@@ -98,6 +109,12 @@ interface RuntimeState {
+   segmentDurationTimer: ReturnType<typeof setInterval> | null;
+   lastDisplayVolumePublishMs: number;
+   serverSpeechStartedAt: number | null;
++  /** Fork 0009: the "Default send" setting, pushed in by the app. */
++  requestedSendBehavior: VoiceSendBehavior;
++  /** Fork 0009: what this voice session runs; resolved against the host when voice starts. */
++  sendBehavior: VoiceSendBehavior;
++  /** Whether the active host takes a send behaviour at all. */
++  hostTakesSendBehavior: boolean;
+ }
+ 
+ type AudioOutputPayload = Extract<SessionOutboundMessage, { type: "audio_output" }>["payload"];
+@@ -130,6 +147,16 @@ interface RuntimePlaybackState {
+ interface CueState {
+   controller: AbortController | null;
+   timeout: ReturnType<typeof setTimeout> | null;
++  /** Fork 0009: the cue on its own gain stage, on engines that have one. */
++  handle: CueHandle | null;
++  /** The handle is fading out. */
++  releasing: boolean;
++  /** A restart during the fade-out resumes the handle instead of waiting out the silence. */
++  resumable: boolean;
++  /** The fade-out for a handle that arrives after the cue was stopped. */
++  fadeOutMs: number;
++  /** The fade-out the releasing handle is running. */
++  releaseFadeOutMs: number;
+ }
+ 
+ const INITIAL_SNAPSHOT: VoiceRuntimeSnapshot = {
+@@ -192,6 +219,8 @@ export interface VoiceRuntime {
+   onTranscriptionResult(serverId: string, text: string): void;
+   onServerSpeechStateChanged(serverId: string, isSpeaking: boolean): void;
+   onTurnEvent(serverId: string, agentId: string, eventType: TurnEventType): void;
++  /** Fork 0009: the app's "Default send" setting, which voice follows. */
++  setSendBehavior(sendBehavior: VoiceSendBehavior): void;
+ }
+ 
+ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+@@ -209,7 +238,20 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+     segmentDurationTimer: null,
+     lastDisplayVolumePublishMs: 0,
+     serverSpeechStartedAt: null,
++    requestedSendBehavior: "steer",
++    sendBehavior: "interrupt",
++    hostTakesSendBehavior: false,
+   };
++  const ducker = createDucker({
++    setOutputGain: (gain, timeConstantMs) => deps.engine.setOutputGain(gain, timeConstantMs),
++  });
++  /** Steer and queue keep the agent's speech playing under the user's voice, ducked. */
++  const speechDucksPlayback = () => state.sendBehavior !== "interrupt";
++  function setVoiceModeOn(adapter: VoiceSessionAdapter, agentId: string): Promise<void> {
++    return state.hostTakesSendBehavior
++      ? adapter.setVoiceMode(true, agentId, state.sendBehavior)
++      : adapter.setVoiceMode(true, agentId);
++  }
+   const playback: RuntimePlaybackState = {
+     groups: new Map(),
+     orderedGroupIds: [],
+@@ -220,6 +262,11 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+   const cue: CueState = {
+     controller: null,
+     timeout: null,
++    handle: null,
++    releasing: false,
++    resumable: false,
++    fadeOutMs: THINKING_TONE_FADE_OUT_MS,
++    releaseFadeOutMs: THINKING_TONE_FADE_OUT_MS,
+   };
+   const loadCueBank = deps.loadThinkingToneBank ?? loadThinkingToneBank;
+   let cueBank: Promise<ThinkingToneBank> | null = null;
+@@ -460,13 +507,59 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+     );
+   }
+ 
+-  function stopCue(): void {
++  /**
++   * `resumable: false` makes a later restart wait out the silence as usual. A reply is spoken a
++   * sentence at a time, so a cue stopped for assistant audio must not swell back between them.
++   */
++  function stopCue(fadeOutMs = THINKING_TONE_FADE_OUT_MS, resumable = true): void {
+     cue.controller?.abort();
+     cue.controller = null;
++    cue.fadeOutMs = fadeOutMs;
++    cue.resumable = resumable;
+     if (cue.timeout) {
+       clearTimeout(cue.timeout);
+       cue.timeout = null;
+     }
++    // A repeated stop only matters when it is faster than the fade already running.
++    if (cue.handle && (!cue.releasing || fadeOutMs < cue.releaseFadeOutMs)) {
++      cue.handle.release(fadeOutMs);
++      cue.releasing = true;
++      cue.releaseFadeOutMs = fadeOutMs;
++    }
++  }
++
++  /** Track a layered cue until it has stopped; one that arrives after a stop fades out at once. */
++  function adoptCueHandle(handle: CueHandle, controller: AbortController): Promise<void> {
++    cue.handle = handle;
++    cue.releasing = false;
++    if (controller.signal.aborted) {
++      handle.release(cue.fadeOutMs);
++      cue.releasing = true;
++      cue.releaseFadeOutMs = cue.fadeOutMs;
++    }
++    return handle.ended.then(() => {
++      if (cue.handle === handle) {
++        cue.handle = null;
++        cue.releasing = false;
++      }
++      return undefined;
++    });
++  }
++
++  function playCueSegments(
++    controller: AbortController,
++    nextSegment: () => Uint8Array,
++    isFirstPass: boolean,
++  ): Promise<unknown> {
++    const playCue = deps.engine.playCue?.bind(deps.engine);
++    if (playCue) {
++      return playCue(createCueSource(nextSegment), THINKING_TONE_FADE_IN_MS).then((handle) =>
++        adoptCueHandle(handle, controller),
++      );
++    }
++    // Engines without a cue gain stage (native) fade in on the samples and stop at once.
++    const source = createCueSource(nextSegment, isFirstPass ? THINKING_TONE_FADE_IN_MS : undefined);
++    return deps.engine.play(source, controller.signal);
+   }
+ 
+   function resetCaptureTelemetry(): void {
+@@ -480,6 +573,13 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+       stopCue();
+       return;
+     }
++    if (cue.handle && cue.releasing && cue.resumable) {
++      // Wanted again while it fades out: ramp the same chain back up from where it is.
++      cue.releasing = false;
++      cue.handle.resume(THINKING_TONE_FADE_IN_MS);
++      cue.controller = new AbortController();
++      return;
++    }
+     if (cue.controller) {
+       return;
+     }
+@@ -510,11 +610,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+           }
+           nextSegment ??= createThinkingToneSequence(loaded, deps.random);
+           segmentDurationMs = loaded.segmentDurationMs;
+-          const source = createCueSource(
+-            nextSegment,
+-            isFirstPass ? THINKING_TONE_FADE_IN_MS : undefined,
+-          );
+-          return deps.engine.play(source, controller.signal);
++          return playCueSegments(controller, nextSegment, isFirstPass);
+         })
+         .then(
+           // play() settles once the chain has ended, so only the gap remains to wait.
+@@ -589,7 +685,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+   }
+ 
+   async function performLocalStop(): Promise<void> {
+-    stopCue();
++    stopCue(THINKING_TONE_FAST_FADE_OUT_MS, false);
++    ducker.reset();
+     uploader.reset();
+     resetPlaybackState();
+     deps.engine.stop();
+@@ -616,7 +713,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+ 
+     patchSnapshot((prev) => ({ ...prev, isVoiceSwitching: true }));
+     try {
+-      await activeSession.adapter.setVoiceMode(true, state.snapshot.activeAgentId);
++      await setVoiceModeOn(activeSession.adapter, state.snapshot.activeAgentId);
+       state.transportReady = true;
+     } finally {
+       patchSnapshot((prev) => ({ ...prev, isVoiceSwitching: false }));
+@@ -672,6 +769,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+       }
+       if (!connected) {
+         state.transportReady = false;
++        // The host will not tell us the user stopped speaking.
++        ducker.reset();
+         return;
+       }
+       void resyncVoiceMode(serverId);
+@@ -767,6 +866,11 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+         throw new Error(unavailableMessage);
+       }
+ 
++      // COMPAT(voiceSendBehavior): hosts before fork 0009 always interrupt on speech, so the
++      // app keeps stopping playback on speech for them. Remove after 2027-04-28.
++      state.hostTakesSendBehavior = serverInfo?.features?.voiceSendBehavior === true;
++      state.sendBehavior = state.hostTakesSendBehavior ? state.requestedSendBehavior : "interrupt";
++
+       const previousServerId = state.snapshot.activeServerId;
+       const previousAgentId = state.snapshot.activeAgentId;
+       const generation = state.generation + 1;
+@@ -799,7 +903,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+         });
+ 
+         await deps.engine.initialize();
+-        await session.adapter.setVoiceMode(true, agentId);
++        await setVoiceModeOn(session.adapter, agentId);
+         enabledCurrentVoiceMode = true;
+         await deps.engine.startCapture();
+         if (state.generation !== generation) {
+@@ -837,7 +941,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+       }));
+ 
+       try {
+-        stopCue();
++        stopCue(THINKING_TONE_FAST_FADE_OUT_MS, false);
++        ducker.reset();
+         uploader.reset();
+         state.transportReady = false;
+         resetPlaybackState();
+@@ -867,6 +972,8 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+     toggleMute() {
+       const nextMuted = deps.engine.toggleMute();
+       if (nextMuted) {
++        // A muted mic means the host never reports the end of this speech.
++        ducker.reset();
+         uploader.reset();
+         resetCaptureTelemetry();
+         patchSnapshot((prev) => ({
+@@ -901,7 +1008,7 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+       if (!state.snapshot.isVoiceMode || state.snapshot.activeServerId !== serverId) {
+         return;
+       }
+-      stopCue();
++      stopCue(THINKING_TONE_FADE_OUT_MS, false);
+       getActiveSession()?.adapter.setAssistantAudioPlaying(true);
+       patchSnapshot((prev) => ({ ...prev, phase: "playing" }));
+     },
+@@ -933,6 +1040,10 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+ 
+       if (text.trim()) {
+         state.turnInProgress = true;
++        // With steer or queue the reply keeps playing; "waiting" would start the cue over it.
++        if (speechDucksPlayback() && state.snapshot.phase === "playing") {
++          return;
++        }
+         patchSnapshot((prev) => ({ ...prev, phase: "waiting" }));
+         reconcileCue();
+         return;
+@@ -950,7 +1061,10 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+ 
+       state.serverSpeechDetected = isSpeaking;
+       state.serverSpeechStartedAt = isSpeaking ? (state.serverSpeechStartedAt ?? Date.now()) : null;
+-      if (isSpeaking) {
++      if (speechDucksPlayback()) {
++        if (isSpeaking) ducker.speechStarted();
++        else ducker.speechStopped();
++      } else if (isSpeaking) {
+         const shouldInterruptPlayback =
+           state.snapshot.phase === "playing" || playback.groups.size > 0;
+         resetPlaybackState();
+@@ -987,12 +1101,42 @@ export function createVoiceRuntime(deps: VoiceRuntimeDeps): VoiceRuntime {
+         return;
+       }
+ 
++      if (eventType === "turn_canceled") {
++        // An interrupt (the stop button, "Interrupt and send") silences the old reply at once.
++        // The daemon stops its TTS too; this drops what is already here.
++        const hadPlayback = state.snapshot.phase === "playing" || playback.groups.size > 0;
++        resetPlaybackState();
++        if (hadPlayback) {
++          deps.engine.stop();
++          deps.engine.clearQueue();
++          getActiveSession()?.adapter.setAssistantAudioPlaying(false);
++        }
++        state.turnInProgress = false;
++        patchSnapshot((prev) => ({ ...prev, phase: "listening" }));
++        stopCue();
++        return;
++      }
++
+       state.turnInProgress = false;
+       if (state.snapshot.phase !== "playing") {
+         patchSnapshot((prev) => ({ ...prev, phase: "listening" }));
+       }
+       stopCue();
+     },
++
++    setSendBehavior(sendBehavior) {
++      state.requestedSendBehavior = sendBehavior;
++      if (!state.snapshot.isVoiceMode || !state.hostTakesSendBehavior) return;
++      if (state.sendBehavior === sendBehavior) return;
++      state.sendBehavior = sendBehavior;
++      if (!speechDucksPlayback()) ducker.reset();
++      const serverId = state.snapshot.activeServerId;
++      if (serverId) {
++        void resyncVoiceMode(serverId).catch((error) => {
++          console.warn(`[VoiceRuntime#${instanceId}] Failed to update the send behaviour:`, error);
++        });
++      }
++    },
+   };
+ 
+   return api;
+diff --git a/packages/client/src/daemon-client.ts b/packages/client/src/daemon-client.ts
+index cfaea8193..9c8c870fd 100644
+--- a/packages/client/src/daemon-client.ts
++++ b/packages/client/src/daemon-client.ts
+@@ -35,6 +35,7 @@ import {
+   DaemonUpdateResponseSchema,
+   SessionInboundMessageSchema,
+   type ActiveTurnBehavior,
++  type VoiceSendBehavior,
+   type ServerInfoStatusPayload,
+ } from "@getpaseo/protocol/messages";
+ import { validateWSOutboundMessage } from "@getpaseo/protocol/validation/ws-outbound";
+@@ -450,6 +451,8 @@ export interface SendMessageOptions {
+   activeTurnBehavior?: ActiveTurnBehavior;
+   images?: Array<{ data: string; mimeType: string }>;
+   attachments?: SendAgentMessageRequest["attachments"];
++  /** Fork: the text came from voice transcription (requires `features.voiceSendBehavior`). */
++  spokenInput?: boolean;
+ }
+ 
+ export interface AgentAttentionRequiredNotification {
+@@ -3791,6 +3794,7 @@ export class DaemonClient {
+       activeTurnBehavior: options.activeTurnBehavior,
+       images: options.images,
+       attachments: options.attachments,
++      ...(options.spokenInput ? { spokenInput: true } : {}),
+     });
+     const payload = await this.sendRequest({
+       requestId,
+@@ -4118,12 +4122,21 @@ export class DaemonClient {
+   // Audio / Voice
+   // ============================================================================
+ 
+-  async setVoiceMode(enabled: boolean, agentId?: string): Promise<SetVoiceModePayload> {
++  /**
++   * `sendBehavior` (fork) says what a final transcript does while the agent is working.
++   * Send it only when `features.voiceSendBehavior` is set; older daemons interrupt.
++   */
++  async setVoiceMode(
++    enabled: boolean,
++    agentId?: string,
++    sendBehavior?: VoiceSendBehavior,
++  ): Promise<SetVoiceModePayload> {
+     const requestId = this.createRequestId();
+     const message = SessionInboundMessageSchema.parse({
+       type: "set_voice_mode",
+       enabled,
+       ...(agentId ? { agentId } : {}),
++      ...(sendBehavior ? { sendBehavior } : {}),
+       requestId,
+     });
+     const response = await this.sendRequest({
+diff --git a/packages/expo-two-way-audio/src/core.ts b/packages/expo-two-way-audio/src/core.ts
+index 48215f2ba..c93b160be 100644
+--- a/packages/expo-two-way-audio/src/core.ts
++++ b/packages/expo-two-way-audio/src/core.ts
+@@ -45,6 +45,20 @@ export function releaseAudioSession() {
+   return ExpoTwoWayAudioModule.releaseAudioSession();
+ }
+ 
++/**
++ * Fork 0009: move the voice output gain toward `gain` as a one-pole approach with this time
++ * constant (0 sets it at once), stepped natively so a busy JS thread cannot stall a fade.
++ */
++export function setOutputGain(gain: number, timeConstantMs: number) {
++  // COMPAT(nativeOutputGain): no native binary implements setOutputGain yet; fork 0009 ships
++  // ducking on web and Electron only. Until a binary has it, native playback is not ducked
++  // (it keeps playing at full volume). Remove the probe once the binary floor includes it.
++  if (typeof ExpoTwoWayAudioModule.setOutputGain !== "function") {
++    return;
++  }
++  return ExpoTwoWayAudioModule.setOutputGain(gain, timeConstantMs);
++}
++
+ export function tearDown() {
+   return ExpoTwoWayAudioModule.tearDown();
+ }
+diff --git a/packages/protocol/src/messages.ts b/packages/protocol/src/messages.ts
+index 52e4ef3f1..1d031e617 100644
+--- a/packages/protocol/src/messages.ts
++++ b/packages/protocol/src/messages.ts
+@@ -1079,11 +1079,18 @@ export const WorkspaceRecoveryRestoreRequestSchema = z.object({
+   requestId: z.string(),
+ });
+ 
++// Fork: what a final transcript does while the agent is working. Mirrors the app's
++// "Default send" setting. Gated by features.voiceSendBehavior.
++export const VoiceSendBehaviorSchema = z.enum(["interrupt", "steer", "queue"]);
++export type VoiceSendBehavior = z.infer<typeof VoiceSendBehaviorSchema>;
++
+ export const SetVoiceModeMessageSchema = z.object({
+   type: z.literal("set_voice_mode"),
+   enabled: z.boolean(),
+   agentId: z.string().optional(),
+   requestId: z.string().optional(),
++  // Fork: absent means "interrupt", the behaviour before fork 0009.
++  sendBehavior: VoiceSendBehaviorSchema.optional(),
+ });
+ 
+ // COMPAT(githubAttachmentKinds): legacy wire attachment retained when
+@@ -1408,6 +1415,9 @@ export const SendAgentMessageRequestSchema = z.object({
+   activeTurnBehavior: ActiveTurnBehaviorSchema.optional(),
+   images: z.array(ImageAttachmentSchema).optional(),
+   attachments: AgentAttachmentsSchema,
++  // Fork: the text came from voice transcription. The daemon wraps it as spoken input
++  // only while voice mode is on for the agent. Gated by features.voiceSendBehavior.
++  spokenInput: z.boolean().optional(),
+ });
+ 
+ export const WaitForFinishRequestSchema = z.object({
+@@ -3535,6 +3545,19 @@ export const VoiceInputStateMessageSchema = z.object({
+   }),
+ });
+ 
++// Fork: a final transcript the daemon held back because the agent was working and the
++// voice send behaviour is "queue". The app adds it to the queue track. This is an event:
++// it has no .response. Gated by features.voiceSendBehavior.
++export const VoiceSpokenInputQueuedMessageSchema = z.object({
++  type: z.literal("voice.spoken_input.queued"),
++  payload: z.object({
++    agentId: z.string(),
++    text: z.string(),
++    // The transcription request id, for dedupe and logs.
++    transcriptId: z.string(),
++  }),
++});
++
+ export const DictationStreamAckMessageSchema = z.object({
+   type: z.literal("dictation_stream_ack"),
+   payload: z.object({
+@@ -3693,6 +3716,9 @@ export const ServerInfoStatusPayloadSchema = z
+         daemonStatusRpc: z.boolean().optional(),
+         // Fork: speech_replay_request / speech_replay_cancel are handled.
+         speechReplay: z.boolean().optional(),
++        // Fork: set_voice_mode.sendBehavior, voice.spoken_input.queued and
++        // send_agent_message_request.spokenInput are handled.
++        voiceSendBehavior: z.boolean().optional(),
+         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
+         daemonConfigReload: z.boolean().optional(),
+         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
+@@ -6995,6 +7021,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
+   AudioOutputMessageSchema,
+   TranscriptionResultMessageSchema,
+   VoiceInputStateMessageSchema,
++  VoiceSpokenInputQueuedMessageSchema,
+   SpeechReplayFinishedMessageSchema,
+   DictationStreamAckMessageSchema,
+   DictationStreamFinishAcceptedMessageSchema,
+diff --git a/packages/protocol/tests/validation/ws-outbound.test.ts b/packages/protocol/tests/validation/ws-outbound.test.ts
+index ed147d89a..489d96477 100644
+--- a/packages/protocol/tests/validation/ws-outbound.test.ts
++++ b/packages/protocol/tests/validation/ws-outbound.test.ts
+@@ -291,6 +291,23 @@ const SourceSchema = z.object({
+     expect(result.success).toBe(true);
+   });
+ 
++  it("accepts a voice.spoken_input.queued envelope", () => {
++    const message = {
++      type: "voice.spoken_input.queued",
++      payload: { agentId: "agent-1", text: "check the tests", transcriptId: "transcript-1" },
++    };
++    expect(validateWSOutboundMessage({ type: "session", message })).toEqual({
++      success: true,
++      data: { type: "session", message },
++    });
++    expect(
++      validateWSOutboundMessage({
++        type: "session",
++        message: { type: "voice.spoken_input.queued", payload: { agentId: "agent-1" } },
++      }).success,
++    ).toBe(false);
++  });
++
+   it("accepts a legacy github_search_response envelope", () => {
+     const result = validateWSOutboundMessage({
+       type: "session",
+diff --git a/packages/server/src/server/authorization/operation-permissions.ts b/packages/server/src/server/authorization/operation-permissions.ts
+index 42e2fbc4e..220a45bc4 100644
+--- a/packages/server/src/server/authorization/operation-permissions.ts
++++ b/packages/server/src/server/authorization/operation-permissions.ts
+@@ -437,6 +437,7 @@ const OUTBOUND_PERMISSION = {
+   update_agent_response: "workspace.write",
+   validate_branch_response: "workspace.read",
+   voice_input_state: "workspace.write",
++  "voice.spoken_input.queued": "workspace.write",
+   wait_for_finish_response: "workspace.read",
+   "workspace.clear_attention.response": "workspace.write",
+   "workspace.mark_unread.response": "workspace.write",
+diff --git a/packages/server/src/server/session.ts b/packages/server/src/server/session.ts
+index e135ae080..bcff76582 100644
+--- a/packages/server/src/server/session.ts
++++ b/packages/server/src/server/session.ts
+@@ -27,6 +27,7 @@ import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-ca
+ import { formatPluginSourceReference } from "@getpaseo/protocol/plugin-source-reference";
+ import {
+   serializeAgentStreamEvent,
++  type ActiveTurnBehavior,
+   type AgentSnapshotPayload,
+   type AgentAttachment,
+   type FirstAgentContext,
+@@ -1247,7 +1248,7 @@ export class Session {
+             }),
+           reloadAgentSession: (agentId, overrides) =>
+             this.agentManager.reloadAgentSession(agentId, overrides),
+-          sendSpokenInput: async (agentId, text) => {
++          sendSpokenInput: async (agentId, text, spokenOptions) => {
+             await this.handleSendAgentMessage(
+               agentId,
+               text,
+@@ -1255,11 +1256,13 @@ export class Session {
+               undefined,
+               undefined,
+               undefined,
+-              { spokenInput: true },
++              { spokenInput: true, activeTurnBehavior: spokenOptions?.activeTurnBehavior },
+             );
+           },
+           interruptAgentIfRunning: (agentId) => this.interruptAgentIfRunning(agentId),
+           hasActiveAgentRun: (agentId) => this.hasActiveAgentRun(agentId),
++          hasPendingPermission: (agentId) =>
++            this.agentManager.getPendingPermissions(agentId).length > 0,
+         },
+         logger: this.sessionLogger,
+         sessionId: this.sessionId,
+@@ -2005,6 +2008,15 @@ export class Session {
+           return;
+         }
+ 
++        if (
++          event.event.type === "turn_canceled" &&
++          this.voiceSessions.isActiveForAgent(event.agentId)
++        ) {
++          // Fork 0009: an interrupt silences the old reply even when the provider does not
++          // abort the speak tool call.
++          this.voiceSessions.stopAssistantSpeechForAgent(event.agentId, "turn canceled");
++        }
++
+         if (
+           this.voiceSessions.isActiveForAgent(event.agentId) &&
+           event.event.type === "permission_requested" &&
+@@ -3983,7 +3995,7 @@ export class Session {
+     images?: Array<{ data: string; mimeType: string }>,
+     attachments?: AgentAttachment[],
+     runOptions?: AgentRunOptions,
+-    options?: { spokenInput?: boolean },
++    options?: { spokenInput?: boolean; activeTurnBehavior?: ActiveTurnBehavior },
+   ): Promise<{ ok: true } | { ok: false; error: string }> {
+     this.sessionLogger.info(
+       {
+@@ -4012,6 +4024,7 @@ export class Session {
+         prompt,
+         messageId,
+         runOptions,
++        activeTurnBehavior: options?.activeTurnBehavior,
+         // A typed or spoken message from the human answers any permission the
+         // agent is blocked on.
+         clearPendingPermissions: true,
+@@ -8228,7 +8241,13 @@ export class Session {
+     try {
+       const agentId = resolved.agentId;
+ 
+-      const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
++      // Fork 0009: a queued spoken item is wrapped only if voice mode is still on for the
++      // agent when it is dispatched; otherwise the agent's prompt says voice mode is off.
++      const promptText =
++        msg.spokenInput && this.voiceSessions.isActiveForAgent(agentId)
++          ? wrapSpokenInput(msg.text)
++          : msg.text;
++      const prompt = buildAgentPrompt(promptText, msg.images, msg.attachments);
+       this.sessionLogger.trace(
+         {
+           agentId,
+diff --git a/packages/server/src/server/session/voice/index.test.ts b/packages/server/src/server/session/voice/index.test.ts
+index 5c33628c2..2d59b57c5 100644
+--- a/packages/server/src/server/session/voice/index.test.ts
++++ b/packages/server/src/server/session/voice/index.test.ts
+@@ -38,6 +38,7 @@ test("a failed speech close reports the failure without retaining observation de
+         },
+         async interruptAgentIfRunning() {},
+         hasActiveAgentRun: () => false,
++        hasPendingPermission: () => false,
+       },
+       stt: null,
+       tts: null,
+@@ -82,6 +83,7 @@ test("speech replay requests run on the source's voice session and release it wh
+         },
+         async interruptAgentIfRunning() {},
+         hasActiveAgentRun: () => false,
++        hasPendingPermission: () => false,
+       },
+       stt: null,
+       tts: {
+diff --git a/packages/server/src/server/session/voice/index.ts b/packages/server/src/server/session/voice/index.ts
+index 01fe46885..922fa9c68 100644
+--- a/packages/server/src/server/session/voice/index.ts
++++ b/packages/server/src/server/session/voice/index.ts
+@@ -46,6 +46,15 @@ export class VoiceSessions {
+     );
+   }
+ 
++  /** Fork 0009: silence the assistant's speech for this agent; the agent is untouched. */
++  stopAssistantSpeechForAgent(agentId: string, reason: string): void {
++    for (const source of this.sources.values()) {
++      if (!source.closing && source.voice.isActiveForAgent(agentId)) {
++        source.voice.stopAssistantSpeech(reason);
++      }
++    }
++  }
++
+   handleMessage(message: VoiceMessage): Promise<void> {
+     const source = this.delivery.currentSource;
+     if (!source) throw new Error("Voice request has no source");
+@@ -111,7 +120,12 @@ export class VoiceSessions {
+       case "audio_played":
+         return voice.handleAudioPlayed(message.id);
+       case "set_voice_mode":
+-        return voice.handleSetVoiceMode(message.enabled, message.agentId, message.requestId);
++        return voice.handleSetVoiceMode(
++          message.enabled,
++          message.agentId,
++          message.requestId,
++          message.sendBehavior,
++        );
+       case "dictation_stream_start":
+         return voice.handleDictationStreamStart(message);
+       case "dictation_stream_chunk":
+@@ -138,6 +152,7 @@ function isVoiceOutput(message: SessionOutboundMessage): boolean {
+     case "audio_output":
+     case "transcription_result":
+     case "voice_input_state":
++    case "voice.spoken_input.queued":
+     case "set_voice_mode_response":
+     case "speech_replay_finished":
+     case "dictation_stream_ack":
+diff --git a/packages/server/src/server/session/voice/spoken-input-disposition.test.ts b/packages/server/src/server/session/voice/spoken-input-disposition.test.ts
+new file mode 100644
+index 000000000..e816ff065
+--- /dev/null
++++ b/packages/server/src/server/session/voice/spoken-input-disposition.test.ts
+@@ -0,0 +1,32 @@
++import { describe, expect, test } from "vitest";
++import { resolveSpokenInputDisposition } from "./spoken-input-disposition.js";
++
++describe("resolveSpokenInputDisposition", () => {
++  test.each([
++    // No behaviour from the app (pre-0009) and "interrupt" keep today's path.
++    [undefined, false, false, { kind: "interrupt" }],
++    [undefined, true, false, { kind: "interrupt" }],
++    [undefined, true, true, { kind: "interrupt" }],
++    ["interrupt", false, false, { kind: "interrupt" }],
++    ["interrupt", true, false, { kind: "interrupt" }],
++    ["interrupt", true, true, { kind: "interrupt" }],
++    // Steer folds into the running turn, or starts one when idle.
++    ["steer", false, false, { kind: "send", activeTurnBehavior: "steer" }],
++    ["steer", true, false, { kind: "send", activeTurnBehavior: "steer" }],
++    ["steer", true, true, { kind: "send", activeTurnBehavior: "steer" }],
++    // Queue holds the transcript while the agent works.
++    ["queue", false, false, { kind: "send", activeTurnBehavior: "steer" }],
++    ["queue", false, true, { kind: "send", activeTurnBehavior: "steer" }],
++    ["queue", true, false, { kind: "queue" }],
++    // A queued item would strand behind a parked permission, so it interrupts,
++    // matching resolveActiveSendBehavior in the composer.
++    ["queue", true, true, { kind: "send", activeTurnBehavior: "interrupt" }],
++  ] as const)(
++    "behaviour %s, run active %s, pending permission %s",
++    (sendBehavior, runActive, pendingPermission, expected) => {
++      expect(resolveSpokenInputDisposition({ sendBehavior, runActive, pendingPermission })).toEqual(
++        expected,
++      );
++    },
++  );
++});
+diff --git a/packages/server/src/server/session/voice/spoken-input-disposition.ts b/packages/server/src/server/session/voice/spoken-input-disposition.ts
+new file mode 100644
+index 000000000..eb00e86be
+--- /dev/null
++++ b/packages/server/src/server/session/voice/spoken-input-disposition.ts
+@@ -0,0 +1,31 @@
++import type { ActiveTurnBehavior, VoiceSendBehavior } from "../../messages.js";
++
++/**
++ * What a final voice transcript does.
++ * - `interrupt`: the pre-0009 path. Speech start already interrupted the agent; the transcript
++ *   replaces any run that started since.
++ * - `send`: dispatch now with the given active-turn behaviour.
++ * - `queue`: hand the transcript to the app's queue track.
++ */
++export type SpokenInputDisposition =
++  | { kind: "interrupt" }
++  | { kind: "send"; activeTurnBehavior: ActiveTurnBehavior }
++  | { kind: "queue" };
++
++export function resolveSpokenInputDisposition(input: {
++  sendBehavior: VoiceSendBehavior | undefined;
++  runActive: boolean;
++  pendingPermission: boolean;
++}): SpokenInputDisposition {
++  const { sendBehavior, runActive, pendingPermission } = input;
++  // COMPAT(voiceSendBehavior): apps before fork 0009 omit sendBehavior and keep today's
++  // interrupt; remove the undefined case after 2027-04-28.
++  if (sendBehavior === undefined || sendBehavior === "interrupt") return { kind: "interrupt" };
++  // Steer into an idle agent too: if it wakes in the same instant, the message folds into
++  // that turn instead of killing it.
++  if (sendBehavior === "steer" || !runActive) return { kind: "send", activeTurnBehavior: "steer" };
++  // A queued message would strand behind a parked permission. Typed input interrupts here
++  // (resolveActiveSendBehavior in the app's composer), and so does speech.
++  if (pendingPermission) return { kind: "send", activeTurnBehavior: "interrupt" };
++  return { kind: "queue" };
++}
+diff --git a/packages/server/src/server/session/voice/voice-session.test.ts b/packages/server/src/server/session/voice/voice-session.test.ts
+index d4f57171f..45d4e2919 100644
+--- a/packages/server/src/server/session/voice/voice-session.test.ts
++++ b/packages/server/src/server/session/voice/voice-session.test.ts
+@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
+ import pino from "pino";
+ import { describe, expect, test, vi } from "vitest";
+ 
+-import { VoiceSession, type VoiceSessionHost } from "./voice-session.js";
++import { VoiceSession, type SpokenInputOptions, type VoiceSessionHost } from "./voice-session.js";
+ import type { ManagedAgent } from "../../agent/agent-manager.js";
+ import type { SessionOutboundMessage } from "../../messages.js";
+ import type {
+@@ -57,29 +57,46 @@ class FakeVoiceSttSession extends EventEmitter implements StreamingTranscription
+   }
+ }
+ 
++interface SpokenInputCall {
++  agentId: string;
++  text: string;
++  options?: SpokenInputOptions;
++}
++
+ interface FakeVoiceHost extends VoiceSessionHost {
+   readonly emitted: SessionOutboundMessage[];
+-  readonly spokenInput: Array<{ agentId: string; text: string }>;
++  readonly spokenInput: SpokenInputCall[];
++  readonly interrupted: string[];
++  runActive: boolean;
++  pendingPermission: boolean;
+ }
+ 
+ function createFakeHost(): FakeVoiceHost {
+   const emitted: SessionOutboundMessage[] = [];
+-  const spokenInput: Array<{ agentId: string; text: string }> = [];
+-  return {
++  const spokenInput: SpokenInputCall[] = [];
++  const interrupted: string[] = [];
++  const host: FakeVoiceHost = {
+     emitted,
+     spokenInput,
++    interrupted,
++    runActive: false,
++    pendingPermission: false,
+     emit: (msg) => {
+       emitted.push(msg);
+     },
+     loadAgent: async (agentId) =>
+       ({ id: agentId, config: { systemPrompt: undefined } }) as unknown as ManagedAgent,
+     reloadAgentSession: async (agentId) => ({ id: agentId }) as unknown as ManagedAgent,
+-    sendSpokenInput: async (agentId, text) => {
+-      spokenInput.push({ agentId, text });
++    sendSpokenInput: async (agentId, text, options) => {
++      spokenInput.push({ agentId, text, ...(options ? { options } : {}) });
+     },
+-    interruptAgentIfRunning: async () => {},
+-    hasActiveAgentRun: () => false,
++    interruptAgentIfRunning: async (agentId) => {
++      interrupted.push(agentId);
++    },
++    hasActiveAgentRun: () => host.runActive,
++    hasPendingPermission: () => host.pendingPermission,
+   };
++  return host;
+ }
+ 
+ function createVoiceSession(tts: TextToSpeechProvider | null = null) {
+@@ -413,3 +430,206 @@ describe("VoiceSession speech replay (fork)", () => {
+     await voiceSession.cleanup();
+   });
+ });
++
++describe("VoiceSession send behaviour (fork 0009)", () => {
++  const sentenceTts: TextToSpeechProvider = {
++    async synthesizeSpeech() {
++      return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
++    },
++  };
++
++  async function speakFinalTranscript(
++    detector: FakeVoiceTurnDetectionSession,
++    sttSession: FakeVoiceSttSession,
++    transcript: string,
++  ): Promise<void> {
++    detector.emit("speech_started");
++    await settle();
++    detector.emit("speech_stopped");
++    await settle();
++    sttSession.emitCommitted({ segmentId: "segment-1", previousSegmentId: null });
++    sttSession.emitTranscript({
++      segmentId: "segment-1",
++      transcript,
++      isFinal: true,
++      isLowConfidence: false,
++    });
++    await settle();
++  }
++
++  function audioIds(host: FakeVoiceHost): string[] {
++    return host.emitted.flatMap((m) => (m.type === "audio_output" ? [m.payload.id] : []));
++  }
++
++  function queuedEvents(host: FakeVoiceHost) {
++    return host.emitted.filter((m) => m.type === "voice.spoken_input.queued");
++  }
++
++  test.each(["steer", "queue"] as const)(
++    "%s: speech start keeps the agent running and its speech playing",
++    async (sendBehavior) => {
++      const { voiceSession, detector, host, speak } = createVoiceSession(sentenceTts);
++      host.runActive = true;
++      await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, sendBehavior);
++      const playback = speak({ text: "First sentence. Second sentence." });
++      try {
++        await waitForAudioOutput(host);
++        detector.emit("speech_started");
++        await settle();
++        expect(host.emitted).toContainEqual({
++          type: "voice_input_state",
++          payload: { isSpeaking: true },
++        });
++        expect(host.interrupted).toEqual([]);
++
++        voiceSession.handleAudioPlayed(audioIds(host)[0]!);
++        await vi.waitFor(() => expect(audioIds(host)).toHaveLength(2));
++        voiceSession.handleAudioPlayed(audioIds(host)[1]!);
++        await playback;
++      } finally {
++        await voiceSession.cleanup();
++        await playback.catch(() => {});
++      }
++    },
++  );
++
++  test("steer: a final transcript folds into the running turn", async () => {
++    const { voiceSession, detector, sttSession, host } = createVoiceSession();
++    host.runActive = true;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "steer");
++
++    await speakFinalTranscript(detector, sttSession, "also check the logs");
++
++    expect(host.spokenInput).toEqual([
++      {
++        agentId: VOICE_AGENT_ID,
++        text: "also check the logs",
++        options: { activeTurnBehavior: "steer" },
++      },
++    ]);
++    expect(host.interrupted).toEqual([]);
++    expect(queuedEvents(host)).toEqual([]);
++    await voiceSession.cleanup();
++  });
++
++  test("queue: a final transcript while the agent works goes to the app's queue", async () => {
++    const { voiceSession, detector, sttSession, host } = createVoiceSession();
++    host.runActive = true;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++
++    await speakFinalTranscript(detector, sttSession, "then run the tests");
++
++    expect(host.spokenInput).toEqual([]);
++    expect(host.interrupted).toEqual([]);
++    const queued = queuedEvents(host);
++    expect(queued).toHaveLength(1);
++    expect(queued[0]).toEqual({
++      type: "voice.spoken_input.queued",
++      payload: {
++        agentId: VOICE_AGENT_ID,
++        text: "then run the tests",
++        transcriptId: expect.any(String),
++      },
++    });
++    await voiceSession.cleanup();
++  });
++
++  test("queue: a final transcript does not cut the agent's speech", async () => {
++    const { voiceSession, detector, sttSession, host, speak } = createVoiceSession(sentenceTts);
++    host.runActive = true;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++    const playback = speak({ text: "First sentence. Second sentence." });
++    try {
++      await waitForAudioOutput(host);
++      await speakFinalTranscript(detector, sttSession, "then run the tests");
++      voiceSession.handleAudioPlayed(audioIds(host)[0]!);
++      await vi.waitFor(() => expect(audioIds(host)).toHaveLength(2));
++      voiceSession.handleAudioPlayed(audioIds(host)[1]!);
++      await playback;
++    } finally {
++      await voiceSession.cleanup();
++      await playback.catch(() => {});
++    }
++  });
++
++  test("queue: an idle agent gets the transcript directly as a steer", async () => {
++    const { voiceSession, detector, sttSession, host } = createVoiceSession();
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++
++    await speakFinalTranscript(detector, sttSession, "start the build");
++
++    expect(host.spokenInput).toEqual([
++      {
++        agentId: VOICE_AGENT_ID,
++        text: "start the build",
++        options: { activeTurnBehavior: "steer" },
++      },
++    ]);
++    expect(queuedEvents(host)).toEqual([]);
++    await voiceSession.cleanup();
++  });
++
++  test("queue: a pending permission sends the transcript as an interrupt", async () => {
++    const { voiceSession, detector, sttSession, host } = createVoiceSession();
++    host.runActive = true;
++    host.pendingPermission = true;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++
++    await speakFinalTranscript(detector, sttSession, "no, do it differently");
++
++    expect(host.spokenInput).toEqual([
++      {
++        agentId: VOICE_AGENT_ID,
++        text: "no, do it differently",
++        options: { activeTurnBehavior: "interrupt" },
++      },
++    ]);
++    expect(queuedEvents(host)).toEqual([]);
++    await voiceSession.cleanup();
++  });
++
++  test("re-sending set_voice_mode for the same agent updates the behaviour", async () => {
++    const { voiceSession, detector, sttSession, host } = createVoiceSession();
++    host.runActive = true;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "steer");
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++
++    await speakFinalTranscript(detector, sttSession, "wait for me");
++
++    expect(host.spokenInput).toEqual([]);
++    expect(queuedEvents(host)).toHaveLength(1);
++    await voiceSession.cleanup();
++  });
++
++  test("speech during a voice-mode replay ducks instead of cancelling it", async () => {
++    const { voiceSession, detector, host } = createVoiceSession(sentenceTts);
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++    const replay = voiceSession.handleSpeechReplay("r5", "A long reply.");
++    await waitForAudioOutput(host);
++    detector.emit("speech_started");
++    await settle();
++    voiceSession.handleAudioPlayed(audioIds(host)[0]!);
++    await replay;
++    expect(host.emitted.filter((m) => m.type === "speech_replay_finished")).toEqual([
++      { type: "speech_replay_finished", payload: { requestId: "r5", status: "completed" } },
++    ]);
++    await voiceSession.cleanup();
++  });
++
++  test("stopAssistantSpeech silences playback without touching the agent", async () => {
++    const { voiceSession, host, speak } = createVoiceSession(sentenceTts);
++    host.runActive = true;
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID, undefined, "queue");
++    const playback = speak({ text: "First sentence. Second sentence. Third sentence." });
++    try {
++      await waitForAudioOutput(host);
++      voiceSession.stopAssistantSpeech("turn canceled");
++      await playback;
++      expect(audioIds(host)).toHaveLength(1);
++      expect(host.interrupted).toEqual([]);
++    } finally {
++      await voiceSession.cleanup();
++      await playback.catch(() => {});
++    }
++  });
++});
+diff --git a/packages/server/src/server/session/voice/voice-session.ts b/packages/server/src/server/session/voice/voice-session.ts
+index 3fb06de60..080a5bcf1 100644
+--- a/packages/server/src/server/session/voice/voice-session.ts
++++ b/packages/server/src/server/session/voice/voice-session.ts
+@@ -2,7 +2,12 @@ import { v4 as uuidv4 } from "uuid";
+ import { z } from "zod";
+ import type pino from "pino";
+ import { getErrorMessage } from "@getpaseo/protocol/error-utils";
+-import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
++import type {
++  ActiveTurnBehavior,
++  SessionInboundMessage,
++  SessionOutboundMessage,
++  VoiceSendBehavior,
++} from "../../messages.js";
+ import { TTSManager } from "../../agent/tts-manager.js";
+ import { STTManager } from "../../agent/stt-manager.js";
+ import type { SpeechToTextProvider, TextToSpeechProvider } from "../../speech/speech-provider.js";
+@@ -22,6 +27,10 @@ import type { LocalSpeechModelId } from "../../speech/providers/local/models.js"
+ import { toResolver, type Resolvable } from "../../speech/provider-resolver.js";
+ import { sanitizeTextForSpeech } from "../../speech/speech-replay-text.js";
+ import type { SpeechReadinessSnapshot, SpeechReadinessState } from "../../speech/speech-runtime.js";
++import {
++  resolveSpokenInputDisposition,
++  type SpokenInputDisposition,
++} from "./spoken-input-disposition.js";
+ 
+ const PCM_SAMPLE_RATE = 16000;
+ const PCM_CHANNELS = 1;
+@@ -114,6 +123,10 @@ function convertPCMToWavBuffer(
+   return wavBuffer;
+ }
+ 
++export interface SpokenInputOptions {
++  activeTurnBehavior?: ActiveTurnBehavior;
++}
++
+ /**
+  * The agent-facing operations VoiceSession needs from the session that owns it.
+  * VoiceSession owns all voice/audio state; it reaches back through this narrow
+@@ -127,9 +140,10 @@ export interface VoiceSessionHost {
+     agentId: string,
+     overrides: Partial<AgentSessionConfig>,
+   ): Promise<ManagedAgent>;
+-  sendSpokenInput(agentId: string, text: string): Promise<void>;
++  sendSpokenInput(agentId: string, text: string, options?: SpokenInputOptions): Promise<void>;
+   interruptAgentIfRunning(agentId: string): Promise<void>;
+   hasActiveAgentRun(agentId: string | null): boolean;
++  hasPendingPermission(agentId: string): boolean;
+ }
+ 
+ export interface VoiceSessionOptions {
+@@ -177,6 +191,8 @@ export class VoiceSession {
+ 
+   private isVoiceMode = false;
+   private speechInProgress = false;
++  // Fork 0009: the app's "Default send" setting. Undefined means an app before 0009.
++  private sendBehavior: VoiceSendBehavior | undefined;
+ 
+   private readonly dictationStreamManager: DictationStreamManager;
+   private readonly resolveVoiceTurnDetection: () => TurnDetectionProvider | null;
+@@ -354,13 +370,24 @@ export class VoiceSession {
+   /**
+    * Handle voice mode toggle
+    */
+-  async handleSetVoiceMode(enabled: boolean, agentId?: string, requestId?: string): Promise<void> {
++  async handleSetVoiceMode(
++    enabled: boolean,
++    agentId?: string,
++    requestId?: string,
++    sendBehavior?: VoiceSendBehavior,
++  ): Promise<void> {
+     const startedAt = Date.now();
+     try {
+       this.sessionLogger.info(
+-        { enabled, requestedAgentId: agentId ?? null, requestId: requestId ?? null },
++        {
++          enabled,
++          requestedAgentId: agentId ?? null,
++          requestId: requestId ?? null,
++          sendBehavior: sendBehavior ?? null,
++        },
+         "set_voice_mode started",
+       );
++      this.sendBehavior = enabled ? sendBehavior : undefined;
+       if (enabled) {
+         const unavailable = this.resolveVoiceFeatureUnavailableContext("voice_mode");
+         if (unavailable) {
+@@ -994,8 +1021,7 @@ export class VoiceSession {
+       return;
+     }
+ 
+-    // Has content - abort any in-progress stream now
+-    this.createAbortController();
++    const disposition = this.resolveTranscriptDisposition();
+ 
+     if (result.debugRecordingPath) {
+       this.emit({
+@@ -1049,10 +1075,58 @@ export class VoiceSession {
+       return;
+     }
+ 
+-    await this.host.sendSpokenInput(agentId, result.text);
++    await this.deliverSpokenInput(agentId, result, disposition);
+     await this.flushPendingAudioSegments("transcription complete");
+   }
+ 
++  /**
++   * Decide what a final transcript does, and drop the assistant's current speech unless the
++   * running turn, and its speech, carries on (a steer into a running turn, or a queued item).
++   * Anything that replaces the turn, or starts a new one, drops the stale reply tail.
++   */
++  private resolveTranscriptDisposition(): SpokenInputDisposition {
++    const agentId = this.isVoiceMode ? this.voiceModeAgentId : null;
++    const runActive = this.host.hasActiveAgentRun(agentId);
++    const disposition = resolveSpokenInputDisposition({
++      sendBehavior: this.sendBehavior,
++      runActive,
++      pendingPermission: agentId ? this.host.hasPendingPermission(agentId) : false,
++    });
++    const keepsCurrentSpeech =
++      disposition.kind === "queue" ||
++      (disposition.kind === "send" && disposition.activeTurnBehavior === "steer" && runActive);
++    if (!keepsCurrentSpeech) {
++      this.createAbortController();
++      if (disposition.kind === "send") this.cancelSpeechReplay(undefined, "new spoken turn");
++    }
++    return disposition;
++  }
++
++  private async deliverSpokenInput(
++    agentId: string,
++    result: VoiceTranscriptionResultPayload,
++    disposition: SpokenInputDisposition,
++  ): Promise<void> {
++    if (disposition.kind === "queue") {
++      this.sessionLogger.info(
++        { agentId, requestId: result.requestId },
++        "Queueing spoken input while the agent works",
++      );
++      this.emit({
++        type: "voice.spoken_input.queued",
++        payload: { agentId, text: result.text.trim(), transcriptId: result.requestId },
++      });
++      return;
++    }
++    if (disposition.kind === "send") {
++      await this.host.sendSpokenInput(agentId, result.text, {
++        activeTurnBehavior: disposition.activeTurnBehavior,
++      });
++      return;
++    }
++    await this.host.sendSpokenInput(agentId, result.text);
++  }
++
+   private registerVoiceBridgeForAgent(agentId: string): void {
+     this.registerVoiceSpeakHandler?.(agentId, async ({ text, signal }) => {
+       this.sessionLogger.info(
+@@ -1130,6 +1204,18 @@ export class VoiceSession {
+     }
+   }
+ 
++  /**
++   * Fork 0009: stop the assistant's speech (voice `speak` playback and any replay) without
++   * touching the agent. Used when the agent's turn is canceled, so an interrupt silences
++   * the old reply even when the provider does not abort the speak tool call.
++   */
++  stopAssistantSpeech(reason: string): void {
++    this.sessionLogger.debug({ reason }, "Stopping assistant speech");
++    this.createAbortController();
++    this.cancelSpeechReplay(undefined, reason);
++    this.ttsManager.cancelPendingPlaybacks(reason);
++  }
++
+   /** Stop the replay with this id, or any replay when no id is given. Never touches the agent. */
+   cancelSpeechReplay(requestId?: string, reason = "client cancel"): void {
+     const replay = this.speechReplay;
+@@ -1193,13 +1279,24 @@ export class VoiceSession {
+   }
+ 
+   /**
+-   * Mark speech detection start and abort any active playback/agent run.
++   * Mark speech detection start. With the interrupt behaviour, abort any active
++   * playback and agent run. With steer or queue, the agent keeps working and its
++   * speech keeps playing; the client ducks it.
+    */
+   private async handleVoiceSpeechStart(): Promise<void> {
+     if (this.speechInProgress) {
+       return;
+     }
+ 
++    if (this.sendBehavior === "steer" || this.sendBehavior === "queue") {
++      this.speechInProgress = true;
++      this.sessionLogger.debug(
++        { sendBehavior: this.sendBehavior },
++        "Voice speech detected – agent keeps running, client ducks playback",
++      );
++      return;
++    }
++
+     const chunkReceivedAt = Date.now();
+     const phaseBeforeAbort = this.processingPhase;
+     const hadActiveStream = this.host.hasActiveAgentRun(this.voiceModeAgentId);
+diff --git a/packages/server/src/server/websocket-server.ts b/packages/server/src/server/websocket-server.ts
+index aeda66944..e64d64be7 100644
+--- a/packages/server/src/server/websocket-server.ts
++++ b/packages/server/src/server/websocket-server.ts
+@@ -1969,6 +1969,8 @@ export class VoiceAssistantWebSocketServer {
+         providersSnapshotCwd: true,
+         // Fork: assistant-turn replay through the daemon's TTS.
+         speechReplay: true,
++        // Fork 0009: voice follows the app's "Default send" setting.
++        voiceSendBehavior: true,
+         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
+         // feature gate and legacy fallback after 2027-01-17 once the supported
+         // daemon floor is >= v0.2.0.
+-- 
+2.52.0
+
