@@ -1,0 +1,1147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Schedule cadence — design mock (PASEO-20)</title>
+<style>
+/* Paseo dark tokens, copied from packages/app/src/styles/theme.ts (paseoDarkColors) */
+:root {
+  --surface0: #181B1A;
+  --surface1: #1E2120;
+  --surface2: #272A29;
+  --surface3: #434645;
+  --surface4: #595B5B;
+  --sidebar: #141716;
+  --fg: #fafafa;
+  --muted: #A1A5A4;
+  --xmuted: #717574;
+  --border: #252B2A;
+  --border-accent: #2F3534;
+  --accent: #20744A;
+  --accent-bright: #7ccba0;
+  --destructive: #c64f43;
+  --red300: #fca5a5;
+  --warning: #c09664;
+  --success: #6cb17b;
+  --hl: rgba(255,255,255,0.08);
+  --ring: #d4d4d8;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --fs-base: 14px;
+  --fs-sm: 12px;
+  --ctl: 32px;           /* control size sm (desktop) */
+  --gutter: 24px;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #0f1110; color: var(--fg); font: 400 var(--fs-base)/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ------------------------------------------------------------------ mock chrome (not product UI) */
+.mockbar {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  padding: 8px 16px; background: #0b0d0c; border-bottom: 1px dashed #3a403e;
+  font-size: 12px; color: var(--muted);
+}
+.mockbar strong { color: var(--fg); font-weight: 500; }
+.mockbar label { display: inline-flex; align-items: center; gap: 6px; }
+.mockbar select { background: #151817; border: 1px solid #333a38; border-radius: 6px; padding: 4px 6px; font-size: 12px; }
+.mockbar .seg { display: inline-flex; border: 1px solid #333a38; border-radius: 6px; overflow: hidden; }
+.mockbar .seg button { background: transparent; border: 0; padding: 4px 8px; font-size: 12px; color: var(--muted); }
+.mockbar .seg button[aria-pressed="true"] { background: #2a2f2d; color: var(--fg); }
+.mockbar .clock { margin-left: auto; font-variant-numeric: tabular-nums; }
+.mockbar a { color: var(--accent-bright); }
+
+/* ------------------------------------------------------------------ stage + device frames */
+.stage { min-height: calc(100vh - 41px); display: flex; align-items: center; justify-content: center; padding: 24px; }
+.device { position: relative; width: 100%; max-width: 1180px; height: 820px; background: var(--surface0); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+body[data-frame="mobile"] .device { width: 390px; height: 844px; border-radius: 44px; border: 10px solid #050606; box-shadow: 0 0 0 1px #2a2f2d; }
+@media (max-width: 640px) {
+  .mockbar { position: static; }
+  .mockbar .clock { margin-left: 0; }
+  .stage { padding: 0; min-height: 100dvh; }
+  body[data-frame] .device { width: 100%; max-width: none; height: 100dvh; border: 0; border-radius: 0; box-shadow: none; }
+}
+
+/* faux app behind the sheet */
+.app { position: absolute; inset: 0; display: flex; }
+.app-side { width: 240px; background: var(--sidebar); border-right: 1px solid var(--border); padding: 16px 12px; display: flex; flex-direction: column; gap: 4px; color: var(--muted); }
+.app-side .item { padding: 6px 10px; border-radius: 8px; }
+.app-side .item.sel { background: var(--surface2); color: var(--fg); }
+.app-main { flex: 1; padding: 20px 32px; min-width: 0; }
+.app-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.app-head h1 { font-size: var(--fs-base); font-weight: 300; margin: 0; }
+.sched-list { max-width: 720px; border: 1px solid var(--border); border-radius: 12px; }
+.sched-row { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.sched-row + .sched-row { border-top: 1px solid var(--border); }
+.sched-row .t { flex: 1; min-width: 0; }
+.sched-row .t div:last-child { color: var(--muted); font-size: var(--fs-sm); }
+.sched-row .next { color: var(--muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.sched-row.new { animation: flash 1.6s ease-out; }
+@keyframes flash { from { background: rgba(124,203,160,0.10); } to { background: transparent; } }
+body[data-frame="mobile"] .app-side { display: none; }
+body[data-frame="mobile"] .app-main { padding: 56px 16px 16px; }
+@media (max-width: 640px) { .app-side { display: none; } .app-main { padding: 20px 16px; } }
+
+.backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.55); }
+
+/* ------------------------------------------------------------------ sheet (AdaptiveModalSheet) */
+.sheet {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(600px, calc(100% - 48px)); max-height: calc(100% - 48px);
+  display: flex; flex-direction: column;
+  background: var(--surface1); border: 1px solid var(--border-accent); border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.45);
+}
+.compact .sheet {
+  left: 0; right: 0; top: auto; bottom: 0; transform: none; width: 100%;
+  max-height: calc(100% - 44px); border-radius: 16px 16px 0 0; border-bottom: 0;
+}
+.compact .sheet::before { content: ""; display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--surface3); margin: 8px auto 0; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; padding: 16px var(--gutter); border-bottom: 1px solid var(--border); }
+.sheet-head h2 { margin: 0; font-size: var(--fs-base); font-weight: 500; }
+.sheet-body { flex: 1; overflow-y: auto; padding: 20px var(--gutter) 24px; display: flex; flex-direction: column; gap: 20px; overscroll-behavior: contain; }
+.sheet-foot { display: flex; gap: 12px; padding: 16px var(--gutter); border-top: 1px solid var(--border); }
+.compact .sheet-foot { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+.sheet-foot .btn { flex: 1; }
+.compact { --ctl: 44px; --gutter: 16px; }
+
+/* ------------------------------------------------------------------ form kit */
+.field { display: flex; flex-direction: column; gap: 8px; min-width: 0; border: 0; padding: 0; margin: 0; }
+.field > .label, .field > legend { font-weight: 500; color: var(--muted); padding: 0; }
+.field > legend { margin-bottom: 0; float: left; width: 100%; }
+.field > legend + * { clear: both; }
+.input, .select, textarea.input {
+  width: 100%; height: var(--ctl); padding: 0 12px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 8px; color: var(--fg); outline: none;
+}
+textarea.input { height: 88px; padding: 10px 12px; resize: vertical; }
+.input::placeholder, textarea::placeholder { color: var(--muted); }
+.input:focus, .select:focus, .tz-trigger:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); outline: none; }
+.input.mono { font-family: var(--mono); letter-spacing: 0.02em; }
+.input[aria-invalid="true"] { border-color: #6b3a36; }
+.select { appearance: none; padding-right: 32px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23A1A5A4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; cursor: pointer; }
+.select.auto { width: auto; }
+input[type="time"].input, input[type="date"].input { font-variant-numeric: tabular-nums; }
+.hint { font-size: var(--fs-sm); color: var(--muted); margin: 0; }
+.err { font-size: var(--fs-sm); color: var(--red300); margin: 0; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.row > .lead { color: var(--muted); min-width: 0; }
+.disabled-scope { opacity: 0.5; pointer-events: none; }
+
+/* buttons */
+.btn { height: 44px; padding: 0 16px; border-radius: 999px; border: 0; background: var(--surface3); color: var(--fg); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.outline { background: transparent; border: 1px solid var(--border-accent); height: var(--ctl); }
+.btn.ghost { background: transparent; color: var(--muted); height: var(--ctl); padding: 0 8px; border-radius: 8px; }
+.btn.ghost:hover, .icon-btn:hover { background: var(--hl); color: var(--fg); }
+.btn[disabled], .btn[aria-disabled="true"] { opacity: 0.5; cursor: default; }
+.btn.small { height: 32px; font-size: var(--fs-base); }
+.icon-btn { display: inline-grid; place-items: center; width: var(--ctl); height: var(--ctl); border: 0; background: transparent; color: var(--muted); border-radius: 8px; }
+.icon-btn svg { width: 16px; height: 16px; }
+
+/* segmented control */
+.segmented { display: flex; padding: 2px; gap: 2px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; }
+.segmented button { flex: 1; min-width: 0; height: calc(var(--ctl) - 6px); border: 0; border-radius: 6px; background: transparent; color: var(--muted); padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.segmented button:hover { color: var(--fg); }
+.segmented button[aria-checked="true"] { background: var(--surface3); color: var(--fg); }
+
+/* day chips */
+.days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.day { height: var(--ctl); border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--muted); }
+.day[aria-pressed="true"] { background: var(--surface3); border-color: var(--surface4); color: var(--fg); }
+.quick { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* time list */
+.times { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.time { display: inline-flex; align-items: center; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; height: var(--ctl); }
+.time:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.time input { background: transparent; border: 0; height: 100%; padding: 0 4px 0 12px; width: 118px; outline: none; font-variant-numeric: tabular-nums; }
+.time .icon-btn { width: 28px; height: 28px; margin-right: 2px; }
+.compact .time .icon-btn { width: 40px; height: 40px; }
+
+/* radio rows for monthly */
+.choice { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-height: var(--ctl); }
+.choice input[type="radio"] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+.choice > label { color: var(--fg); }
+.choice .select { width: auto; min-width: 84px; }
+
+/* toggle switch */
+.switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: var(--ctl); }
+.switch { position: relative; width: 36px; height: 20px; border-radius: 10px; border: 0; background: var(--surface3); padding: 0; flex: none; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--fg); transition: transform .15s; }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { transform: translateX(16px); }
+
+/* card (settingsStyles.card) */
+.card { border: 1px solid var(--border); border-radius: 12px; background: var(--surface0); }
+.card-row { padding: 12px 16px; }
+.card-row + .card-row { border-top: 1px solid var(--border); }
+
+/* cadence block */
+.cadence-panel { display: flex; flex-direction: column; gap: 12px; }
+.subfield { display: flex; flex-direction: column; gap: 6px; }
+.subfield > .sublabel { font-size: var(--fs-sm); color: var(--muted); }
+.cron-legend { display: flex; gap: 0; font-family: var(--mono); font-size: 11px; color: var(--xmuted); padding-left: 13px; }
+.cron-legend span { width: 9ch; }
+
+/* tz combobox */
+.tz { position: relative; }
+.tz-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; height: var(--ctl); padding: 0 10px 0 12px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; text-align: left; }
+.tz-trigger .off { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tz-pop { position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px); background: var(--surface2); border: 1px solid var(--border-accent); border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.5); padding: 6px; }
+.tz-pop .input { height: 32px; background: var(--surface1); margin-bottom: 4px; }
+.tz-list { list-style: none; margin: 0; padding: 0; max-height: 220px; overflow: auto; }
+.tz-list li { display: flex; justify-content: space-between; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+.tz-list li .off { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tz-list li[aria-selected="true"] { color: var(--fg); }
+.tz-list li.active { background: var(--hl); }
+.tz-list li .chk { width: 14px; color: var(--accent-bright); }
+.tz-list .empty { color: var(--muted); cursor: default; }
+
+/* preview ("When it runs") */
+.preview { overflow: hidden; }
+.pv-head { padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+.pv-title { font-size: var(--fs-base); color: var(--fg); }
+.pv-sub { font-size: var(--fs-sm); color: var(--muted); font-variant-numeric: tabular-nums; }
+.pv-sub.bad { color: var(--red300); }
+.strip { position: relative; display: grid; grid-template-columns: 36px repeat(14, 1fr); gap: 0 3px; padding: 4px 16px 10px; }
+.strip .axis { position: relative; height: 72px; font-size: 10px; color: var(--xmuted); }
+.strip .axis span { position: absolute; right: 6px; transform: translateY(-50%); }
+.strip .col { position: relative; height: 72px; background: rgba(255,255,255,0.025); border-radius: 3px; }
+.strip .col.past-end { background: repeating-linear-gradient(135deg, transparent 0 3px, rgba(255,255,255,0.03) 3px 6px); }
+.strip .mark { position: absolute; left: 2px; right: 2px; height: 2px; border-radius: 1px; background: var(--muted); }
+.strip .mark.next { background: var(--accent-bright); height: 3px; }
+.strip .mark.warn { background: var(--warning); }
+.strip .mark.skip { background: transparent; border: 1px dashed var(--warning); height: 4px; }
+.strip .grid { position: absolute; left: 0; right: 0; height: 1px; background: rgba(255,255,255,0.04); }
+.strip .dl { font-size: 10px; color: var(--xmuted); text-align: center; padding-top: 4px; line-height: 1.2; }
+.strip .dl.today { color: var(--fg); }
+.strip .dl:first-child { visibility: hidden; }
+.runs { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--border); }
+.runs li { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: baseline; padding: 9px 16px; font-variant-numeric: tabular-nums; }
+.runs li + li { border-top: 1px solid var(--border); }
+.runs .d { color: var(--fg); }
+.runs .tm { color: var(--fg); text-align: right; }
+.runs .rel { color: var(--muted); font-size: var(--fs-sm); min-width: 76px; text-align: right; }
+.runs li.note { display: block; padding-top: 0; border-top: 0; font-size: var(--fs-sm); color: var(--warning); }
+.runs li.skipped .d, .runs li.skipped .tm { color: var(--muted); text-decoration: line-through; }
+.runs li.last .rel { color: var(--fg); }
+.runs li.more { display: flex; justify-content: center; padding: 4px; }
+.pv-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 16px; border-top: 1px solid var(--border); }
+.pv-foot code { font-family: var(--mono); font-size: var(--fs-sm); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skeleton { background: var(--surface2); border-radius: 6px; animation: pulse 1.4s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .5; } }
+@media (prefers-reduced-motion: reduce) { .skeleton, .sched-row.new { animation: none; } .switch::after { transition: none; } }
+
+/* alert */
+.alert { display: grid; grid-template-columns: 16px 1fr; gap: 4px 10px; padding: 12px 14px; border: 1px solid; border-radius: 10px; }
+.alert svg { width: 16px; height: 16px; margin-top: 2px; }
+.alert .at { font-weight: 500; }
+.alert .ad { grid-column: 2; color: var(--muted); font-size: var(--fs-sm); }
+.alert .aa { grid-column: 2; margin-top: 6px; }
+.alert.warning { border-color: rgba(192,150,100,0.4); } .alert.warning .at, .alert.warning svg { color: var(--warning); }
+.alert.error { border-color: rgba(198,79,67,0.45); } .alert.error .at, .alert.error svg { color: var(--red300); }
+
+/* capability annotations (mock-only) */
+.cap { display: none; font: 500 10px/1 var(--font); padding: 3px 6px; border-radius: 4px; border: 1px dashed; vertical-align: middle; margin-left: 6px; white-space: nowrap; }
+body[data-annotate="on"] .cap { display: inline-block; }
+.cap.today { color: #9fb6ab; border-color: #4b5a54; }
+.cap.ready { color: #8ab4e8; border-color: #3e5677; }
+.cap.needs { color: #e0be6e; border-color: #6e5a32; }
+.label-line { display: flex; align-items: center; flex-wrap: wrap; gap: 0; }
+
+.closed-note { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--surface2); border: 1px solid var(--border-accent); border-radius: 999px; padding: 8px 8px 8px 16px; display: flex; gap: 12px; align-items: center; color: var(--muted); white-space: nowrap; }
+</style>
+</head>
+<body data-frame="desktop" data-annotate="off">
+
+<div class="mockbar" role="region" aria-label="Mock controls">
+  <strong>Mock</strong>
+  <label>State
+    <select id="m-state">
+      <option value="blank">New schedule, blank</option>
+      <option value="daily">Daily, several times</option>
+      <option value="interval">Interval in working hours</option>
+      <option value="weekly">Weekly days</option>
+      <option value="no-days">Weekly, no days picked</option>
+      <option value="nth">Monthly, 2nd Tuesday</option>
+      <option value="month-edge">Monthly, day 31</option>
+      <option value="cron-invalid">Cron, invalid</option>
+      <option value="never">Cron, never runs (Feb 30)</option>
+      <option value="custom">Edit, custom cron</option>
+      <option value="ends">Ends after 4 runs</option>
+      <option value="dst-fall">DST, clocks fall back</option>
+      <option value="dst-spring">DST, clocks spring forward</option>
+      <option value="loading">Edit, loading</option>
+      <option value="offline">Host offline</option>
+      <option value="saving">Saving</option>
+      <option value="error">Save failed</option>
+    </select>
+  </label>
+  <span class="seg" role="group" aria-label="Frame">
+    <button data-frame="auto" aria-pressed="false">Auto</button><button data-frame="desktop" aria-pressed="true">Desktop</button><button data-frame="mobile" aria-pressed="false">Mobile</button>
+  </span>
+  <span class="seg" role="group" aria-label="Scope">
+    <button data-phase="1" aria-pressed="true">Phase 1, current backend</button><button data-phase="2" aria-pressed="false">Phase 2, proposed</button>
+  </span>
+  <label><input type="checkbox" id="m-annotate"> Capability tags</label>
+  <span class="clock" id="m-clock"></span>
+  <a href="./notes.md">Notes</a>
+</div>
+
+<div class="stage">
+  <div class="device" id="device">
+    <div class="app" aria-hidden="true" id="app">
+      <nav class="app-side"><div class="item">Workspaces</div><div class="item">Projects</div><div class="item sel">Schedules</div><div class="item">Sessions</div><div class="item">Settings</div></nav>
+      <div class="app-main">
+        <div class="app-head"><h1>Schedules</h1><button class="btn outline small" id="reopen-top" tabindex="-1">New schedule</button></div>
+        <div class="sched-list" id="sched-list">
+          <div class="sched-row"><div class="t"><div>Nightly dependency audit</div><div>Every day at 2:00 AM · macbook-pro</div></div><div class="next">in 15h</div></div>
+          <div class="sched-row"><div class="t"><div>Triage new issues</div><div>Every hour · studio-mini</div></div><div class="next">in 45m</div></div>
+          <div class="sched-row"><div class="t"><div>Weekly changelog draft</div><div>Mondays at 9:00 AM · macbook-pro</div></div><div class="next">in 4d</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="backdrop" id="backdrop"></div>
+
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <header class="sheet-head">
+        <h2 id="sheet-title">New schedule</h2>
+        <button class="icon-btn" id="close" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </header>
+
+      <div class="sheet-body" id="body">
+        <div class="field"><label class="label" for="f-name">Name</label><input class="input" id="f-name" placeholder="Optional" autocomplete="off"></div>
+        <div class="field"><label class="label" for="f-prompt">Prompt</label><textarea class="input" id="f-prompt" placeholder="What should the agent do each run?"></textarea></div>
+        <div class="field"><label class="label" for="f-host">Host</label>
+          <select class="select" id="f-host">
+            <option value="">Select host</option>
+            <option value="macbook-pro">macbook-pro</option>
+            <option value="studio-mini">studio-mini (offline)</option>
+          </select>
+        </div>
+
+        <!-- ============================== CADENCE ============================== -->
+        <fieldset class="field" id="cadence">
+          <legend class="label-line">Cadence<span class="cap today">Mode picker replaces 5 presets</span></legend>
+
+          <div id="cad-loading" hidden>
+            <div class="skeleton" style="height:var(--ctl)"></div>
+            <div class="skeleton" style="height:var(--ctl);margin-top:12px;width:60%"></div>
+          </div>
+
+          <div id="cad-live" class="cadence-panel">
+            <div class="segmented" role="radiogroup" aria-label="Repeat" id="modes">
+              <button role="radio" data-mode="interval">Interval</button>
+              <button role="radio" data-mode="daily">Daily</button>
+              <button role="radio" data-mode="weekly">Weekly</button>
+              <button role="radio" data-mode="monthly">Monthly</button>
+              <button role="radio" data-mode="cron">Cron</button>
+            </div>
+
+            <!-- Interval -->
+            <div class="cadence-panel" data-panel="interval">
+              <div class="row">
+                <span class="lead" id="iv-every-l">Every</span>
+                <select class="select auto" id="iv-n" aria-labelledby="iv-every-l"></select>
+                <select class="select auto" id="iv-unit" aria-label="Unit"><option value="minutes">minutes</option><option value="hours">hours</option></select>
+                <span class="lead" id="iv-at" hidden>at</span>
+                <select class="select auto" id="iv-offset" aria-label="Minute past the hour" hidden></select>
+                <span class="cap ready">cron */n</span>
+              </div>
+              <div class="switch-row">
+                <span id="iv-win-l">Only during set hours</span>
+                <button class="switch" role="switch" id="iv-win" aria-labelledby="iv-win-l" aria-checked="false"></button>
+              </div>
+              <div class="cadence-panel" id="iv-win-body" hidden>
+                <div class="row">
+                  <span class="lead">From</span>
+                  <select class="select auto" id="iv-from" aria-label="From hour"></select>
+                  <span class="lead">to</span>
+                  <select class="select auto" id="iv-to" aria-label="To hour"></select>
+                </div>
+                <div class="subfield">
+                  <span class="sublabel" id="iv-days-l">On</span>
+                  <div class="days" role="group" aria-labelledby="iv-days-l" data-days="interval"></div>
+                </div>
+                <p class="err" id="iv-err" hidden></p>
+              </div>
+            </div>
+
+            <!-- Weekly days -->
+            <div class="subfield" data-panel="weekly">
+              <div class="row" style="justify-content:space-between">
+                <span class="sublabel" id="wk-days-l">On</span>
+                <span class="quick"><button class="btn ghost" data-quick="weekdays">Weekdays</button><button class="btn ghost" data-quick="weekends">Weekends</button><button class="btn ghost" data-quick="all">Every day</button></span>
+              </div>
+              <div class="days" role="group" aria-labelledby="wk-days-l" data-days="weekly"></div>
+              <p class="err" id="wk-err" hidden></p>
+            </div>
+
+            <!-- Monthly -->
+            <div class="cadence-panel" data-panel="monthly" role="radiogroup" aria-label="Day of month">
+              <div class="choice">
+                <input type="radio" name="mkind" id="mk-day" value="day">
+                <label for="mk-day">On day</label>
+                <select class="select auto" id="mo-day" aria-label="Day of month"></select>
+                <span class="cap ready" id="cap-lastday">cron day-of-month</span>
+              </div>
+              <div class="choice">
+                <input type="radio" name="mkind" id="mk-nth" value="nth">
+                <label for="mk-nth">On the</label>
+                <select class="select auto" id="mo-nth" aria-label="Which week"></select>
+                <select class="select auto" id="mo-wd" aria-label="Weekday"></select>
+                <span class="cap ready">uses AND of day + weekday</span>
+              </div>
+              <p class="hint" id="mo-hint" hidden></p>
+            </div>
+
+            <!-- Times (daily, weekly, monthly) -->
+            <div class="subfield" data-panel="times">
+              <span class="sublabel" id="times-l">At</span>
+              <div class="times" id="times" role="group" aria-labelledby="times-l"></div>
+              <p class="err" id="times-err" hidden></p>
+            </div>
+
+            <!-- Cron -->
+            <div class="subfield" data-panel="cron">
+              <input class="input mono" id="cron" aria-label="Cron expression" aria-describedby="cron-legend cron-msg" spellcheck="false" autocapitalize="none" autocomplete="off" placeholder="0 9 * * 1-5">
+              <div class="cron-legend" id="cron-legend" aria-hidden="true"><span>minute</span><span>hour</span><span>day</span><span>month</span><span>weekday</span></div>
+              <p class="err" id="cron-err" hidden></p>
+              <p class="hint" id="cron-msg">Numbers, *, ranges, steps and lists. Weekday 0–6, Sunday is 0.</p>
+            </div>
+
+            <!-- Time zone -->
+            <div class="subfield" id="tz-field">
+              <span class="sublabel label-line" id="tz-l">Time zone<span class="cap ready">stored on cadence; app hard-codes device zone today</span></span>
+              <div class="tz">
+                <button class="tz-trigger" id="tz-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="tz-l tz-btn"><span id="tz-name"></span><span class="off" id="tz-off"></span></button>
+                <div class="tz-pop" id="tz-pop" hidden>
+                  <input class="input" id="tz-q" placeholder="Search time zones" role="combobox" aria-controls="tz-list" aria-expanded="true" aria-autocomplete="list" autocomplete="off">
+                  <ul class="tz-list" id="tz-list" role="listbox" aria-label="Time zones"></ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- When it runs -->
+          <div class="card preview" id="preview" aria-labelledby="pv-title">
+            <div class="pv-head">
+              <div class="pv-title" id="pv-title" aria-live="polite"></div>
+              <div class="pv-sub" id="pv-sub"></div>
+            </div>
+            <div class="strip" id="strip" role="img"></div>
+            <ul class="runs" id="runs" aria-label="Upcoming runs"></ul>
+            <div class="pv-foot" id="pv-foot">
+              <code id="pv-cron"></code>
+              <button class="btn ghost" id="edit-cron">Edit as cron</button>
+            </div>
+          </div>
+        </fieldset>
+
+        <!-- ============================== STARTS (phase 2) ============================== -->
+        <fieldset class="field" id="starts" data-phase-only="2">
+          <legend class="label-line">Starts<span class="cap needs">needs startAt on schedule</span></legend>
+          <div class="segmented" role="radiogroup" aria-label="Starts" id="starts-seg">
+            <button role="radio" data-starts="now">Now</button>
+            <button role="radio" data-starts="date">On a date</button>
+          </div>
+          <input class="input" type="date" id="starts-date" aria-label="Start date" hidden>
+        </fieldset>
+
+        <!-- ============================== ENDS ============================== -->
+        <fieldset class="field" id="ends">
+          <legend class="label-line">Ends<span class="cap today">Max runs exists</span><span class="cap ready">End date uses expiresAt</span></legend>
+          <div class="segmented" role="radiogroup" aria-label="Ends" id="ends-seg">
+            <button role="radio" data-ends="never">Never</button>
+            <button role="radio" data-ends="date">On a date</button>
+            <button role="radio" data-ends="runs">After runs</button>
+          </div>
+          <div class="row" id="ends-date-row" hidden><span class="lead">After</span><input class="input" type="date" id="ends-date" aria-label="End date" style="width:auto"></div>
+          <div class="row" id="ends-runs-row" hidden><span class="lead">After</span><input class="input" type="number" min="1" step="1" inputmode="numeric" id="ends-runs" aria-label="Number of runs" style="width:96px"><span class="lead">runs</span></div>
+          <p class="err" id="ends-err" hidden></p>
+        </fieldset>
+
+        <div id="alert-slot"></div>
+      </div>
+
+      <footer class="sheet-foot">
+        <button class="btn" id="cancel">Cancel</button>
+        <button class="btn primary" id="submit">Create schedule</button>
+      </footer>
+    </section>
+
+    <div class="closed-note" id="closed-note" hidden><span id="closed-text">Sheet closed</span><button class="btn outline small" id="reopen">Open again</button></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* =====================================================================================
+ * Cron engine. parseCronExpression is a port of packages/protocol/src/schedule/cron-expression.ts
+ * and nextRun mirrors computeNextRunAt in packages/server/src/server/schedule/cron.ts
+ * (minute-by-minute walk, local parts read with Intl in the cadence time zone, 366-day limit,
+ * day-of-month AND day-of-week). Only additions: skip-ahead for non-matching days and hours,
+ * and an optional extra predicate used by Phase 2 rules.
+ * ===================================================================================== */
+const BOUNDS = [
+  { min: 0, max: 59, name: "minute" }, { min: 0, max: 23, name: "hour" },
+  { min: 1, max: 31, name: "day-of-month" }, { min: 1, max: 12, name: "month" },
+  { min: 0, max: 6, name: "day-of-week" },
+];
+function range(a, b, s) { const v = []; for (let x = a; x <= b; x += s) v.push(x); return v; }
+function parseField(src, b) {
+  const t = src.trim(); if (!t) throw new Error(`Invalid cron ${b.name} field`);
+  const allowed = new Set();
+  for (const raw of t.split(",")) {
+    const part = raw.trim(); if (!part) throw new Error(`Invalid cron ${b.name} field`);
+    const sp = part.split("/"); if (sp.length > 2) throw new Error(`Invalid cron ${b.name} step`);
+    const [base, stepSrc] = sp; const ns = stepSrc?.trim();
+    const step = ns === undefined ? 1 : Number.parseInt(ns, 10);
+    if (!Number.isInteger(step) || step <= 0 || (ns !== undefined && String(step) !== ns)) throw new Error(`Invalid cron ${b.name} step`);
+    if (base === "*") { range(b.min, b.max, step).forEach((v) => allowed.add(v)); continue; }
+    const m = base.match(/^(\d+)-(\d+)$/);
+    if (m) {
+      const s = +m[1], e = +m[2];
+      if (s > e || s < b.min || e > b.max) throw new Error(`Invalid cron ${b.name} range`);
+      range(s, e, step).forEach((v) => allowed.add(v)); continue;
+    }
+    if (!/^\d+$/.test(base)) throw new Error(`Invalid cron ${b.name} value`);
+    const v = +base; if (v < b.min || v > b.max) throw new Error(`Invalid cron ${b.name} value`);
+    allowed.add(v);
+  }
+  return allowed;
+}
+function parseCron(expr) {
+  const p = expr.trim().split(/\s+/);
+  if (p.length !== 5) throw new Error("Cron expressions must have 5 fields");
+  const [minute, hour, dom, month, dow] = p.map((f, i) => parseField(f, BOUNDS[i]));
+  return { minute, hour, dom, month, dow, raw: p };
+}
+
+const readerCache = new Map();
+function reader(tz) {
+  if (readerCache.has(tz)) return readerCache.get(tz);
+  const f = new Intl.DateTimeFormat("en-US", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const fn = (d) => {
+    const v = {}; for (const x of f.formatToParts(d)) if (x.type !== "literal") v[x.type] = x.value;
+    const y = +v.year, mo = +v.month, dd = +v.day;
+    return { year: y, month: mo, dom: dd, hour: +v.hour % 24, minute: +v.minute, dow: new Date(Date.UTC(y, mo - 1, dd)).getUTCDay() };
+  };
+  readerCache.set(tz, fn); return fn;
+}
+const MIN = 60000;
+function dim(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+function dayOk(r, p) { return r.c.month.has(p.month) && r.c.dom.has(p.dom) && r.c.dow.has(p.dow) && (!r.extra || r.extra(p)); }
+/* rules: [{ c: parsedCron, extra?: (parts) => boolean }] — union. Returns Date or null. */
+function nextRun(rules, after, tz) {
+  const read = reader(tz); const limit = after.getTime() + 366 * 1440 * MIN;
+  let t = Math.floor(after.getTime() / MIN) * MIN + MIN;
+  while (t <= limit) {
+    const p = read(new Date(t));
+    const days = rules.filter((r) => dayOk(r, p));
+    if (!days.length) { t += Math.max(1, 1440 - (p.hour * 60 + p.minute) - 60) * MIN; continue; }
+    const hrs = days.filter((r) => r.c.hour.has(p.hour));
+    if (!hrs.length) { t += Math.max(1, 60 - p.minute) * MIN; continue; }
+    if (hrs.some((r) => r.c.minute.has(p.minute))) return new Date(t);
+    t += MIN;
+  }
+  return null;
+}
+/* All instants whose local wall time in tz equals y-m-d h:mi (0 = nonexistent, 2 = repeated). */
+function wallInstants(y, m, d, h, mi, tz) {
+  const read = reader(tz); const base = Date.UTC(y, m - 1, d, h, mi);
+  const off = (t) => { const p = read(new Date(t)); return Date.UTC(p.year, p.month - 1, p.dom, p.hour, p.minute) - Math.floor(t / MIN) * MIN; };
+  const offs = new Set([off(base - 2 * 86400000), off(base), off(base + 2 * 86400000)]);
+  const out = [];
+  for (const o of offs) { const c = base - o; const p = read(new Date(c)); if (p.year === y && p.month === m && p.dom === d && p.hour === h && p.minute === mi) out.push(c); }
+  return [...new Set(out)].sort((a, b) => a - b);
+}
+
+/* ===================================================================================== formatting */
+const DOW = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const DOW3 = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const ISO_ORDER = [1, 2, 3, 4, 5, 6, 0];
+const NTH = { 1: "first", 2: "second", 3: "third", 4: "fourth", "-1": "last" };
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function ordinal(n) { const s = ["th", "st", "nd", "rd"], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+function hm(h, m) { const ap = h < 12 ? "AM" : "PM"; const hh = h % 12 === 0 ? 12 : h % 12; return `${hh}:${String(m).padStart(2, "0")} ${ap}`; }
+function parseHM(s) { const [h, m] = s.split(":").map(Number); return { h, m }; }
+function list(items) { return items.length <= 1 ? items.join("") : items.length === 2 ? `${items[0]} and ${items[1]}` : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`; }
+function compress(nums) {
+  const s = [...new Set(nums)].sort((a, b) => a - b); const out = []; let i = 0;
+  while (i < s.length) { let j = i; while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++; out.push(j - i >= 2 ? `${s[i]}-${s[j]}` : j > i ? `${s[i]},${s[j]}` : `${s[i]}`); i = j + 1; }
+  return out.join(",");
+}
+function daysPhrase(set) {
+  const a = [...set].sort((x, y) => x - y); const k = a.join(",");
+  if (a.length === 7) return "Every day"; if (k === "1,2,3,4,5") return "Weekdays"; if (k === "0,6") return "Weekends";
+  return list(ISO_ORDER.filter((d) => set.has(d)).map((d) => DOW[d] + "s"));
+}
+function fmtRun(t, tz) {
+  const d = new Date(t);
+  const date = new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric" }).format(d);
+  const time = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(d);
+  return { date, time };
+}
+function rel(t, now) {
+  const m = Math.round((t - now) / MIN);
+  if (m < 1) return "now"; if (m < 60) return `in ${m} min`;
+  const h = Math.round(m / 60); if (h < 36) return `in ${h} h`;
+  return `in ${Math.round(h / 24)} days`;
+}
+function dayWord(t, s) {
+  const r = reader(s.tz), a = r(new Date(s.now)), b = r(new Date(t));
+  const diff = Math.round((Date.UTC(b.year, b.month - 1, b.dom) - Date.UTC(a.year, a.month - 1, a.dom)) / 86400000);
+  return diff === 0 ? "today" : diff === 1 ? "tomorrow" : fmtRun(t, s.tz).date;
+}
+function tzOffset(tz, at) {
+  const p = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "shortOffset" }).formatToParts(at).find((x) => x.type === "timeZoneName");
+  return (p?.value || "GMT").replace("GMT", "UTC").replace("-", "−") .replace(/^UTC$/, "UTC+0");
+}
+
+/* ===================================================================================== state */
+const NOW_DEFAULT = Date.parse("2026-10-29T16:15:00Z"); // Thu Oct 29 2026, 10:15 AM in Denver
+const DEVICE_TZ = "America/Denver";
+const TZS = ["UTC", "America/Los_Angeles", "America/Denver", "America/Phoenix", "America/Chicago", "America/New_York", "America/Sao_Paulo", "Europe/London", "Europe/Berlin", "Europe/Kyiv", "Asia/Kolkata", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "Pacific/Auckland"];
+function base() {
+  return {
+    now: NOW_DEFAULT, phase: 1, title: "New schedule", status: "idle",
+    name: "", prompt: "", host: "",
+    mode: "daily",
+    iv: { n: 15, unit: "minutes", offset: 0, win: false, from: 9, to: 17, days: new Set([1, 2, 3, 4, 5]) },
+    times: ["09:00"],
+    week: new Set([1]),
+    mo: { kind: "day", day: 1, nth: 1, wd: 1 },
+    cron: "", cronEdited: false,
+    tz: DEVICE_TZ,
+    starts: { kind: "now", date: "2026-11-02" },
+    ends: { kind: "never", date: "2026-12-31", runs: "10" },
+    error: null, offlineAlert: false,
+  };
+}
+const PRESETS = {
+  blank: (s) => s,
+  daily: (s) => { s.mode = "daily"; s.times = ["09:00", "13:00", "17:00"]; fill(s); },
+  interval: (s) => { s.mode = "interval"; s.iv.win = true; fill(s); },
+  weekly: (s) => { s.mode = "weekly"; s.week = new Set([1, 3, 5]); s.times = ["08:30"]; fill(s); },
+  "no-days": (s) => { s.mode = "weekly"; s.week = new Set(); fill(s); },
+  nth: (s) => { s.mode = "monthly"; s.mo = { kind: "nth", day: 1, nth: 2, wd: 2 }; s.times = ["10:00"]; fill(s); },
+  "month-edge": (s) => { s.mode = "monthly"; s.mo.kind = "day"; s.mo.day = 31; fill(s); },
+  "cron-invalid": (s) => { s.mode = "cron"; s.cron = "0 9 * * MON-FRI"; s.cronEdited = true; fill(s); },
+  never: (s) => { s.mode = "cron"; s.cron = "0 9 30 2 *"; s.cronEdited = true; fill(s); },
+  custom: (s) => { s.title = "Edit schedule"; s.mode = "cron"; s.cron = "5 4 */3 * *"; s.cronEdited = true; s.tz = "UTC"; fill(s); },
+  ends: (s) => { s.mode = "weekly"; s.week = new Set([1, 2, 3, 4, 5]); s.ends.kind = "runs"; s.ends.runs = "4"; fill(s); },
+  "dst-fall": (s) => { s.mode = "daily"; s.times = ["01:30"]; fill(s); },
+  "dst-spring": (s) => { s.now = Date.parse("2027-03-10T17:00:00Z"); s.mode = "daily"; s.times = ["02:30"]; fill(s); },
+  loading: (s) => { s.title = "Edit schedule"; s.status = "loading"; fill(s); },
+  offline: (s) => { fill(s); s.host = "studio-mini"; },
+  saving: (s) => { s.mode = "weekly"; s.week = new Set([1, 2, 3, 4, 5]); fill(s); s.status = "saving"; },
+  error: (s) => { s.mode = "weekly"; s.week = new Set([1, 2, 3, 4, 5]); fill(s); s.error = "Lost connection to macbook-pro while saving. Nothing was created."; },
+};
+function fill(s) { s.name = s.name || "Morning triage"; s.prompt = s.prompt || "Review new issues and summarize anything urgent"; s.host = s.host || "macbook-pro"; }
+let S = base();
+
+/* ===================================================================================== derivation */
+/* Returns { rules, crons, summary, errors{}, proposed[] } */
+function derive(s) {
+  const out = { rules: [], crons: [], summary: "", errors: {}, proposed: [] };
+  const times = s.times.map(parseHM);
+  const timeText = list(times.slice().sort((a, b) => a.h * 60 + a.m - (b.h * 60 + b.m)).map((t) => hm(t.h, t.m)));
+  const timeCrons = (domF, dowF, extra) => {
+    const byMin = new Map();
+    for (const t of times) { if (!byMin.has(t.m)) byMin.set(t.m, new Set()); byMin.get(t.m).add(t.h); }
+    if (!times.length) { out.errors.times = "Add at least one time"; return; }
+    if (byMin.size > 1) {
+      if (s.phase === 1) { out.errors.times = "All times need the same minute, like 9:00 AM and 5:00 PM"; return; }
+      out.proposed.push("Times with different minutes: one schedule holds several cron rules");
+    }
+    for (const [m, hs] of byMin) out.crons.push({ expr: `${m} ${compress([...hs])} ${domF} * ${dowF}`, extra });
+  };
+  switch (s.mode) {
+    case "interval": {
+      const iv = s.iv; const win = iv.win;
+      const hours = win ? `${iv.from}-${iv.to - 1}` : "*";
+      const dows = win ? compress([...iv.days]) : "*";
+      if (win && iv.to <= iv.from) { out.errors.iv = "End hour must be after start hour"; break; }
+      if (win && !iv.days.size) { out.errors.iv = "Pick at least one day"; break; }
+      if (iv.unit === "minutes") {
+        out.crons.push({ expr: `${iv.n === 1 ? "*" : "*/" + iv.n} ${hours} * * ${dows}` });
+        out.summary = iv.n === 1 ? "Every minute" : `Every ${iv.n} minutes`;
+      } else {
+        const hf = win ? (iv.n === 1 ? hours : `${hours}/${iv.n}`) : (iv.n === 1 ? "*" : `*/${iv.n}`);
+        out.crons.push({ expr: `${iv.offset} ${hf} * * ${dows}` });
+        out.summary = (iv.n === 1 ? "Every hour" : `Every ${iv.n} hours`) + (iv.offset ? ` at :${String(iv.offset).padStart(2, "0")}` : "");
+      }
+      if (win) out.summary += ` from ${hm(iv.from, 0)} to ${hm(iv.to, 0)}` + (iv.days.size === 7 ? "" : `, ${daysPhrase(iv.days).toLowerCase().replace(/^weekdays$/, "weekdays")}`);
+      break;
+    }
+    case "daily": timeCrons("*", "*"); out.summary = `Every day at ${timeText}`; break;
+    case "weekly":
+      if (!s.week.size) { out.errors.week = "Pick at least one day"; break; }
+      timeCrons("*", compress([...s.week])); out.summary = `${daysPhrase(s.week)} at ${timeText}`; break;
+    case "monthly": {
+      const mo = s.mo;
+      if (mo.kind === "day") {
+        if (mo.day === "last") {
+          out.proposed.push("Last day of the month has no cron equivalent");
+          timeCrons("*", "*", (p) => p.dom === dim(p.year, p.month)); out.summary = `Monthly on the last day at ${timeText}`;
+        } else { timeCrons(String(mo.day), "*"); out.summary = `Monthly on the ${ordinal(mo.day)} at ${timeText}`; }
+      } else if (mo.nth === -1) {
+        out.proposed.push("Last weekday of the month has no cron equivalent");
+        timeCrons("*", String(mo.wd), (p) => p.dom > dim(p.year, p.month) - 7); out.summary = `Monthly on the last ${DOW[mo.wd]} at ${timeText}`;
+      } else {
+        const a = (mo.nth - 1) * 7 + 1; timeCrons(`${a}-${a + 6}`, String(mo.wd)); out.summary = `Monthly on the ${NTH[mo.nth]} ${DOW[mo.wd]} at ${timeText}`;
+      }
+      break;
+    }
+    case "cron": {
+      const e = s.cron.trim();
+      if (!e) { out.errors.cron = "Enter a cron expression"; break; }
+      try { parseCron(e); } catch (err) { out.errors.cron = humanCronError(err.message, e); break; }
+      out.crons.push({ expr: e }); out.summary = describeCron(e) || "Custom cron schedule";
+      break;
+    }
+  }
+  if (Object.keys(out.errors).length) { out.crons = []; return out; }
+  out.rules = out.crons.map((c) => ({ c: parseCron(c.expr), extra: c.extra }));
+  if (s.starts.kind === "date" && s.phase === 2) out.proposed.push("Start date");
+  return out;
+}
+function humanCronError(msg, expr) {
+  const n = expr.trim().split(/\s+/).length;
+  if (msg.includes("5 fields")) return `Use 5 fields: minute hour day month weekday. This has ${n}.`;
+  const field = (msg.match(/cron (minute|hour|day-of-month|month|day-of-week)/) || [])[1];
+  const names = { minute: ["Minute", "0–59"], hour: ["Hour", "0–23"], "day-of-month": ["Day", "1–31"], month: ["Month", "1–12"], "day-of-week": ["Weekday", "0–6, Sunday is 0"] };
+  if (!field) return msg;
+  const idx = ["minute", "hour", "day-of-month", "month", "day-of-week"].indexOf(field);
+  const raw = expr.trim().split(/\s+/)[idx] || "";
+  if (/[a-z]/i.test(raw)) return `${names[field][0]} must use numbers (${names[field][1]}). Names like ${raw.toUpperCase()} aren't supported.`;
+  if (msg.includes("step")) return `${names[field][0]} step must be a whole number above 0`;
+  return `${names[field][0]} must be ${names[field][1]}`;
+}
+/* Describe the cron shapes the builder can produce; anything else returns null. */
+function describeCron(e) {
+  const [mi, h, dom, mon, dow] = e.trim().split(/\s+/); const c = parseCron(e);
+  if (mon !== "*") return null;
+  const lit = (f) => /^[\d,\-]+$/.test(f);
+  const dowSet = c.dow; const dayText = dow === "*" ? "" : daysPhrase(dowSet);
+  const hr = h.match(/^(\d+)-(\d+)$/);
+  const winText = hr ? ` from ${hm(+hr[1], 0)} to ${hm((+hr[2] + 1) % 24, 0)}` : "";
+  if (dom === "*" && (h === "*" || hr) && /^(\*|\*\/\d+)$/.test(mi)) {
+    const n = mi === "*" ? 1 : +mi.split("/")[1];
+    return (n === 1 ? "Every minute" : `Every ${n} minutes`) + winText + (dayText ? `, ${dayText.toLowerCase()}` : "");
+  }
+  if (dom === "*" && /^\d+$/.test(mi) && /^(\*|\*\/\d+)$/.test(h)) {
+    const n = h === "*" ? 1 : +h.split("/")[1];
+    return (n === 1 ? "Every hour" : `Every ${n} hours`) + (+mi ? ` at :${mi.padStart(2, "0")}` : "") + (dayText ? `, ${dayText.toLowerCase()}` : "");
+  }
+  if (!lit(mi) || !lit(h) || c.minute.size * c.hour.size > 8) return null;
+  const ts = []; for (const H of [...c.hour].sort((a, b) => a - b)) for (const M of [...c.minute].sort((a, b) => a - b)) ts.push(hm(H, M));
+  const at = `at ${list(ts)}`;
+  if (dom === "*") return `${dow === "*" ? "Every day" : dayText} ${at}`;
+  if (/^\d+$/.test(dom) && dow === "*") return `Monthly on the ${ordinal(+dom)} ${at}`;
+  const r = dom.match(/^(\d+)-(\d+)$/);
+  if (r && +r[2] - +r[1] === 6 && (+r[1] - 1) % 7 === 0 && /^\d$/.test(dow)) return `Monthly on the ${NTH[(+r[1] - 1) / 7 + 1]} ${DOW[+dow]} ${at}`;
+  return null;
+}
+
+/* Upcoming runs, honoring ends + phase 2 start date and DST policy. */
+function computeRuns(s, d, count, windowEnd) {
+  const tz = s.tz; let after = new Date(s.now);
+  if (s.phase === 2 && s.starts.kind === "date" && s.starts.date) {
+    const [y, m, dd] = s.starts.date.split("-").map(Number); const st = wallInstants(y, m, dd, 0, 0, tz)[0];
+    if (st && st - MIN > after.getTime()) after = new Date(st - MIN);
+  }
+  let expires = Infinity;
+  if (s.ends.kind === "date" && s.ends.date) {
+    const [y, m, dd] = s.ends.date.split("-").map(Number); const nd = new Date(Date.UTC(y, m - 1, dd + 1));
+    expires = wallInstants(nd.getUTCFullYear(), nd.getUTCMonth() + 1, nd.getUTCDate(), 0, 0, tz)[0] ?? Infinity;
+  }
+  const maxRuns = s.ends.kind === "runs" ? parseInt(s.ends.runs, 10) || 0 : Infinity;
+  const runs = []; let cur = after; let guard = 0;
+  while (runs.length < count && guard++ < 4000) {
+    const n = nextRun(d.rules, cur, tz); if (!n) break;
+    const t = n.getTime(); if (t >= expires || runs.length >= maxRuns) break;
+    if (windowEnd && t > windowEnd) break;
+    runs.push({ t }); cur = n;
+  }
+  return { runs, maxRuns, expires, exhausted: runs.length < count };
+}
+/* DST notes for clock-time modes. Phase 1 reports what the daemon does today; Phase 2 applies the proposed policy. */
+function dstAdjust(s, d, runs, from, to) {
+  if (!["daily", "weekly", "monthly"].includes(s.mode) || !d.rules.length) return runs;
+  const read = reader(s.tz); const out = runs.map((r) => ({ ...r }));
+  // repeated wall times (fall back)
+  for (let i = 1; i < out.length; i++) {
+    const a = read(new Date(out[i - 1].t)), b = read(new Date(out[i].t));
+    if (a.dom === b.dom && a.hour === b.hour && a.minute === b.minute) {
+      if (s.phase === 1) out[i].note = "Clocks fall back, so this time happens twice and the schedule runs twice";
+      else { out[i].drop = true; out[i - 1].note = `Clocks fall back. Runs once, at the first ${hm(a.hour, a.minute)}`; }
+    }
+  }
+  // nonexistent wall times (spring forward)
+  const times = s.times.map(parseHM);
+  for (let t = from; t <= to; t += 86400000) {
+    const p = read(new Date(t));
+    for (const tm of times) {
+      const probe = { ...p, hour: tm.h, minute: tm.m };
+      if (!d.rules.some((r) => dayOk(r, probe) && r.c.hour.has(tm.h) && r.c.minute.has(tm.m))) continue;
+      if (wallInstants(p.year, p.month, p.dom, tm.h, tm.m, s.tz).length) continue;
+      const gapEnd = wallInstants(p.year, p.month, p.dom, tm.h + 1, 0, s.tz)[0] ?? t;
+      if (out.some((r) => r.skipKey === `${p.year}-${p.month}-${p.dom}-${tm.h}-${tm.m}`)) continue;
+      if (s.phase === 1) out.push({ t: gapEnd, skipped: true, skipKey: `${p.year}-${p.month}-${p.dom}-${tm.h}-${tm.m}`, label: hm(tm.h, tm.m), note: `Clocks spring forward, so ${hm(tm.h, tm.m)} doesn't exist and this run is skipped` });
+      else out.push({ t: gapEnd, skipKey: `${p.year}-${p.month}-${p.dom}-${tm.h}-${tm.m}`, note: `Clocks spring forward. Runs at ${hm(tm.h + 1, 0)} instead of ${hm(tm.h, tm.m)}` });
+    }
+  }
+  return out.filter((r) => !r.drop).sort((a, b) => a.t - b.t);
+}
+
+/* ===================================================================================== render */
+const $ = (id) => document.getElementById(id);
+const opt = (v, l, sel) => `<option value="${v}"${sel ? " selected" : ""}>${l}</option>`;
+const MIN_STEPS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
+const HOUR_STEPS = [1, 2, 3, 4, 6, 8, 12];
+
+function renderStatic() {
+  $("mo-day").innerHTML = range(1, 31, 1).map((d) => opt(d, ordinal(d))).join("") + (S.phase === 2 ? opt("last", "Last day") : "");
+  $("mo-nth").innerHTML = [1, 2, 3, 4].map((n) => opt(n, NTH[n])).join("") + (S.phase === 2 ? opt(-1, "last") : "");
+  $("mo-wd").innerHTML = ISO_ORDER.map((d) => opt(d, DOW[d])).join("");
+  $("iv-offset").innerHTML = range(0, 55, 5).map((m) => opt(m, ":" + String(m).padStart(2, "0"))).join("");
+  $("iv-from").innerHTML = range(0, 23, 1).map((h) => opt(h, hm(h, 0))).join("");
+  $("iv-to").innerHTML = range(1, 24, 1).map((h) => opt(h, h === 24 ? "Midnight" : hm(h, 0))).join("");
+  document.querySelectorAll("[data-days]").forEach((g) => {
+    g.innerHTML = ISO_ORDER.map((d) => `<button type="button" class="day" data-d="${d}" aria-label="${DOW[d]}" aria-pressed="false">${DOW3[d]}</button>`).join("");
+  });
+}
+function renderTimes() {
+  const el = $("times");
+  el.innerHTML = S.times.map((t, i) => `<span class="time"><input type="time" value="${t}" data-i="${i}" aria-label="Time ${i + 1}" step="60">${S.times.length > 1 ? `<button type="button" class="icon-btn" data-rm="${i}" aria-label="Remove ${hm(...Object.values(parseHM(t)))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>` : ""}</span>`).join("")
+    + (S.times.length < 6 ? `<button type="button" class="btn ghost" id="add-time">Add time</button>` : "");
+}
+function setRadio(groupId, attr, val) {
+  document.querySelectorAll(`#${groupId} [role=radio]`).forEach((b) => { const on = b.dataset[attr] === String(val); b.setAttribute("aria-checked", on); b.tabIndex = on ? 0 : -1; });
+}
+function showErr(id, msg) { const e = $(id); e.hidden = !msg; e.textContent = msg || ""; }
+
+function syncControls() {
+  $("sheet-title").textContent = S.title;
+  $("submit").textContent = S.status === "saving" ? (S.title === "New schedule" ? "Creating..." : "Saving...") : S.error ? "Try again" : S.title === "New schedule" ? "Create schedule" : "Save";
+  $("f-name").value = S.name; $("f-prompt").value = S.prompt; $("f-host").value = S.host;
+  setRadio("modes", "mode", S.mode);
+  document.querySelectorAll("[data-panel]").forEach((p) => {
+    const k = p.dataset.panel; p.hidden = k === "times" ? !["daily", "weekly", "monthly"].includes(S.mode) : k !== S.mode;
+  });
+  // interval
+  const iv = S.iv;
+  $("iv-n").innerHTML = (iv.unit === "minutes" ? MIN_STEPS : HOUR_STEPS).map((n) => opt(n, n, n === iv.n)).join("");
+  $("iv-unit").value = iv.unit; $("iv-offset").value = iv.offset;
+  $("iv-at").hidden = $("iv-offset").hidden = iv.unit !== "hours";
+  $("iv-win").setAttribute("aria-checked", iv.win); $("iv-win-body").hidden = !iv.win;
+  $("iv-from").value = iv.from; $("iv-to").value = iv.to;
+  const daySync = (g, set) => g.querySelectorAll(".day").forEach((b) => b.setAttribute("aria-pressed", set.has(+b.dataset.d)));
+  daySync(document.querySelector('[data-days="interval"]'), iv.days);
+  daySync(document.querySelector('[data-days="weekly"]'), S.week);
+  // monthly
+  $("mk-day").checked = S.mo.kind === "day"; $("mk-nth").checked = S.mo.kind === "nth";
+  $("mo-day").value = String(S.mo.day); $("mo-nth").value = String(S.mo.nth); $("mo-wd").value = String(S.mo.wd);
+  $("mo-day").disabled = S.mo.kind !== "day"; $("mo-nth").disabled = $("mo-wd").disabled = S.mo.kind !== "nth";
+  const edge = S.mo.kind === "day" && S.mo.day >= 29 && S.mo.day !== "last";
+  $("mo-hint").hidden = !edge;
+  $("mo-hint").textContent = edge ? (S.mo.day === 29 ? "Skips February except in leap years" : `Skips months without a ${ordinal(S.mo.day)}`) : "";
+  if (document.activeElement !== $("cron")) $("cron").value = S.cron;
+  // tz
+  $("tz-name").textContent = S.tz + (S.tz === DEVICE_TZ ? " (this device)" : "");
+  $("tz-off").textContent = tzOffset(S.tz, new Date(S.now));
+  // starts / ends
+  document.querySelectorAll("[data-phase-only]").forEach((n) => (n.hidden = String(S.phase) !== n.dataset.phaseOnly));
+  setRadio("starts-seg", "starts", S.starts.kind); $("starts-date").hidden = S.starts.kind !== "date"; $("starts-date").value = S.starts.date;
+  setRadio("ends-seg", "ends", S.ends.kind);
+  $("ends-date-row").hidden = S.ends.kind !== "date"; $("ends-runs-row").hidden = S.ends.kind !== "runs";
+  $("ends-date").value = S.ends.date; if (document.activeElement !== $("ends-runs")) $("ends-runs").value = S.ends.runs;
+  // loading / saving
+  const loading = S.status === "loading", saving = S.status === "saving";
+  $("cad-loading").hidden = !loading; $("cad-live").hidden = loading;
+  $("body").classList.toggle("disabled-scope", saving);
+  $("body").setAttribute("aria-busy", loading || saving);
+}
+
+function render() {
+  syncControls();
+  const d = derive(S);
+  showErr("times-err", d.errors.times); showErr("wk-err", d.errors.week); showErr("cron-err", d.errors.cron); showErr("iv-err", d.errors.iv);
+  $("cron").setAttribute("aria-invalid", !!d.errors.cron);
+  $("cron-msg").hidden = !!d.errors.cron;
+  const runsN = parseInt(S.ends.runs, 10);
+  const endsErr = S.ends.kind === "runs" && !(runsN >= 1) ? "Enter 1 or more runs" : S.ends.kind === "date" && !S.ends.date ? "Pick an end date" : null;
+  showErr("ends-err", endsErr);
+  renderPreview(d);
+  if (d.never && S.mode === "cron") { showErr("cron-err", "This never runs. No date in the next year matches."); $("cron").setAttribute("aria-invalid", true); $("cron-msg").hidden = true; }
+  renderAlert();
+  const offline = S.host === "studio-mini";
+  const canSubmit = S.status === "idle" && S.prompt.trim() && S.host && !offline && !Object.keys(d.errors).length && !endsErr && !d.never;
+  $("submit").disabled = !canSubmit;
+  $("closed-note").hidden = S.status !== "closed" && S.status !== "saved";
+  $("sheet").hidden = $("backdrop").hidden = S.status === "closed" || S.status === "saved";
+  $("app").setAttribute("aria-hidden", !(S.status === "closed" || S.status === "saved"));
+}
+
+function renderPreview(d) {
+  const pv = $("preview"); const strip = $("strip"), runsEl = $("runs");
+  $("pv-foot").hidden = false;
+  if (S.status === "loading") {
+    $("pv-title").innerHTML = `<span class="skeleton" style="display:inline-block;width:180px;height:14px"></span>`;
+    $("pv-sub").innerHTML = `<span class="skeleton" style="display:inline-block;width:120px;height:10px"></span>`;
+    strip.innerHTML = gridSkeleton(); runsEl.innerHTML = [0, 1, 2].map(() => `<li><span class="skeleton" style="height:12px;width:110px"></span><span></span><span></span></li>`).join("");
+    $("pv-cron").textContent = ""; $("edit-cron").hidden = true; return;
+  }
+  const err = Object.values(d.errors)[0];
+  if (err) {
+    $("pv-title").textContent = "Not scheduled yet"; $("pv-sub").textContent = "Fix the cadence above to see upcoming runs"; $("pv-sub").className = "pv-sub";
+    strip.innerHTML = gridSkeleton(true); strip.setAttribute("aria-label", "No runs to show"); runsEl.innerHTML = "";
+    $("pv-cron").textContent = ""; $("edit-cron").hidden = true; d.never = false; return;
+  }
+  const now = S.now; const read = reader(S.tz); const np = read(new Date(now));
+  const day0 = wallInstants(np.year, np.month, np.dom, 0, 0, S.tz)[0] ?? now; const winEnd = day0 + 14 * 86400000;
+  const all = computeRuns(S, d, 1500, winEnd);
+  const next = computeRuns(S, d, 6);
+  d.never = !next.runs.length && S.ends.kind === "never" && !(S.phase === 2 && S.starts.kind === "date");
+  let listRuns = dstAdjust(S, d, next.runs, now, (next.runs.at(-1)?.t ?? now) + 86400000);
+  const stripRuns = dstAdjust(S, d, all.runs, now, winEnd);
+  const proposed = d.proposed.length && S.phase === 2;
+  $("pv-title").textContent = d.summary;
+  const sub = $("pv-sub"); sub.className = "pv-sub";
+  const realNext = listRuns.find((r) => !r.skipped);
+  if (d.never) { sub.textContent = "No upcoming runs"; }
+  else if (!realNext) sub.textContent = "No runs left before it ends";
+  else {
+    const f = fmtRun(realNext.t, S.tz);
+    let endText = "";
+    if (S.ends.kind === "runs" && next.maxRuns) endText = ` · Ends after ${next.maxRuns} ${next.maxRuns === 1 ? "run" : "runs"}`;
+    if (S.ends.kind === "date" && S.ends.date) { const [y, m, dd] = S.ends.date.split("-").map(Number); endText = ` · Ends after ${MONTHS[m - 1]} ${dd}, ${y}`; }
+    sub.textContent = `Next run ${dayWord(realNext.t, S)} at ${f.time.replace(/ [A-Z]{3,4}$/, "")}, ${rel(realNext.t, S.now)}${endText}`;
+  }
+  // strip
+  let html = `<div class="axis">${[6, 12, 18].map((h) => `<span style="top:${(h / 24) * 100}%">${h === 12 ? "12p" : h < 12 ? h + "a" : h - 12 + "p"}</span>`).join("")}</div>`;
+  const cols = Array.from({ length: 14 }, () => []);
+  const firstReal = stripRuns.find((r) => !r.skipped)?.t;
+  for (const r of stripRuns) {
+    const p = read(new Date(r.t)); const idx = Math.floor((wallInstants(p.year, p.month, p.dom, 12, 0, S.tz)[0] - day0) / 86400000);
+    if (idx < 0 || idx > 13) continue;
+    const minutes = r.skipped ? r.skipKey.split("-").slice(3).reduce((h, m) => +h * 60 + +m) : p.hour * 60 + p.minute;
+    cols[idx].push({ top: (minutes / 1440) * 100, cls: r.skipped ? "skip" : r.note ? "warn" : r.t === firstReal ? "next" : "" });
+  }
+  const endIdx = isFinite(all.expires) ? Math.floor((all.expires - day0) / 86400000) : 99;
+  const runsCapIdx = S.ends.kind === "runs" && all.runs.length >= all.maxRuns && all.runs.length ? Math.floor((all.runs.at(-1).t - day0) / 86400000) + 1 : 99;
+  cols.forEach((marks, i) => {
+    const seen = new Set();
+    marks.sort((a, b) => (a.cls === "next") - (b.cls === "next"));
+    const ms = marks.filter((m) => { const k = Math.round(m.top * 2) + m.cls; if (seen.has(k)) return false; seen.add(k); return true; });
+    html += `<div class="col${i >= Math.min(endIdx, runsCapIdx) ? " past-end" : ""}">${[25, 50, 75].map((g) => `<div class="grid" style="top:${g}%"></div>`).join("")}${ms.map((m) => `<div class="mark ${m.cls}" style="top:calc(${m.top}% - 1px)"></div>`).join("")}</div>`;
+  });
+  html += `<div class="dl"></div>` + Array.from({ length: 14 }, (_, i) => {
+    const p = read(new Date(day0 + i * 86400000 + 12 * 3600000));
+    return `<div class="dl${i === 0 ? " today" : ""}">${DOW3[p.dow][0]}<br>${p.dom}</div>`;
+  }).join("");
+  strip.innerHTML = html;
+  const realCount = stripRuns.filter((r) => !r.skipped).length;
+  strip.setAttribute("aria-label", `Overview of the next 14 days: ${realCount >= 1500 ? "more than 1,500" : realCount} ${realCount === 1 ? "run" : "runs"}`);
+  // list
+  const shown = listRuns.slice(0, 5);
+  const lastIdx = S.ends.kind === "runs" ? next.maxRuns - 1 : -1;
+  let realI = -1;
+  runsEl.innerHTML = shown.map((r) => {
+    if (!r.skipped) realI++;
+    const f = fmtRun(r.t, S.tz);
+    const isLast = !r.skipped && realI === lastIdx;
+    const relText = r.skipped ? "skipped" : isLast ? "last run" : rel(r.t, now);
+    const time = r.skipped ? r.label : f.time;
+    return `<li class="${r.skipped ? "skipped" : ""}${isLast ? " last" : ""}"><span class="d">${f.date}</span><span class="tm">${time}</span><span class="rel">${relText}</span></li>${r.note ? `<li class="note">${r.note}</li>` : ""}`;
+  }).join("") || "";
+  // footer
+  const single = d.crons.length === 1 && !d.crons[0].extra;
+  $("pv-foot").hidden = S.mode === "cron";
+  $("edit-cron").hidden = S.mode === "cron" || !single;
+  $("pv-cron").textContent = S.mode === "cron" ? `Cron in ${S.tz}` : single ? d.crons[0].expr : d.crons.some((c) => c.extra) ? "No cron equivalent" : `${d.crons.length} cron rules`;
+  $("pv-cron").title = d.crons.map((c) => c.expr).join("\n");
+  if (proposed) $("pv-cron").textContent += " · needs backend";
+}
+function gridSkeleton(empty) {
+  let h = `<div class="axis"></div>`; for (let i = 0; i < 14; i++) h += `<div class="col"></div>`; return h;
+}
+function renderAlert() {
+  const slot = $("alert-slot"); const icon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>';
+  if (S.host === "studio-mini" && S.status !== "saving") {
+    slot.innerHTML = `<div class="alert warning" role="status">${icon}<div class="at">studio-mini is offline</div><div class="ad">Schedules are saved on their host. Reconnect studio-mini or pick another host to save.</div></div>`;
+  } else if (S.error) {
+    slot.innerHTML = `<div class="alert error" role="alert">${icon}<div class="at">Unable to create schedule</div><div class="ad">${S.error}</div></div>`;
+  } else slot.innerHTML = "";
+}
+
+/* ===================================================================================== events */
+function touchBuilder() { S.builderChanged = true; }
+$("modes").addEventListener("click", (e) => { const b = e.target.closest("[data-mode]"); if (b) setMode(b.dataset.mode); });
+function setMode(m) {
+  if (m === "cron" && S.mode !== "cron") {
+    const d = derive(S);
+    if ((!S.cronEdited || S.builderChanged) && d.crons.length === 1 && !d.crons[0].extra) { S.cron = d.crons[0].expr; S.cronEdited = false; S.builderChanged = false; }
+  }
+  S.mode = m; render();
+}
+function roving(groupId, onPick) {
+  $(groupId).addEventListener("keydown", (e) => {
+    const items = [...$(groupId).querySelectorAll("[role=radio]")]; const i = items.indexOf(document.activeElement);
+    if (i < 0) return; let j = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") j = (i + 1) % items.length;
+    if (e.key === "ArrowLeft" || e.key === "ArrowUp") j = (i - 1 + items.length) % items.length;
+    if (j === null) return; e.preventDefault(); onPick(items[j]); items[j].focus();
+  });
+}
+roving("modes", (b) => setMode(b.dataset.mode));
+roving("ends-seg", (b) => { S.ends.kind = b.dataset.ends; render(); });
+roving("starts-seg", (b) => { S.starts.kind = b.dataset.starts; render(); });
+$("edit-cron").addEventListener("click", () => { setMode("cron"); $("cron").focus(); });
+
+$("iv-n").addEventListener("change", (e) => { S.iv.n = +e.target.value; touchBuilder(); render(); });
+$("iv-unit").addEventListener("change", (e) => { S.iv.unit = e.target.value; S.iv.n = e.target.value === "minutes" ? 15 : 1; touchBuilder(); render(); });
+$("iv-offset").addEventListener("change", (e) => { S.iv.offset = +e.target.value; touchBuilder(); render(); });
+$("iv-win").addEventListener("click", () => { S.iv.win = !S.iv.win; touchBuilder(); render(); });
+$("iv-from").addEventListener("change", (e) => { S.iv.from = +e.target.value; touchBuilder(); render(); });
+$("iv-to").addEventListener("change", (e) => { S.iv.to = +e.target.value; touchBuilder(); render(); });
+document.querySelectorAll("[data-days]").forEach((g) => g.addEventListener("click", (e) => {
+  const b = e.target.closest(".day"); if (!b) return; const set = g.dataset.days === "weekly" ? S.week : S.iv.days; const d = +b.dataset.d;
+  set.has(d) ? set.delete(d) : set.add(d); touchBuilder(); render();
+}));
+document.querySelectorAll("[data-quick]").forEach((b) => b.addEventListener("click", () => {
+  S.week = new Set({ weekdays: [1, 2, 3, 4, 5], weekends: [0, 6], all: [0, 1, 2, 3, 4, 5, 6] }[b.dataset.quick]); touchBuilder(); render();
+}));
+$("times").addEventListener("change", (e) => { if (e.target.dataset.i !== undefined && e.target.value) { S.times[+e.target.dataset.i] = e.target.value; touchBuilder(); render(); } });
+$("times").addEventListener("click", (e) => {
+  const rm = e.target.closest("[data-rm]");
+  if (rm) { S.times.splice(+rm.dataset.rm, 1); touchBuilder(); renderTimes(); render(); $("times").querySelector("input")?.focus(); return; }
+  if (e.target.id === "add-time") {
+    const last = parseHM(S.times.at(-1) || "08:00"); const h = Math.min(23, last.h + 4);
+    S.times.push(`${String(h).padStart(2, "0")}:${String(last.m).padStart(2, "0")}`); touchBuilder(); renderTimes(); render();
+    const ins = $("times").querySelectorAll("input"); ins[ins.length - 1].focus();
+  }
+});
+document.querySelectorAll('input[name="mkind"]').forEach((r) => r.addEventListener("change", () => { S.mo.kind = r.value; touchBuilder(); render(); }));
+$("mo-day").addEventListener("change", (e) => { S.mo.day = e.target.value === "last" ? "last" : +e.target.value; touchBuilder(); render(); });
+$("mo-nth").addEventListener("change", (e) => { S.mo.nth = +e.target.value; touchBuilder(); render(); });
+$("mo-wd").addEventListener("change", (e) => { S.mo.wd = +e.target.value; touchBuilder(); render(); });
+$("cron").addEventListener("input", (e) => { S.cron = e.target.value; S.cronEdited = true; render(); });
+$("ends-seg").addEventListener("click", (e) => { const b = e.target.closest("[data-ends]"); if (b) { S.ends.kind = b.dataset.ends; render(); } });
+$("ends-date").addEventListener("change", (e) => { S.ends.date = e.target.value; render(); });
+$("ends-runs").addEventListener("input", (e) => { S.ends.runs = e.target.value; render(); });
+$("starts-seg").addEventListener("click", (e) => { const b = e.target.closest("[data-starts]"); if (b) { S.starts.kind = b.dataset.starts; render(); } });
+$("starts-date").addEventListener("change", (e) => { S.starts.date = e.target.value; render(); });
+$("f-name").addEventListener("input", (e) => { S.name = e.target.value; });
+$("f-prompt").addEventListener("input", (e) => { S.prompt = e.target.value; render(); });
+$("f-host").addEventListener("change", (e) => { S.host = e.target.value; render(); });
+
+/* time zone combobox */
+let tzActive = 0;
+function tzItems() { const q = $("tz-q").value.trim().toLowerCase(); return TZS.filter((z) => !q || z.toLowerCase().replace(/_/g, " ").includes(q.replace(/_/g, " "))); }
+function renderTz() {
+  const items = tzItems(); tzActive = Math.min(tzActive, Math.max(0, items.length - 1));
+  $("tz-list").innerHTML = items.length ? items.map((z, i) => `<li role="option" id="tz-o-${i}" data-z="${z}" aria-selected="${z === S.tz}" class="${i === tzActive ? "active" : ""}"><span><span class="chk">${z === S.tz ? "✓" : ""}</span> ${z}${z === DEVICE_TZ ? " (this device)" : ""}</span><span class="off">${tzOffset(z, new Date(S.now))}</span></li>`).join("") : `<li class="empty">No time zones found</li>`;
+  $("tz-q").setAttribute("aria-activedescendant", items.length ? `tz-o-${tzActive}` : "");
+  $(`tz-o-${tzActive}`)?.scrollIntoView({ block: "nearest" });
+}
+function openTz(open) {
+  $("tz-pop").hidden = !open; $("tz-btn").setAttribute("aria-expanded", open);
+  if (open) { $("tz-q").value = ""; tzActive = Math.max(0, TZS.indexOf(S.tz)); renderTz(); $("tz-q").focus(); }
+}
+function pickTz(z) { S.tz = z; openTz(false); $("tz-btn").focus(); render(); }
+$("tz-btn").addEventListener("click", () => openTz($("tz-pop").hidden));
+$("tz-q").addEventListener("input", () => { tzActive = 0; renderTz(); });
+$("tz-q").addEventListener("keydown", (e) => {
+  const items = tzItems();
+  if (e.key === "ArrowDown") { e.preventDefault(); tzActive = Math.min(items.length - 1, tzActive + 1); renderTz(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); tzActive = Math.max(0, tzActive - 1); renderTz(); }
+  else if (e.key === "Enter") { e.preventDefault(); if (items[tzActive]) pickTz(items[tzActive]); }
+  else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); openTz(false); $("tz-btn").focus(); }
+});
+$("tz-list").addEventListener("mousedown", (e) => { const li = e.target.closest("[data-z]"); if (li) { e.preventDefault(); pickTz(li.dataset.z); } });
+document.addEventListener("mousedown", (e) => { if (!$("tz-pop").hidden && !e.target.closest(".tz")) openTz(false); });
+
+/* sheet lifecycle */
+function closeSheet() { S.status = "closed"; $("closed-text").textContent = "Sheet closed"; render(); $("reopen").focus(); }
+$("close").addEventListener("click", closeSheet);
+$("cancel").addEventListener("click", closeSheet);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("sheet").hidden && $("tz-pop").hidden) closeSheet(); });
+function reopen() { load($("m-state").value); $("f-prompt").focus(); }
+$("reopen").addEventListener("click", reopen);
+$("reopen-top").addEventListener("click", reopen);
+let saveTimer = null;
+$("submit").addEventListener("click", () => {
+  S.status = "saving"; S.error = null; render();
+  saveTimer = setTimeout(() => {
+    const d = derive(S); S.status = "saved";
+    const row = document.createElement("div"); row.className = "sched-row new";
+    row.innerHTML = `<div class="t"><div></div><div></div></div><div class="next"></div>`;
+    row.querySelector(".t div").textContent = S.name || S.prompt.slice(0, 40);
+    row.querySelector(".t div:last-child").textContent = `${d.summary} · ${S.host}`;
+    row.querySelector(".next").textContent = $("runs").querySelector("li:not(.skipped) .rel")?.textContent || "";
+    $("sched-list").prepend(row);
+    $("closed-text").textContent = S.title === "New schedule" ? "Schedule created" : "Schedule saved";
+    render(); $("reopen").focus();
+  }, 1400);
+});
+
+/* trap focus inside the sheet */
+$("sheet").addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const f = [...$("sheet").querySelectorAll("button, input, select, textarea, [tabindex='0']")].filter((n) => !n.disabled && n.offsetParent !== null && n.tabIndex >= 0);
+  if (!f.length) return; const first = f[0], last = f.at(-1);
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
+
+/* ===================================================================================== mock chrome */
+function load(key) {
+  clearTimeout(saveTimer);
+  const phase = S.phase; S = base(); S.phase = phase; (PRESETS[key] || PRESETS.blank)(S);
+  renderStatic(); renderTimes(); render();
+  const c = reader(S.tz)(new Date(S.now));
+  $("m-clock").textContent = `Preview clock: ${fmtRun(S.now, DEVICE_TZ).date} ${c.year}, ${fmtRun(S.now, DEVICE_TZ).time}`;
+}
+$("m-state").addEventListener("change", (e) => { load(e.target.value); syncUrl(); });
+function setFrame(f) {
+  document.querySelectorAll("[data-frame]").forEach((b) => b.tagName === "BUTTON" && b.setAttribute("aria-pressed", b.dataset.frame === f));
+  const eff = f === "auto" ? (matchMedia("(max-width: 640px)").matches ? "mobile" : "desktop") : f;
+  document.body.dataset.frame = eff; $("device").classList.toggle("compact", eff === "mobile" || matchMedia("(max-width: 640px)").matches);
+  frame = f;
+}
+let frame = "desktop";
+document.querySelectorAll(".mockbar [data-frame]").forEach((b) => b.addEventListener("click", () => { setFrame(b.dataset.frame); syncUrl(); }));
+matchMedia("(max-width: 640px)").addEventListener("change", () => setFrame(frame));
+document.querySelectorAll("[data-phase]").forEach((b) => b.addEventListener("click", () => {
+  S.phase = +b.dataset.phase; document.querySelectorAll("[data-phase]").forEach((x) => x.setAttribute("aria-pressed", x === b));
+  if (S.phase === 1) { if (S.mo.day === "last") S.mo.day = 31; if (S.mo.nth === -1) S.mo.nth = 4; }
+  renderStatic(); renderTimes(); render(); syncUrl();
+}));
+$("m-annotate").addEventListener("change", (e) => { document.body.dataset.annotate = e.target.checked ? "on" : "off"; syncUrl(); });
+function syncUrl() {
+  const q = new URLSearchParams({ state: $("m-state").value, frame, phase: S.phase, tags: document.body.dataset.annotate });
+  history.replaceState(null, "", "?" + q);
+}
+(function init() {
+  const q = new URLSearchParams(location.search);
+  if (q.get("state")) $("m-state").value = q.get("state");
+  S.phase = q.get("phase") === "2" ? 2 : 1;
+  document.querySelectorAll("[data-phase]").forEach((x) => x.setAttribute("aria-pressed", x.dataset.phase === String(S.phase)));
+  if (q.get("tags") === "on") { $("m-annotate").checked = true; document.body.dataset.annotate = "on"; }
+  setFrame(q.get("frame") || (matchMedia("(max-width: 640px)").matches ? "auto" : "desktop"));
+  load($("m-state").value);
+})();
+</script>
+</body>
+</html>
