@@ -1,0 +1,4763 @@
+From c2d23c64b7f71864c5fc16abde4d1bc8b0582b4b Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 19:24:12 -0600
+Subject: [PATCH] fork: voice mode shows agent status in a panel tab, mic state
+ in the strip
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Muting used to replace the agent's Thinking/Speaking label, because one
+resolver returned a single status and muted won over every phase. Human and
+agent state now render separately.
+
+- PanelTab: a design-system tab that peeks from behind a panel (one SVG
+  outline with concave base flares; hidden/compact/expanded; slow
+  ease-in-out rise, sink and resize; reduced motion). /design/panel-tab and
+  a catalog entry.
+- ShapeMorph: any-preset-to-any-preset outline morph (orbit, bars, ring,
+  dot, ellipsis, lineup), Skia on native and SVG on web (no CanvasKit on
+  web), shared worklet-safe shape model with tests. /design/shape-morph and
+  a catalog entry.
+- VolumeMeter mode think|live: orbit while the agent thinks, morphing into
+  the live bars and handing off to the device-pixel-snapped bars.
+- Voice mode: resolveMicState + resolveAgentVoiceStatus replace
+  resolveRealtimeVoiceStatusKey. The agent's status ("Claude · Thinking",
+  "Claude · Speaking" with an avatar ring, compact avatar while waiting)
+  lives in a centered PanelTab behind the composer card with its own polite
+  live region. The strip shows only the mic toggle ("Mic on" / "Muted",
+  aria-pressed), the Space hint and End. The jump-to-bottom button sits
+  above the tab. Speaking uses agentPlaybackLevel (idle pulse until voice
+  telemetry reports a playback level).
+- i18n for all nine locales; worklet declaration-order rule in
+  docs/coding-standards.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ docs/coding-standards.md                      |   1 +
+ packages/app/src/agent-stream/view.tsx        |  24 +-
+ .../app/src/components/agent-voice-tab.tsx    | 372 +++++++++++
+ .../src/components/realtime-voice-strip.tsx   | 192 +++---
+ packages/app/src/components/ui/panel-tab.tsx  | 409 ++++++++++++
+ .../src/components/ui/shape-morph/index.tsx   |  66 ++
+ .../components/ui/shape-morph/index.web.tsx   |  58 ++
+ .../components/ui/shape-morph/shapes.test.ts  | 237 +++++++
+ .../src/components/ui/shape-morph/shapes.ts   | 618 ++++++++++++++++++
+ .../ui/shape-morph/use-shape-morph.ts         | 251 +++++++
+ packages/app/src/components/volume-meter.tsx  |  95 ++-
+ packages/app/src/composer/index.tsx           |   3 +
+ packages/app/src/composer/input/input.tsx     |  18 +
+ .../app/src/composer/input/labels.test.ts     |  89 ++-
+ packages/app/src/composer/input/labels.ts     |  65 +-
+ .../app/src/composer/input/presentation.tsx   |  56 +-
+ packages/app/src/contexts/voice-context.tsx   |  12 +
+ packages/app/src/design/designs/catalog.tsx   |  92 ++-
+ packages/app/src/design/designs/panel-tab.md  |  45 ++
+ packages/app/src/design/designs/panel-tab.tsx | 262 ++++++++
+ .../app/src/design/designs/shape-morph.md     |  43 ++
+ .../app/src/design/designs/shape-morph.tsx    | 356 ++++++++++
+ .../app/src/design/designs/voice-strip.tsx    | 231 ++++++-
+ .../app/src/design/designs/volume-meter.tsx   |  66 +-
+ packages/app/src/design/registry.ts           |   4 +
+ packages/app/src/i18n/resources/ar.ts         |   9 +-
+ packages/app/src/i18n/resources/en.ts         |   9 +-
+ packages/app/src/i18n/resources/es.ts         |   9 +-
+ packages/app/src/i18n/resources/fr.ts         |   9 +-
+ packages/app/src/i18n/resources/ja.ts         |   9 +-
+ packages/app/src/i18n/resources/ko.ts         |   9 +-
+ packages/app/src/i18n/resources/pt-BR.ts      |   9 +-
+ packages/app/src/i18n/resources/ru.ts         |   9 +-
+ packages/app/src/i18n/resources/zh-CN.ts      |   9 +-
+ packages/app/src/panels/agent-panel.tsx       |   7 +
+ .../src/utils/provider-definitions.test.ts    |  25 +
+ .../app/src/utils/provider-definitions.ts     |  18 +
+ 37 files changed, 3530 insertions(+), 266 deletions(-)
+ create mode 100644 packages/app/src/components/agent-voice-tab.tsx
+ create mode 100644 packages/app/src/components/ui/panel-tab.tsx
+ create mode 100644 packages/app/src/components/ui/shape-morph/index.tsx
+ create mode 100644 packages/app/src/components/ui/shape-morph/index.web.tsx
+ create mode 100644 packages/app/src/components/ui/shape-morph/shapes.test.ts
+ create mode 100644 packages/app/src/components/ui/shape-morph/shapes.ts
+ create mode 100644 packages/app/src/components/ui/shape-morph/use-shape-morph.ts
+ create mode 100644 packages/app/src/design/designs/panel-tab.md
+ create mode 100644 packages/app/src/design/designs/panel-tab.tsx
+ create mode 100644 packages/app/src/design/designs/shape-morph.md
+ create mode 100644 packages/app/src/design/designs/shape-morph.tsx
+ create mode 100644 packages/app/src/utils/provider-definitions.test.ts
+
+diff --git a/docs/coding-standards.md b/docs/coding-standards.md
+index 27f958523..550f9eaf4 100644
+--- a/docs/coding-standards.md
++++ b/docs/coding-standards.md
+@@ -94,6 +94,7 @@ For testing rules, see [testing.md](testing.md).
+ - Equality functions prevent React renders; they do not prevent selector callbacks from running. A selector attached to a hot store must be O(1) when its relevant source references have not changed.
+ - Retained native panels use `RetainedPanel`. If an existing gesture/layout wrapper must own visibility, wrap its contents in `RetainedPanelActivity` instead. Keep keyed panel roots in a stable sibling order, include the newly active panel in the same render, centralize subscriptions, and gate genuine effects through `useRetainedPanelActive`. Follow the [native ownership constraints and chat suspension boundary](mobile-panels.md) when stopping hidden rendering.
+ - Infinite animations are subscriptions. Start them only while their retained panel is active, and cancel a shared clock when its final active consumer leaves. Synchronized animations use one clock per animation family and feed active instances through local shared values; retained hidden instances stay mounted but unsubscribed. Match state updates to the actual visual cadence; do not run every style worklet at 60 fps when the rendered value changes only a few times per second.
++- Declare a worklet above every worklet that calls it. The worklets Babel plugin turns each `"worklet"` function into a `const` that captures its callees when it is created, so function hoisting no longer applies: a call to a worklet declared further down throws `Cannot access '<name>' before initialization` when the module loads, on web and native.
+ - Stable references for props that cross `memo` boundaries or feed dependency arrays. Static literals at module scope `as const`; derived with `useMemo`; handlers with `useCallback` only when there's a memoized beneficiary.
+ - Use stable ids for `key`, never array index for reorderable/filterable lists.
+ - Context for stable values (theme, auth). Store with selectors for state that changes.
+diff --git a/packages/app/src/agent-stream/view.tsx b/packages/app/src/agent-stream/view.tsx
+index 68db9e1de..755cfbe7a 100644
+--- a/packages/app/src/agent-stream/view.tsx
++++ b/packages/app/src/agent-stream/view.tsx
+@@ -273,6 +273,8 @@ export interface AgentStreamViewProps {
+   bottomOverlayTailClearance?: number;
+   /** Bottom offset required for controls floating above that overlay. */
+   bottomOverlayControlClearance?: number;
++  /** Least bottom offset for those controls when nothing clears them. Defaults to 16. */
++  bottomOverlayControlGap?: number;
+   toast?: ToastApi | null;
+   onOpenWorkspaceFile?: (request: WorkspaceFileOpenRequest) => void;
+   readOnly?: boolean;
+@@ -308,8 +310,13 @@ function useRetainedValue<T>(value: T, active: boolean): T {
+ const EMPTY_PENDING_MESSAGE_SUBMISSIONS: readonly PendingMessageSubmission[] = [];
+ const GROUPED_TOOL_CALL_DETAIL_MAX_HEIGHT = 200;
+ 
+-function resolveBottomOverlayControlOffset(clearance: number | undefined): number {
+-  return Math.max(16, clearance ?? 0);
++const DEFAULT_BOTTOM_OVERLAY_CONTROL_GAP = 16;
++
++function resolveBottomOverlayControlOffset(input: {
++  clearance: number | undefined;
++  gap: number | undefined;
++}): number {
++  return Math.max(input.gap ?? DEFAULT_BOTTOM_OVERLAY_CONTROL_GAP, input.clearance ?? 0);
+ }
+ 
+ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamViewProps>(
+@@ -327,6 +334,7 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
+       isAuthoritativeHistoryReady = true,
+       bottomOverlayTailClearance = 0,
+       bottomOverlayControlClearance,
++      bottomOverlayControlGap,
+       toast,
+       onOpenWorkspaceFile,
+       readOnly = false,
+@@ -970,9 +978,14 @@ const AgentStreamViewComponent = forwardRef<AgentStreamViewHandle, AgentStreamVi
+     const scrollToBottomContainerStyle = useMemo(
+       () => [
+         stylesheet.scrollToBottomContainer,
+-        { bottom: resolveBottomOverlayControlOffset(bottomOverlayControlClearance) },
++        {
++          bottom: resolveBottomOverlayControlOffset({
++            clearance: bottomOverlayControlClearance,
++            gap: bottomOverlayControlGap,
++          }),
++        },
+       ],
+-      [bottomOverlayControlClearance],
++      [bottomOverlayControlClearance, bottomOverlayControlGap],
+     );
+     const listEmptyComponent = useMemo(
+       () =>
+@@ -1264,6 +1277,9 @@ function agentStreamViewPropsEqual(
+   if (left.bottomOverlayControlClearance !== right.bottomOverlayControlClearance) {
+     reasons.push("bottomOverlayControlClearance");
+   }
++  if (left.bottomOverlayControlGap !== right.bottomOverlayControlGap) {
++    reasons.push("bottomOverlayControlGap");
++  }
+   if (left.toast !== right.toast) reasons.push("toast");
+   if (left.onOpenWorkspaceFile !== right.onOpenWorkspaceFile) reasons.push("onOpenWorkspaceFile");
+   if (left.readOnly !== right.readOnly) reasons.push("readOnly");
+diff --git a/packages/app/src/components/agent-voice-tab.tsx b/packages/app/src/components/agent-voice-tab.tsx
+new file mode 100644
+index 000000000..8210e8a6a
+--- /dev/null
++++ b/packages/app/src/components/agent-voice-tab.tsx
+@@ -0,0 +1,372 @@
++import { useEffect, useMemo, useRef, type ReactNode } from "react";
++import { useTranslation } from "react-i18next";
++import { AccessibilityInfo, PixelRatio, Platform, Text, View } from "react-native";
++import Animated, {
++  cancelAnimation,
++  Easing,
++  interpolateColor,
++  useAnimatedStyle,
++  useReducedMotion,
++  useSharedValue,
++  withRepeat,
++  withTiming,
++} from "react-native-reanimated";
++import { StyleSheet, withUnistyles } from "react-native-unistyles";
++import { useProviderIcon } from "@/components/provider-icons";
++import { useRetainedPanelActive } from "@/components/retained-panel";
++import { PanelTab } from "@/components/ui/panel-tab";
++import { VolumeMeter } from "@/components/volume-meter";
++import {
++  resolveAgentVoiceStatus,
++  resolveAgentVoiceStatusKey,
++  resolveAgentVoiceTabState,
++  type AgentVoiceStatus,
++} from "@/composer/input/labels";
++import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
++import { ICON_SIZE, SPACING, type Theme } from "@/styles/theme";
++import { resolveProviderDisplayName } from "@/utils/provider-definitions";
++import type { VoiceRuntimePhase } from "@/voice/voice-runtime";
++
++/** The voice session the composer's agent is in. */
++export interface AgentVoiceSession {
++  serverId: string;
++  /** The agent's provider id, for its name and icon. Unknown before the agent loads. */
++  provider: string | null;
++  cwd: string | null;
++  phase: VoiceRuntimePhase;
++}
++
++interface AgentVoiceTabProps {
++  /** null while voice is off for this composer's agent. */
++  session: AgentVoiceSession | null;
++  /**
++   * The agent's playback level, 0..1, for the Speaking meter. Voice telemetry has no
++   * playback level yet, so this stays 0 and the meter runs its idle pulse. Pass the real
++   * level here once telemetry carries one.
++   */
++  agentPlaybackLevel?: number;
++  /** Fill the parent, for a fullscreen composer. */
++  fill?: boolean;
++  /** The composer card. It must be opaque: it hides the tab's base. */
++  children: ReactNode;
++}
++
++/** The stream's jump button sits this far above the tab's top, on the tab's center axis. */
++export const AGENT_VOICE_TAB_JUMP_GAP = SPACING[2];
++
++const AVATAR_SIZE = 20;
++const AVATAR_ICON_SIZE = ICON_SIZE.xs;
++// The Speaking ring is two box-shadow layers on the avatar itself, a gap in the tab surface
++// and the ring outside it, so it is drawn from the avatar's own pixel-snapped box and can't
++// drift off-center. Not an outline: Chrome rounds outline width and offset to whole CSS
++// pixels, which turns the pulse into 1px jumps.
++const RING_GAP = 1.5;
++const RING_WIDTH = 1.5;
++// The pulse moves the ring out and back the same distance on every side and swells its
++// alpha, so it reads as breathing from the center.
++const RING_SPREAD_REST = -1;
++const RING_SPREAD_PEAK = 0.5;
++const RING_ALPHA_REST = 0.15;
++const RING_ALPHA_PEAK = 0.8;
++const RING_ALPHA_STILL = 0.6;
++const RING_PULSE_HALF_MS = 600;
++const RING_FADE_MS = 200;
++
++/** Whole device pixels, so the ring's width and gap paint evenly on both sides. */
++function snapToDevicePixels(length: number, scale: number): number {
++  return Math.max(1, Math.round(length * scale)) / scale;
++}
++
++/** The status the label shows: the last busy one, so it never flips while fading out. */
++function useShownBusyStatus(status: AgentVoiceStatus): "thinking" | "speaking" {
++  const shown = useRef<"thinking" | "speaking">("thinking");
++  if (status === "thinking" || status === "speaking") shown.current = status;
++  return shown.current;
++}
++
++function useRetainedSession(session: AgentVoiceSession | null): AgentVoiceSession | null {
++  const retained = useRef(session);
++  if (session) retained.current = session;
++  return retained.current;
++}
++
++/**
++ * The agent's side of a voice session: a tab that peeks from behind the composer card with
++ * the agent's avatar, and while it thinks or speaks, its name, status and meter. Mute is the
++ * user's side and lives in the voice strip, so it never changes what this tab shows.
++ */
++export function AgentVoiceTab({
++  session,
++  agentPlaybackLevel = 0,
++  fill = false,
++  children,
++}: AgentVoiceTabProps) {
++  const { t } = useTranslation();
++  // Keep the last session while the tab sinks away after voice ends.
++  const shownSession = useRetainedSession(session);
++  const status: AgentVoiceStatus = session
++    ? resolveAgentVoiceStatus({ phase: session.phase })
++    : "ending";
++  const busyStatus = useShownBusyStatus(status);
++  const provider = shownSession?.provider ?? null;
++  const { entries } = useProvidersSnapshot(session ? session.serverId : null, {
++    cwd: shownSession?.cwd,
++    enabled: session !== null,
++  });
++  const name = provider
++    ? resolveProviderDisplayName(provider, entries)
++    : t("realtimeVoice.agentFallbackName");
++  const statusText = t(resolveAgentVoiceStatusKey(status));
++  const announcement = t("realtimeVoice.agentStatus", { provider: name, status: statusText });
++
++  useEffect(() => {
++    // iOS has no live regions; announce each change of status instead.
++    if (Platform.OS === "ios" && session) AccessibilityInfo.announceForAccessibility(announcement);
++  }, [announcement, session]);
++
++  const leading = useMemo(
++    () => (
++      <AgentAvatar
++        provider={provider ?? ""}
++        serverId={shownSession?.serverId ?? null}
++        isSpeaking={status === "speaking"}
++        announcement={announcement}
++      />
++    ),
++    [provider, shownSession?.serverId, status, announcement],
++  );
++  const label = useMemo(
++    () => <AgentVoiceLabel name={name} status={busyStatus} level={agentPlaybackLevel} />,
++    [name, busyStatus, agentPlaybackLevel],
++  );
++
++  return (
++    <PanelTab
++      state={resolveAgentVoiceTabState(status)}
++      leading={leading}
++      label={label}
++      fill={fill}
++      role="status"
++      aria-live="polite"
++      accessibilityLiveRegion="polite"
++      aria-label={announcement}
++      testID="agent-voice-tab"
++    >
++      {children}
++    </PanelTab>
++  );
++}
++
++interface AgentAvatarProps {
++  provider: string;
++  serverId: string | null;
++  isSpeaking: boolean;
++  /** The tab's full status, as live-region text a screen reader announces when it changes. */
++  announcement: string;
++}
++
++function AgentAvatar({ provider, serverId, isSpeaking, announcement }: AgentAvatarProps) {
++  const Icon = useProviderIcon(provider, serverId);
++  const icon = useMemo(
++    () => <ThemedAvatarIcon Icon={Icon} uniProps={avatarIconColorMapping} />,
++    [Icon],
++  );
++  return (
++    <View>
++      <ThemedAvatarRing isSpeaking={isSpeaking} uniProps={avatarRingColorMapping}>
++        {icon}
++      </ThemedAvatarRing>
++      <Text style={styles.announcement} testID="agent-voice-tab-announcement">
++        {announcement}
++      </Text>
++    </View>
++  );
++}
++
++function AvatarIcon({ Icon, color }: { Icon: ReturnType<typeof useProviderIcon>; color: string }) {
++  return <Icon size={AVATAR_ICON_SIZE} color={color} />;
++}
++const ThemedAvatarIcon = withUnistyles(AvatarIcon);
++function avatarIconColorMapping(theme: Theme) {
++  return { color: theme.colors.foreground };
++}
++
++interface AvatarRingProps {
++  isSpeaking: boolean;
++  fillColor: string;
++  /** The surface behind the avatar: the ring fades from it, so its rest alpha is a tint. */
++  surfaceColor: string;
++  ringColor: string;
++  children: ReactNode;
++}
++
++/**
++ * The avatar disc. Reanimated owns this node, so its colors arrive as props (withUnistyles)
++ * and go in as plain styles, never as a Unistyles style (docs/unistyles.md).
++ */
++function AvatarRing({ isSpeaking, fillColor, surfaceColor, ringColor, children }: AvatarRingProps) {
++  const reduceMotion = useReducedMotion();
++  const isPanelActive = useRetainedPanelActive();
++  const scale = PixelRatio.get();
++  const ringGap = snapToDevicePixels(RING_GAP, scale);
++  const ringWidth = snapToDevicePixels(RING_WIDTH, scale);
++  const visibility = useSharedValue(isSpeaking ? 1 : 0);
++  const pulse = useSharedValue(0);
++
++  useEffect(() => {
++    visibility.value = reduceMotion
++      ? Number(isSpeaking)
++      : withTiming(Number(isSpeaking), { duration: RING_FADE_MS });
++  }, [isSpeaking, reduceMotion, visibility]);
++
++  // The pulse is an infinite animation, so it runs only while the ring shows on an active panel.
++  const isPulsing = isSpeaking && isPanelActive && !reduceMotion;
++  useEffect(() => {
++    if (!isPulsing) {
++      cancelAnimation(pulse);
++      pulse.value = 0;
++      return;
++    }
++    pulse.value = withRepeat(
++      withTiming(1, { duration: RING_PULSE_HALF_MS, easing: Easing.inOut(Easing.ease) }),
++      -1,
++      true,
++    );
++    return () => cancelAnimation(pulse);
++  }, [isPulsing, pulse]);
++
++  const ringStyle = useAnimatedStyle(() => {
++    const restAlpha = reduceMotion ? RING_ALPHA_STILL : RING_ALPHA_REST;
++    const peakAlpha = reduceMotion ? RING_ALPHA_STILL : RING_ALPHA_PEAK;
++    const alpha = (restAlpha + (peakAlpha - restAlpha) * pulse.value) * visibility.value;
++    const spread = reduceMotion
++      ? 0
++      : RING_SPREAD_REST + (RING_SPREAD_PEAK - RING_SPREAD_REST) * pulse.value;
++    if (visibility.value <= 0) return { boxShadow: [] };
++    const gap = ringGap + spread;
++    return {
++      boxShadow: [
++        { offsetX: 0, offsetY: 0, blurRadius: 0, spreadDistance: gap, color: surfaceColor },
++        {
++          offsetX: 0,
++          offsetY: 0,
++          blurRadius: 0,
++          spreadDistance: gap + ringWidth,
++          color: interpolateColor(alpha, [0, 1], [surfaceColor, ringColor]),
++        },
++      ],
++    };
++  });
++  const fillStyle = useMemo(() => ({ backgroundColor: fillColor }), [fillColor]);
++
++  return (
++    <Animated.View style={[avatarStyles.avatar, fillStyle, ringStyle]} testID="agent-voice-avatar">
++      {children}
++    </Animated.View>
++  );
++}
++const ThemedAvatarRing = withUnistyles(AvatarRing);
++function avatarRingColorMapping(theme: Theme) {
++  return {
++    fillColor: theme.colors.surface3,
++    surfaceColor: theme.colors.surface2,
++    ringColor: theme.colors.accentBright,
++  };
++}
++
++interface AgentVoiceLabelProps {
++  name: string;
++  status: "thinking" | "speaking";
++  level: number;
++}
++
++/** "Claude · ⋯ Thinking". The screen reader hears the tab's name, so the row is hidden. */
++function AgentVoiceLabel({ name, status, level }: AgentVoiceLabelProps) {
++  const { t } = useTranslation();
++  return (
++    <View style={styles.label} aria-hidden importantForAccessibility="no-hide-descendants">
++      <Text style={styles.name} numberOfLines={1}>
++        {name}
++      </Text>
++      <Text style={styles.separator}>·</Text>
++      <View style={styles.status}>
++        <VolumeMeter
++          volume={level}
++          orientation="horizontal"
++          variant="mini"
++          mode={status === "thinking" ? "think" : "live"}
++        />
++        <ThemedStatusWord
++          text={t(resolveAgentVoiceStatusKey(status))}
++          uniProps={statusWordColorMapping}
++        />
++      </View>
++    </View>
++  );
++}
++
++function StatusWord({ text, color }: { text: string; color: string }) {
++  const style = useMemo(() => [styles.statusText, { color }], [color]);
++  return (
++    <Text style={style} numberOfLines={1}>
++      {text}
++    </Text>
++  );
++}
++const ThemedStatusWord = withUnistyles(StatusWord);
++// foregroundMuted on surface2 is 5.8:1 in dark but 4.4:1 in light, under AA for 12px text,
++// so light uses foreground. A mapping, not a StyleSheet branch: on web the stylesheet is
++// built once with color variables, so a colorScheme branch there would never switch.
++function statusWordColorMapping(theme: Theme) {
++  return {
++    color: theme.colorScheme === "light" ? theme.colors.foreground : theme.colors.foregroundMuted,
++  };
++}
++
++// Plain styles: the avatar disc is a Reanimated node.
++const avatarStyles = {
++  avatar: {
++    width: AVATAR_SIZE,
++    height: AVATAR_SIZE,
++    borderRadius: AVATAR_SIZE / 2,
++    alignItems: "center",
++    justifyContent: "center",
++  },
++} as const;
++
++const styles = StyleSheet.create((theme) => ({
++  // Off-screen live-region text: present for assistive tech, takes no layout.
++  announcement: {
++    position: "absolute",
++    width: 1,
++    height: 1,
++    overflow: "hidden",
++    opacity: 0,
++  },
++  label: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[2],
++    minWidth: 0,
++  },
++  name: {
++    flexShrink: 1,
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++    color: theme.colors.foreground,
++  },
++  separator: {
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++    color: theme.colors.foregroundExtraMuted,
++  },
++  status: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[1.5],
++  },
++  statusText: {
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++  },
++}));
+diff --git a/packages/app/src/components/realtime-voice-strip.tsx b/packages/app/src/components/realtime-voice-strip.tsx
+index bf1ad4042..71efbf9e9 100644
+--- a/packages/app/src/components/realtime-voice-strip.tsx
++++ b/packages/app/src/components/realtime-voice-strip.tsx
+@@ -5,11 +5,14 @@ import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
+ import { StyleSheet, withUnistyles } from "react-native-unistyles";
+ import { Mic, MicOff, Space, X } from "lucide-react-native";
+ import { Button } from "@/components/ui/button";
+-import { buttonControlHeight, type ButtonControlSize } from "@/components/ui/control-geometry";
+-import { LoadingSpinner } from "@/components/ui/loading-spinner";
++import {
++  buttonControlHeight,
++  buttonIconSize,
++  type ButtonControlSize,
++} from "@/components/ui/control-geometry";
+ import { Shortcut } from "@/components/ui/shortcut";
+ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+-import { resolveRealtimeVoiceStatusKey } from "@/composer/input/labels";
++import { resolveMicState } from "@/composer/input/labels";
+ import { isWeb } from "@/constants/platform";
+ import { useVoiceTelemetry } from "@/contexts/voice-context";
+ import { useKeyboardShortcutsAvailable } from "@/keyboard/availability";
+@@ -40,23 +43,17 @@ const COMPACT_HIT_SLOP = (44 - buttonControlHeight[COMPACT_SIZE]) / 2;
+ // The Space keycap trails the Mute label. xs is the smallest step on the icon scale, the
+ // same step as the label's mic on desktop.
+ const SPACE_GLYPH_SIZE = ICON_SIZE.xs;
+-// Compact Mute is icon-only so the status fits at 375px in every locale. Its glyph
+-// replaces the toolbar mic, so it keeps the toolbar's glyph size.
+-const COMPACT_MUTE_GLYPH_SIZE = isWeb ? ICON_SIZE.md : ICON_SIZE.lg;
+ // The user is normally silent in every phase but Listening, so the meter's idle motion carries
+ // the phase. Speaking keeps the listening wave: the mic stays open and talking interrupts.
+ function meterIdleForPhase(phase: VoiceRuntimePhase): VolumeMeterIdle {
+   return phase === "submitting" || phase === "waiting" ? "thinking" : "listening";
+ }
+ 
+-const COMPACT_MUTE_BUTTON = {
+-  width: buttonControlHeight[COMPACT_SIZE],
+-  height: buttonControlHeight[COMPACT_SIZE],
+-};
+-
+ /**
+- * Voice mode controls, the first row inside the composer card. The text box stays live
+- * underneath, so voice and typing share one composer.
++ * Voice mode controls, the first row inside the composer card. The strip is your side only:
++ * the mic toggle and End. The agent's side is the tab behind the card (AgentVoiceTab), so
++ * muting can never hide what the agent is doing. The text box stays live underneath, so
++ * voice and typing share one composer.
+  */
+ export function RealtimeVoiceStrip({
+   isMuted,
+@@ -70,13 +67,15 @@ export function RealtimeVoiceStrip({
+ }: RealtimeVoiceStripProps) {
+   const { t } = useTranslation();
+   const { volume, isSpeaking } = useVoiceTelemetry();
++  const mic = resolveMicState({ isMuted, isSwitching });
+   const size = compact ? COMPACT_SIZE : DESKTOP_SIZE;
+   const hitSlop = compact ? COMPACT_HIT_SLOP : DESKTOP_HIT_SLOP;
+-  const statusKey = resolveRealtimeVoiceStatusKey({ phase, isMuted });
+-  const muteA11yLabel = isMuted
++  const glyphSize = buttonIconSize[size];
++  // The label states your mic; the tooltip and accessible name say what pressing does.
++  const muteActionLabel = mic.isMuted
+     ? t("realtimeVoice.actions.unmute")
+     : t("realtimeVoice.actions.mute");
+-  const muteText = isMuted ? t("realtimeVoice.strip.unmute") : t("realtimeVoice.strip.mute");
++  const micText = mic.isMuted ? t("realtimeVoice.strip.muted") : t("realtimeVoice.strip.micOn");
+   // Same gate the Shortcut badge uses: the keycap only shows where keyboard shortcuts work.
+   const shortcutsAvailable = useKeyboardShortcutsAvailable();
+   const showSpaceHint = Boolean(showMuteHint && muteKeys && shortcutsAvailable);
+@@ -84,28 +83,43 @@ export function RealtimeVoiceStrip({
+     () =>
+       showSpaceHint ? (
+         <View
+-          style={isMuted ? styles.spaceHintOnDestructive : null}
++          style={mic.isMuted ? styles.spaceHintOnDestructive : null}
+           testID="realtime-voice-mute-hint"
+         >
+           <ThemedSpace
+             size={SPACE_GLYPH_SIZE}
+-            uniProps={isMuted ? destructiveForegroundColorMapping : mutedColorMapping}
++            uniProps={mic.isMuted ? destructiveForegroundColorMapping : mutedColorMapping}
+           />
+         </View>
+       ) : null,
+-    [isMuted, showSpaceHint],
++    [mic.isMuted, showSpaceHint],
+   );
+ 
+-  const pillMuteIcon = isMuted ? MicOff : Mic;
+-  const compactMuteIcon = useCallback(
++  // Mic on carries your meter beside the glyph; Muted swaps both for MicOff, so red is never
++  // the only cue.
++  const micIcon = useCallback(
+     (color: string) =>
+-      isMuted ? (
+-        <MicOff color={color} size={COMPACT_MUTE_GLYPH_SIZE} />
++      mic.isMuted ? (
++        <MicOff color={color} size={glyphSize} />
+       ) : (
+-        <Mic color={color} size={COMPACT_MUTE_GLYPH_SIZE} />
++        <View style={styles.micLead}>
++          <Mic color={color} size={glyphSize} />
++          <VolumeMeter
++            volume={volume}
++            isSpeaking={isSpeaking}
++            orientation="horizontal"
++            variant="mini"
++            idle={meterIdleForPhase(phase)}
++          />
++        </View>
+       ),
+-    [isMuted],
++    [mic.isMuted, glyphSize, volume, isSpeaking, phase],
+   );
++  // A toggle button: web gets aria-pressed (aria-checked belongs to checkboxes and switches);
++  // native reports it through the toggle's checked state.
++  const pressedProps = isWeb
++    ? { "aria-pressed": mic.isMuted }
++    : { accessibilityRole: "togglebutton" as const, accessibilityState: { checked: mic.isMuted } };
+ 
+   return (
+     <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(120)}>
+@@ -115,66 +129,47 @@ export function RealtimeVoiceStrip({
+         style={styles.row}
+         testID="realtime-voice-strip"
+       >
+-        {isSwitching ? (
+-          <ThemedLoadingSpinner size="small" uniProps={mutedColorMapping} />
+-        ) : (
+-          <VolumeMeter
+-            volume={volume}
+-            isMuted={isMuted}
+-            isSpeaking={isSpeaking}
+-            orientation="horizontal"
+-            variant="mini"
+-            idle={meterIdleForPhase(phase)}
+-          />
+-        )}
+-        <Text style={isMuted ? styles.statusMuted : styles.status} numberOfLines={1}>
+-          {t(statusKey)}
+-        </Text>
+-        <View style={compact ? styles.actionsCompact : styles.actions}>
+-          <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
+-            <TooltipTrigger asChild>
+-              <Button
+-                variant={isMuted ? "destructive" : "secondary"}
+-                size={size}
+-                leftIcon={compact ? compactMuteIcon : pillMuteIcon}
+-                trailing={compact ? null : spaceHint}
+-                onPress={onToggleMute}
+-                disabled={isSwitching}
+-                accessibilityLabel={muteA11yLabel}
+-                aria-checked={isMuted}
+-                hitSlop={hitSlop}
+-                style={compact ? styles.compactMuteButton : undefined}
+-                testID="realtime-voice-mute"
+-              >
+-                {compact ? null : muteText}
+-              </Button>
+-            </TooltipTrigger>
+-            <TooltipContent side="top" align="center" offset={8}>
+-              <View style={styles.tooltipRow}>
+-                <Text style={styles.tooltipText}>{muteA11yLabel}</Text>
+-                {muteKeys ? <Shortcut chord={muteKeys} /> : null}
+-              </View>
+-            </TooltipContent>
+-          </Tooltip>
+-          <Button
+-            variant="secondary"
+-            size={size}
+-            leftIcon={X}
+-            onPress={onStop}
+-            disabled={isSwitching}
+-            accessibilityLabel={t("realtimeVoice.actions.stop")}
+-            hitSlop={hitSlop}
+-            testID="realtime-voice-end"
+-          >
+-            {t("realtimeVoice.actions.end")}
+-          </Button>
+-        </View>
++        <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
++          <TooltipTrigger asChild>
++            <Button
++              variant={mic.isMuted ? "destructive" : "secondary"}
++              size={size}
++              leftIcon={micIcon}
++              loading={mic.isPending}
++              trailing={compact ? null : spaceHint}
++              onPress={onToggleMute}
++              accessibilityLabel={muteActionLabel}
++              {...pressedProps}
++              hitSlop={hitSlop}
++              testID="realtime-voice-mute"
++            >
++              {micText}
++            </Button>
++          </TooltipTrigger>
++          <TooltipContent side="top" align="center" offset={8}>
++            <View style={styles.tooltipRow}>
++              <Text style={styles.tooltipText}>{muteActionLabel}</Text>
++              {muteKeys ? <Shortcut chord={muteKeys} /> : null}
++            </View>
++          </TooltipContent>
++        </Tooltip>
++        <Button
++          variant="secondary"
++          size={size}
++          leftIcon={X}
++          onPress={onStop}
++          disabled={mic.isPending}
++          accessibilityLabel={t("realtimeVoice.actions.stop")}
++          hitSlop={hitSlop}
++          testID="realtime-voice-end"
++        >
++          {t("realtimeVoice.actions.end")}
++        </Button>
+       </View>
+     </Animated.View>
+   );
+ }
+ 
+-const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
+ const ThemedSpace = withUnistyles(Space);
+ const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+ const destructiveForegroundColorMapping = (theme: Theme) => ({
+@@ -182,13 +177,15 @@ const destructiveForegroundColorMapping = (theme: Theme) => ({
+ });
+ 
+ const styles = StyleSheet.create((theme) => ({
++  // Mute on the left rail, End on the right, the space between left empty.
+   row: {
+     flexDirection: "row",
+     alignItems: "center",
++    justifyContent: "space-between",
+     gap: theme.spacing[2],
+-    // No bleed on the left: the meter's first bar sits on the text's rail. The right
+-    // bleeds like the toolbar row so End's edge lands on Send's.
+-    marginRight: -6,
++    // Both ends bleed like the toolbar row, so Mute's edge lands on the toolbar's first
++    // button and End's on Send's.
++    marginHorizontal: -6,
+     // Tighter than the card's rhythm so the row reads as a header, not a floating band:
+     // desktop's 16px top padding drops to 12 (the card's bottom inset), and the 12px card
+     // gap under the hairline drops to 8.
+@@ -201,40 +198,15 @@ const styles = StyleSheet.create((theme) => ({
+     borderBottomWidth: theme.borderWidth[1],
+     borderBottomColor: theme.colors.border,
+   },
+-  status: {
+-    flex: 1,
+-    minWidth: 0,
+-    fontSize: theme.fontSize.sm,
+-    fontWeight: theme.fontWeight.medium,
+-    color: theme.colors.foregroundMuted,
+-  },
+-  // statusDanger, not destructive: destructive text fails contrast at this size.
+-  statusMuted: {
+-    flex: 1,
+-    minWidth: 0,
+-    fontSize: theme.fontSize.sm,
+-    fontWeight: theme.fontWeight.medium,
+-    color: theme.colors.statusDanger,
+-  },
+-  actions: {
+-    flexDirection: "row",
+-    alignItems: "center",
+-    gap: theme.spacing[2],
+-  },
+-  actionsCompact: {
++  micLead: {
+     flexDirection: "row",
+     alignItems: "center",
+-    gap: theme.spacing[3],
++    gap: theme.spacing[1.5],
+   },
+   // destructiveForeground has no muted step, so the keycap fades to read as secondary.
+   spaceHintOnDestructive: {
+     opacity: 0.7,
+   },
+-  compactMuteButton: {
+-    ...COMPACT_MUTE_BUTTON,
+-    paddingHorizontal: 0,
+-    borderRadius: theme.borderRadius.full,
+-  },
+   tooltipRow: {
+     flexDirection: "row",
+     alignItems: "center",
+diff --git a/packages/app/src/components/ui/panel-tab.tsx b/packages/app/src/components/ui/panel-tab.tsx
+new file mode 100644
+index 000000000..a13bea32f
+--- /dev/null
++++ b/packages/app/src/components/ui/panel-tab.tsx
+@@ -0,0 +1,409 @@
++import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
++import { PixelRatio, StyleSheet, View, type LayoutChangeEvent, type ViewProps } from "react-native";
++import Animated, {
++  createAnimatedComponent,
++  Easing,
++  useAnimatedProps,
++  useAnimatedStyle,
++  useReducedMotion,
++  useSharedValue,
++  withDelay,
++  withTiming,
++  type SharedValue,
++} from "react-native-reanimated";
++import Svg, { Path } from "react-native-svg";
++import { scheduleOnRN } from "react-native-worklets";
++import { withUnistyles } from "react-native-unistyles";
++import { SPACING, type Theme } from "@/styles/theme";
++
++/**
++ * hidden is fully sunk behind the panel and gives its reserved row back. compact sinks a
++ * little and shows only the leading content. expanded shows the leading content and label.
++ */
++export type PanelTabState = "hidden" | "compact" | "expanded";
++
++type PanelTabAccessibilityProps = Pick<
++  ViewProps,
++  | "role"
++  | "aria-live"
++  | "aria-label"
++  | "accessibilityRole"
++  | "accessibilityLabel"
++  | "accessibilityLiveRegion"
++  | "testID"
++>;
++
++interface PanelTabProps extends PanelTabAccessibilityProps {
++  state: PanelTabState;
++  /** Stays visible in compact, e.g. an avatar or a meter. At most 20px tall. */
++  leading: ReactNode;
++  /** Shown only when expanded. Keep it to one line; the tab is at most 320px wide. */
++  label?: ReactNode;
++  /** The panel the tab peeks from behind. It must be opaque: it hides the tab's base. */
++  children: ReactNode;
++  /**
++   * Grow to fill the parent instead of only shrinking with it, for a panel that fills its
++   * parent (a fullscreen composer). The wrapper sits between the parent and the panel, so it
++   * passes the panel's flex sizing through.
++   */
++  fill?: boolean;
++}
++
++// Geometry, from the voice-status mockup (option F). The tab's bottom TUCK px always sit
++// behind the panel, so the panel's top border cuts straight across the tab's base.
++const BORDER = 1;
++const CONTENT_HEIGHT = 20;
++const PAD_TOP = SPACING[2];
++const PAD_START = SPACING[2];
++const PAD_END = SPACING[4];
++const PAD_COMPACT = SPACING[1.5];
++const GAP = SPACING[2];
++/** Visible height when expanded: border, top padding, content, then 10px below it. */
++const PANEL_TAB_VISIBLE_HEIGHT = BORDER + PAD_TOP + CONTENT_HEIGHT + 10;
++const VISIBLE_HEIGHT = PANEL_TAB_VISIBLE_HEIGHT;
++const TUCK = SPACING[3];
++const TAB_HEIGHT = VISIBLE_HEIGHT + TUCK;
++/** The flare feet dip this far below the panel's top edge. */
++const FLARE_FOOT_DEPTH = SPACING[1];
++// Neither radius is a theme step. The flare leaves the tab side exactly where the top
++// corner ends, so the convex corner and the concave flare form one S-curve.
++const CORNER_RADIUS = 20;
++const FLARE_RADIUS = 22;
++const COMPACT_FLARE_RADIUS = FLARE_RADIUS * 0.75;
++const MAX_BODY_WIDTH = 320;
++// The outline is drawn on a fixed canvas so only the path changes per frame, never the
++// layout of the node that hosts it.
++const CANVAS_WIDTH = MAX_BODY_WIDTH + 2 * (FLARE_RADIUS + BORDER);
++
++const SINK: Record<PanelTabState, number> = {
++  hidden: VISIBLE_HEIGHT + 2,
++  compact: SPACING[1.5],
++  expanded: 0,
++};
++
++// Calm sheet motion: ease-in-out, no overshoot, much slower than control feedback.
++const RISE_MS = 860;
++const SINK_MS = 820;
++const SHAPE_MS = 680;
++/** Compacting waits for the label to fade so it never shows outside the narrowing body. */
++const COMPACT_DELAY_MS = 280;
++const LABEL_OUT_MS = 300;
++const LABEL_IN_MS = 380;
++const LABEL_IN_DELAY_MS = 620;
++/** The reserved row closes only once the tab is mostly behind the panel. */
++const RESERVE_CLOSE_DELAY_MS = 160;
++const RISE_EASING = Easing.bezier(0.33, 0, 0.2, 1);
++const SETTLE_EASING = Easing.bezier(0.45, 0, 0.25, 1);
++const SINK_EASING = Easing.bezier(0.55, 0, 0.45, 1);
++const LABEL_EASING = Easing.bezier(0.25, 0.1, 0.25, 1);
++
++function mix(from: number, to: number, progress: number): number {
++  "worklet";
++  return from + (to - from) * progress;
++}
++
++/** Whole device pixels, so the leading content (an avatar and its ring) paints on the grid. */
++function snapToDevicePixels(length: number, scale: number): number {
++  "worklet";
++  return Math.round(length * scale) / scale;
++}
++
++interface BodyMeasure {
++  /** 0 is compact, 1 is expanded. */
++  shape: number;
++  leadingWidth: number;
++  rowWidth: number;
++}
++
++function bodyWidth({ shape, leadingWidth, rowWidth }: BodyMeasure): number {
++  "worklet";
++  const compact = 2 * (BORDER + PAD_COMPACT) + leadingWidth;
++  const expanded = Math.min(MAX_BODY_WIDTH, 2 * BORDER + PAD_START + rowWidth + PAD_END);
++  return mix(compact, expanded, shape);
++}
++
++/**
++ * The whole outline, flares included, as one closed path on the stroke's centerline, so
++ * no seam shows while the width animates. The bottom edge and the flare feet's drop sit
++ * behind the panel.
++ */
++function buildOutline(width: number, flareRadius: number): string {
++  "worklet";
++  const half = BORDER / 2;
++  const left = CANVAS_WIDTH / 2 - width / 2 + half;
++  const right = CANVAS_WIDTH / 2 + width / 2 - half;
++  const corner = Math.min(CORNER_RADIUS - half, (right - left) / 2);
++  const flare = flareRadius + half;
++  const foot = TAB_HEIGHT - (TUCK - FLARE_FOOT_DEPTH) - half;
++  const shoulder = foot - flare;
++  const f = (n: number) => n.toFixed(2);
++  return [
++    `M${f(left - flare)} ${TAB_HEIGHT}`,
++    `L${f(left - flare)} ${f(foot)}`,
++    `A${f(flare)} ${f(flare)} 0 0 0 ${f(left)} ${f(shoulder)}`,
++    `L${f(left)} ${f(half + corner)}`,
++    `A${f(corner)} ${f(corner)} 0 0 1 ${f(left + corner)} ${f(half)}`,
++    `L${f(right - corner)} ${f(half)}`,
++    `A${f(corner)} ${f(corner)} 0 0 1 ${f(right)} ${f(half + corner)}`,
++    `L${f(right)} ${f(shoulder)}`,
++    `A${f(flare)} ${f(flare)} 0 0 0 ${f(right + flare)} ${f(foot)}`,
++    `L${f(right + flare)} ${TAB_HEIGHT}`,
++    "Z",
++  ].join(" ");
++}
++
++const AnimatedPath = createAnimatedComponent(Path);
++// Colors sit on the root and the path inherits them, so Unistyles never patches the node
++// Reanimated animates (docs/unistyles.md). Not on a G: withUnistyles adds a wrapper div on
++// web, which is invalid inside an <svg> and drops the outline.
++const ThemedSvg = withUnistyles(Svg);
++function outlineColors(theme: Theme) {
++  return { fill: theme.colors.surface2, stroke: theme.colors.borderAccent };
++}
++
++function expandedProgress(state: PanelTabState): number {
++  return state === "expanded" ? 1 : 0;
++}
++
++function reservedHeight(state: PanelTabState): number {
++  return state === "hidden" ? 0 : VISIBLE_HEIGHT;
++}
++
++interface TabMotion {
++  sink: SharedValue<number>;
++  shape: SharedValue<number>;
++  label: SharedValue<number>;
++  reserve: SharedValue<number>;
++}
++
++function animateTo({
++  motion,
++  from,
++  to,
++  onSunk,
++}: {
++  motion: TabMotion;
++  from: PanelTabState;
++  to: PanelTabState;
++  /** Runs once the tab is fully behind the panel and its row has closed. */
++  onSunk: () => void;
++}) {
++  const { sink, shape, label, reserve } = motion;
++  const fadeOut = withTiming(0, { duration: LABEL_OUT_MS, easing: LABEL_EASING });
++  if (to === "hidden") {
++    label.value = fadeOut;
++    sink.value = withTiming(SINK.hidden, { duration: SINK_MS, easing: SINK_EASING });
++    reserve.value = withDelay(
++      RESERVE_CLOSE_DELAY_MS,
++      withTiming(0, { duration: SINK_MS, easing: SINK_EASING }, (finished) => {
++        if (finished) scheduleOnRN(onSunk);
++      }),
++    );
++    return;
++  }
++  const isRising = from === "hidden";
++  const isCompacting = !isRising && to === "compact";
++  const shapeTiming = withTiming(expandedProgress(to), {
++    duration: SHAPE_MS,
++    easing: SETTLE_EASING,
++  });
++  shape.value = isCompacting ? withDelay(COMPACT_DELAY_MS, shapeTiming) : shapeTiming;
++  if (isRising) {
++    sink.value = withTiming(SINK[to], { duration: RISE_MS, easing: RISE_EASING });
++    reserve.value = withTiming(VISIBLE_HEIGHT, { duration: RISE_MS, easing: SETTLE_EASING });
++  } else {
++    const sinkTiming = withTiming(SINK[to], { duration: SHAPE_MS, easing: SETTLE_EASING });
++    sink.value = isCompacting ? withDelay(COMPACT_DELAY_MS, sinkTiming) : sinkTiming;
++  }
++  label.value =
++    to === "expanded"
++      ? withDelay(LABEL_IN_DELAY_MS, withTiming(1, { duration: LABEL_IN_MS, easing: LABEL_EASING }))
++      : fadeOut;
++}
++
++function jumpTo(motion: TabMotion, state: PanelTabState) {
++  motion.sink.value = SINK[state];
++  motion.label.value = expandedProgress(state);
++  motion.reserve.value = reservedHeight(state);
++  if (state !== "hidden") motion.shape.value = expandedProgress(state);
++}
++
++/**
++ * A tab that peeks up from behind a panel, centered on its top edge. It is a second sheet
++ * on surface2 with its own borderAccent outline; the panel renders in front of it and its
++ * unbroken top border runs across the tab's base. The wrapper reserves the tab's full
++ * height while it is compact or expanded, so the panel does not move between those.
++ *
++ * The tab is not focusable and ignores touches. Pass role="status" / aria-live and an
++ * aria-label when it announces something.
++ *
++ * The wrapper always renders, so the panel never remounts when the tab comes and goes. The
++ * tab itself mounts when it first leaves hidden and unmounts once it has sunk again, so a
++ * panel that rarely shows a tab pays nothing for it.
++ */
++export function PanelTab({
++  state,
++  leading,
++  label,
++  children,
++  fill = false,
++  ...accessibility
++}: PanelTabProps) {
++  const reduceMotion = useReducedMotion();
++  const sink = useSharedValue(SINK[state]);
++  const shape = useSharedValue(expandedProgress(state));
++  const labelOpacity = useSharedValue(expandedProgress(state));
++  const reserve = useSharedValue(reservedHeight(state));
++  const leadingWidth = useSharedValue(0);
++  const rowWidth = useSharedValue(0);
++  const previousState = useRef(state);
++  const [isTabMounted, setIsTabMounted] = useState(state !== "hidden");
++  if (state !== "hidden" && !isTabMounted) setIsTabMounted(true);
++  // The tab may have risen again while it was sinking; only a tab that is still hidden goes.
++  const unmountIfSunk = useCallback(() => {
++    if (previousState.current !== "hidden") return;
++    leadingWidth.value = 0;
++    rowWidth.value = 0;
++    setIsTabMounted(false);
++  }, [leadingWidth, rowWidth]);
++  // Pixel snapping reads the scale on the UI thread; it changes with page zoom on web.
++  const scale = PixelRatio.get();
++
++  useEffect(() => {
++    const from = previousState.current;
++    previousState.current = state;
++    const motion = { sink, shape, label: labelOpacity, reserve };
++    if (reduceMotion) {
++      jumpTo(motion, state);
++      if (state === "hidden") unmountIfSunk();
++      return;
++    }
++    if (from === state) return;
++    animateTo({ motion, from, to: state, onSunk: unmountIfSunk });
++  }, [state, reduceMotion, sink, shape, labelOpacity, reserve, unmountIfSunk]);
++
++  // A non-positive width means the surface is not rendered (a hidden retained panel);
++  // keep the last real width. The first real width lands without animating.
++  const measure = useCallback(
++    (target: SharedValue<number>, width: number) => {
++      if (width <= 0) return;
++      if (reduceMotion || target.value <= 0) {
++        target.value = width;
++        return;
++      }
++      target.value = withTiming(width, { duration: SHAPE_MS, easing: SETTLE_EASING });
++    },
++    [reduceMotion],
++  );
++  const handleLeadingLayout = useCallback(
++    (event: LayoutChangeEvent) => measure(leadingWidth, event.nativeEvent.layout.width),
++    [measure, leadingWidth],
++  );
++  const handleRowLayout = useCallback(
++    (event: LayoutChangeEvent) => measure(rowWidth, event.nativeEvent.layout.width),
++    [measure, rowWidth],
++  );
++
++  const reserveStyle = useAnimatedStyle(() => ({ height: reserve.value }));
++  const tabStyle = useAnimatedStyle(() => ({
++    opacity: leadingWidth.value > 0 && rowWidth.value > 0 ? 1 : 0,
++    transform: [{ translateY: sink.value }],
++  }));
++  const contentStyle = useAnimatedStyle(() => {
++    const width = bodyWidth({
++      shape: shape.value,
++      leadingWidth: leadingWidth.value,
++      rowWidth: rowWidth.value,
++    });
++    const inset = BORDER + mix(PAD_COMPACT, PAD_START, shape.value);
++    return {
++      transform: [
++        { translateX: snapToDevicePixels(CANVAS_WIDTH / 2 - width / 2 + inset, scale) },
++        { translateY: BORDER + mix(PAD_COMPACT, PAD_TOP, shape.value) },
++      ],
++    };
++  });
++  const labelStyle = useAnimatedStyle(() => ({ opacity: labelOpacity.value }));
++  const outlineProps = useAnimatedProps(() => {
++    const width = bodyWidth({
++      shape: shape.value,
++      leadingWidth: leadingWidth.value,
++      rowWidth: rowWidth.value,
++    });
++    return { d: buildOutline(width, mix(COMPACT_FLARE_RADIUS, FLARE_RADIUS, shape.value)) };
++  });
++
++  // Reanimated owns every animated node here, so they take plain styles only.
++  const sizing = fill ? styles.fill : styles.shrink;
++  return (
++    <View style={sizing}>
++      <Animated.View style={reserveStyle} />
++      <View style={sizing}>
++        {isTabMounted ? (
++          <View {...accessibility} aria-hidden={state === "hidden"} style={styles.tabRow}>
++            <Animated.View style={[styles.tab, tabStyle]}>
++              <View style={styles.outline}>
++                <ThemedSvg
++                  width={CANVAS_WIDTH}
++                  height={TAB_HEIGHT}
++                  strokeWidth={BORDER}
++                  uniProps={outlineColors}
++                >
++                  <AnimatedPath animatedProps={outlineProps} />
++                </ThemedSvg>
++              </View>
++              <Animated.View style={[styles.content, contentStyle]} onLayout={handleRowLayout}>
++                <View onLayout={handleLeadingLayout}>{leading}</View>
++                {label ? (
++                  <Animated.View style={[styles.label, labelStyle]}>{label}</Animated.View>
++                ) : null}
++              </Animated.View>
++            </Animated.View>
++          </View>
++        ) : null}
++        {children}
++      </View>
++    </View>
++  );
++}
++
++const styles = StyleSheet.create({
++  shrink: { flexShrink: 1, minHeight: 0 },
++  fill: { flex: 1, minHeight: 0 },
++  // The row spans from the tab's top to TUCK below the panel's top edge and clips there,
++  // so a sunk tab never shows under a panel shorter than the tab. It is wider than the
++  // panel on both sides so the clip never cuts a flare.
++  tabRow: {
++    position: "absolute",
++    top: -VISIBLE_HEIGHT,
++    left: -CANVAS_WIDTH / 2,
++    right: -CANVAS_WIDTH / 2,
++    height: TAB_HEIGHT,
++    alignItems: "center",
++    overflow: "hidden",
++    pointerEvents: "none",
++  },
++  tab: {
++    width: CANVAS_WIDTH,
++    height: TAB_HEIGHT,
++  },
++  outline: {
++    position: "absolute",
++    top: 0,
++    left: 0,
++  },
++  content: {
++    position: "absolute",
++    top: 0,
++    left: 0,
++    height: CONTENT_HEIGHT,
++    maxWidth: MAX_BODY_WIDTH - 2 * BORDER - PAD_START - PAD_END,
++    flexDirection: "row",
++    alignItems: "center",
++    gap: GAP,
++  },
++  label: {
++    flexShrink: 1,
++    minWidth: 0,
++  },
++});
+diff --git a/packages/app/src/components/ui/shape-morph/index.tsx b/packages/app/src/components/ui/shape-morph/index.tsx
+new file mode 100644
+index 000000000..6e27c162e
+--- /dev/null
++++ b/packages/app/src/components/ui/shape-morph/index.tsx
+@@ -0,0 +1,66 @@
++import { useMemo } from "react";
++import { Canvas, Path, usePathValue } from "@shopify/react-native-skia";
++import { useDerivedValue, type SharedValue } from "react-native-reanimated";
++import { withUnistyles } from "react-native-unistyles";
++import type { Theme } from "@/styles/theme";
++import { SHAPE_OUTLINES, type Outline } from "./shapes";
++import { useShapeMorphFrame, type ShapeMorphProps } from "./use-shape-morph";
++
++export type { ShapeMorphProps } from "./use-shape-morph";
++
++// Native draws the morph with Skia: one Path per outline, rebuilt on the UI thread from the
++// shared frame. Web and Electron use index.web.tsx, an SVG, so CanvasKit never loads there.
++
++const SLOTS = Array.from({ length: SHAPE_OUTLINES }, (_, k) => k);
++
++function MorphPath({
++  frame,
++  index,
++  color,
++}: {
++  frame: SharedValue<Outline[]>;
++  index: number;
++  color: string;
++}) {
++  const path = usePathValue((builder) => {
++    "worklet";
++    const points = frame.value[index].points;
++    builder.moveTo(points[0], points[1]);
++    for (let i = 2; i < points.length; i += 2) builder.lineTo(points[i], points[i + 1]);
++    builder.close();
++  });
++  const opacity = useDerivedValue(() => frame.value[index].opacity);
++  return <Path path={path} color={color} opacity={opacity} />;
++}
++
++interface MorphCanvasProps {
++  frame: SharedValue<Outline[]>;
++  width: number;
++  height: number;
++  color: string;
++}
++
++function MorphCanvas({ frame, width, height, color }: MorphCanvasProps) {
++  const style = useMemo(() => ({ width, height }), [width, height]);
++  return (
++    <Canvas style={style}>
++      {SLOTS.map((k) => (
++        <MorphPath key={k} frame={frame} index={k} color={color} />
++      ))}
++    </Canvas>
++  );
++}
++
++// Only the color is themed, so only this wrapper re-renders on a theme change.
++const ThemedMorphCanvas = withUnistyles(MorphCanvas);
++function fillColor(theme: Theme) {
++  return { color: theme.colors.foreground };
++}
++
++/** Morphs between shapes from `./shapes`. See ShapeMorphProps for the API. */
++export function ShapeMorph(props: ShapeMorphProps) {
++  const frame = useShapeMorphFrame(props);
++  const { width, height, color } = props;
++  if (color) return <MorphCanvas frame={frame} width={width} height={height} color={color} />;
++  return <ThemedMorphCanvas frame={frame} width={width} height={height} uniProps={fillColor} />;
++}
+diff --git a/packages/app/src/components/ui/shape-morph/index.web.tsx b/packages/app/src/components/ui/shape-morph/index.web.tsx
+new file mode 100644
+index 000000000..68b7b35f7
+--- /dev/null
++++ b/packages/app/src/components/ui/shape-morph/index.web.tsx
+@@ -0,0 +1,58 @@
++import {
++  createAnimatedComponent,
++  useAnimatedProps,
++  type SharedValue,
++} from "react-native-reanimated";
++import Svg, { Path } from "react-native-svg";
++import { withUnistyles } from "react-native-unistyles";
++import type { Theme } from "@/styles/theme";
++import { SHAPE_OUTLINES, outlineToSvgPath, type Outline } from "./shapes";
++import { useShapeMorphFrame, type ShapeMorphProps } from "./use-shape-morph";
++
++export type { ShapeMorphProps } from "./use-shape-morph";
++
++// Web and Electron draw the morph as an inline SVG, written from the UI-thread frame, so
++// CanvasKit never loads on web. Native draws the same frames with Skia (index.tsx).
++
++const AnimatedPath = createAnimatedComponent(Path);
++// The fill sits on the Svg root and the paths inherit it, so Unistyles never patches a node
++// Reanimated animates. Not on a G: withUnistyles adds a wrapper div on web, which is
++// invalid inside an <svg> (see panel-tab.tsx).
++const ThemedSvg = withUnistyles(Svg);
++function fillColor(theme: Theme) {
++  return { fill: theme.colors.foreground };
++}
++
++const SLOTS = Array.from({ length: SHAPE_OUTLINES }, (_, k) => k);
++
++function MorphPath({ frame, index }: { frame: SharedValue<Outline[]>; index: number }) {
++  const animatedProps = useAnimatedProps(() => {
++    const outline = frame.value[index];
++    return { d: outlineToSvgPath(outline), fillOpacity: outline.opacity };
++  });
++  return <AnimatedPath animatedProps={animatedProps} />;
++}
++
++/** Morphs between shapes from `./shapes`. See ShapeMorphProps for the API. */
++export function ShapeMorph(props: ShapeMorphProps) {
++  const frame = useShapeMorphFrame(props);
++  const { width, height, color } = props;
++  const paths = SLOTS.map((k) => <MorphPath key={k} frame={frame} index={k} />);
++  if (color) {
++    return (
++      <Svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} fill={color}>
++        {paths}
++      </Svg>
++    );
++  }
++  return (
++    <ThemedSvg
++      width={width}
++      height={height}
++      viewBox={`0 0 ${width} ${height}`}
++      uniProps={fillColor}
++    >
++      {paths}
++    </ThemedSvg>
++  );
++}
+diff --git a/packages/app/src/components/ui/shape-morph/shapes.test.ts b/packages/app/src/components/ui/shape-morph/shapes.test.ts
+new file mode 100644
+index 000000000..6402c2b4d
+--- /dev/null
++++ b/packages/app/src/components/ui/shape-morph/shapes.test.ts
+@@ -0,0 +1,237 @@
++import { describe, expect, it } from "vitest";
++import {
++  OUTLINE_POINTS,
++  SHAPE_NAMES,
++  SHAPE_OUTLINES,
++  columnX,
++  defaultVia,
++  emptyOutline,
++  evaluateShape,
++  isEmptyOutline,
++  morphFrame,
++  normalizeOutlines,
++  outlineCenter,
++  outlineToSvgPath,
++  pairOutlines,
++  planMorph,
++  shapeAt,
++  type Outline,
++  type ShapeParams,
++} from "./shapes";
++
++// The 18px mini meter: 3px bars, 3px gaps, a 15 × 18 box.
++const MINI: ShapeParams = {
++  width: 15,
++  height: 18,
++  barWidth: 3,
++  barGap: 3,
++  barHeights: [7, 12, 9],
++  barOpacities: [0.9, 0.95, 1],
++};
++
++function bounds(outline: Outline) {
++  const xs = outline.points.filter((_, i) => i % 2 === 0);
++  const ys = outline.points.filter((_, i) => i % 2 === 1);
++  return {
++    minX: Math.min(...xs),
++    maxX: Math.max(...xs),
++    minY: Math.min(...ys),
++    maxY: Math.max(...ys),
++  };
++}
++
++function expectFinite(outlines: readonly Outline[]) {
++  for (const outline of outlines) {
++    for (const value of outline.points) expect(Number.isFinite(value)).toBe(true);
++    expect(Number.isFinite(outline.opacity)).toBe(true);
++  }
++}
++
++function expectSame(a: readonly Outline[], b: readonly Outline[]) {
++  expect(a).toHaveLength(b.length);
++  a.forEach((outline, k) => {
++    outline.points.forEach((value, i) => expect(value).toBeCloseTo(b[k].points[i], 9));
++    expect(outline.opacity).toBeCloseTo(b[k].opacity, 9);
++  });
++}
++
++describe("shapeAt", () => {
++  it.each(SHAPE_NAMES)("normalizes %s to fixed outline and point counts", (name) => {
++    for (const t of [0, 133, 1600, 4999]) {
++      const outlines = shapeAt(name, t, MINI);
++      expect(outlines).toHaveLength(SHAPE_OUTLINES);
++      for (const outline of outlines) expect(outline.points).toHaveLength(OUTLINE_POINTS * 2);
++      expectFinite(outlines);
++    }
++  });
++
++  it("pads one-part shapes with empty outlines", () => {
++    for (const name of ["ring", "dot"] as const) {
++      const outlines = shapeAt(name, 0, MINI);
++      expect(outlines.filter((o) => !isEmptyOutline(o))).toHaveLength(1);
++    }
++  });
++
++  it("paints a bar exactly where VolumeMeter paints it", () => {
++    const [left, middle, right] = shapeAt("bars", 0, MINI);
++    expect(bounds(middle).maxY - bounds(middle).minY).toBeCloseTo(12, 1);
++    expect(bounds(middle).minY).toBeCloseTo((18 - 12) / 2, 1);
++    expect(bounds(left).minX).toBeCloseTo(0, 1);
++    expect(bounds(left).maxX).toBeCloseTo(3, 1);
++    expect(bounds(right).maxX).toBeCloseTo(15, 1);
++    expect(middle.opacity).toBeCloseTo(0.95);
++  });
++
++  it("fits the orbit in the box, at 0.8 opacity", () => {
++    for (const outline of shapeAt("orbit", 700, MINI)) {
++      const box = bounds(outline);
++      expect(box.minX).toBeGreaterThanOrEqual(0);
++      expect(box.maxX).toBeLessThanOrEqual(15);
++      expect(box.maxX - box.minX).toBeCloseTo(3.5, 1);
++      expect(outline.opacity).toBe(0.8);
++    }
++  });
++
++  it("winds every outline the same way", () => {
++    const area = (o: Outline) => {
++      let sum = 0;
++      for (let i = 0; i < OUTLINE_POINTS; i += 1) {
++        const j = (i + 1) % OUTLINE_POINTS;
++        sum += o.points[2 * i] * o.points[2 * j + 1] - o.points[2 * j] * o.points[2 * i + 1];
++      }
++      return sum;
++    };
++    for (const name of SHAPE_NAMES) {
++      for (const outline of shapeAt(name, 250, MINI)) {
++        if (!isEmptyOutline(outline)) expect(area(outline)).toBeGreaterThan(0);
++      }
++    }
++  });
++});
++
++describe("normalizeOutlines", () => {
++  it("resamples odd point counts, replaces NaN and clamps opacity", () => {
++    const square: Outline = { points: [0, 0, 10, 0, 10, 10, Number.NaN, 10], opacity: 4 };
++    const [outline, ...rest] = normalizeOutlines([square], MINI);
++    expect(outline.points).toHaveLength(OUTLINE_POINTS * 2);
++    expectFinite([outline, ...rest]);
++    expect(outline.opacity).toBe(1);
++    expect(rest.every(isEmptyOutline)).toBe(true);
++  });
++
++  it("keeps only the first SHAPE_OUTLINES outlines", () => {
++    const many = Array.from({ length: 5 }, () => evaluateShape("dot", 0, MINI)[0]);
++    expect(normalizeOutlines(many, MINI)).toHaveLength(SHAPE_OUTLINES);
++  });
++});
++
++describe("pairOutlines", () => {
++  it("pairs equal counts in x order so paths never cross", () => {
++    const bars = shapeAt("bars", 0, MINI);
++    const reversed = [bars[2], bars[1], bars[0]];
++    expect(pairOutlines(reversed, bars)).toEqual([2, 1, 0]);
++  });
++
++  it("sends one ring to the middle bar and grows the others from nothing", () => {
++    const ring = shapeAt("ring", 0, MINI);
++    const pairing = pairOutlines(ring, shapeAt("bars", 0, MINI));
++    expect(pairing[1]).toBe(0);
++    expect(new Set(pairing).size).toBe(SHAPE_OUTLINES);
++  });
++
++  it("is a permutation for every pair of presets", () => {
++    for (const a of SHAPE_NAMES) {
++      for (const b of SHAPE_NAMES) {
++        const pairing = pairOutlines(shapeAt(a, 300, MINI), shapeAt(b, 900, MINI));
++        expect([...pairing].sort()).toEqual([0, 1, 2]);
++      }
++    }
++  });
++});
++
++describe("morphFrame", () => {
++  function morph(from: (typeof SHAPE_NAMES)[number], to: (typeof SHAPE_NAMES)[number], p: number) {
++    const a = shapeAt(from, 0, MINI);
++    const b = shapeAt(to, 800, MINI);
++    const viaName = defaultVia(from, to);
++    const via = viaName ? shapeAt(viaName, 400, MINI) : null;
++    return {
++      a,
++      b,
++      frame: morphFrame({ from: a, via, to: b, plan: planMorph(a, via, b), progress: p }),
++    };
++  }
++
++  it("starts on the source and ends on the target, for every pair", () => {
++    for (const from of SHAPE_NAMES) {
++      for (const to of SHAPE_NAMES) {
++        const start = morph(from, to, 0);
++        const end = morph(from, to, 1);
++        const plan = planMorph(start.a, null, start.b);
++        // At p = 0 every target slot holds its paired source outline.
++        const viaName = defaultVia(from, to);
++        if (!viaName) {
++          start.frame.forEach((outline, k) => {
++            const source = start.a[plan.first[k]];
++            if (isEmptyOutline(source)) expect(isEmptyOutline(outline)).toBe(true);
++            else expectSame([outline], [source]);
++          });
++        }
++        end.frame.forEach((outline, k) => {
++          const target = end.b[k];
++          if (isEmptyOutline(target)) expect(isEmptyOutline(outline)).toBe(true);
++          else expectSame([outline], [target]);
++        });
++      }
++    }
++  });
++
++  it("never produces NaN, even for out-of-range progress", () => {
++    for (const p of [-1, 0, 0.25, 0.5, 0.75, 1, 2, Number.NaN]) {
++      for (const from of SHAPE_NAMES) {
++        for (const to of SHAPE_NAMES) expectFinite(morph(from, to, p).frame);
++      }
++    }
++  });
++
++  it("passes orbit to bars through the dots lined up on the bar columns", () => {
++    const { frame } = morph("orbit", "bars", 0.5);
++    frame.forEach((outline, k) => {
++      const [x, y] = outlineCenter(outline);
++      expect(x).toBeCloseTo(columnX(MINI, k), 5);
++      expect(y).toBeCloseTo(9, 5);
++      expect(bounds(outline).maxX - bounds(outline).minX).toBeCloseTo(3, 1);
++    });
++  });
++
++  it("eases opacity from the orbit's 0.8 to the bars' own", () => {
++    expect(morph("orbit", "bars", 0).frame.map((o) => o.opacity)).toEqual([0.8, 0.8, 0.8]);
++    const end = morph("orbit", "bars", 1).frame.map((o) => o.opacity);
++    [0.9, 0.95, 1].forEach((value, k) => expect(end[k]).toBeCloseTo(value));
++  });
++
++  it("grows a ring's missing bars out of points at their own columns", () => {
++    const { frame } = morph("ring", "bars", 0.001);
++    const [x] = outlineCenter(frame[0]);
++    expect(x).toBeCloseTo(columnX(MINI, 0), 5);
++    expect(bounds(frame[0]).maxY - bounds(frame[0]).minY).toBeLessThan(0.1);
++  });
++});
++
++describe("defaultVia", () => {
++  it("lines up between orbit and bars, both ways, and nowhere else", () => {
++    expect(defaultVia("orbit", "bars")).toBe("lineup");
++    expect(defaultVia("bars", "orbit")).toBe("lineup");
++    expect(defaultVia("ring", "bars")).toBeNull();
++    expect(defaultVia("orbit", "dot")).toBeNull();
++  });
++});
++
++describe("outlineToSvgPath", () => {
++  it("writes a closed path with one command per point", () => {
++    const d = outlineToSvgPath(emptyOutline(1, 2));
++    expect(d.startsWith("M1.00 2.00")).toBe(true);
++    expect(d.endsWith("Z")).toBe(true);
++    expect(d.match(/[ML]/g)).toHaveLength(OUTLINE_POINTS);
++  });
++});
+diff --git a/packages/app/src/components/ui/shape-morph/shapes.ts b/packages/app/src/components/ui/shape-morph/shapes.ts
+new file mode 100644
+index 000000000..66e90a435
+--- /dev/null
++++ b/packages/app/src/components/ui/shape-morph/shapes.ts
+@@ -0,0 +1,618 @@
++// The shape model behind ShapeMorph. Pure and worklet-safe: every function runs on the JS
++// thread in tests and on the UI thread in the renderers, and none of it imports React,
++// Reanimated or Skia.
++//
++// A shape is a function of time and params that returns outlines: closed polygons with an
++// opacity. Every shape is normalized to SHAPE_OUTLINES outlines of OUTLINE_POINTS points,
++// so any two shapes tween point by point. A shape with fewer parts is padded with empty
++// outlines, zero-size points that grow out of (or shrink into) their counterpart during a
++// morph. That is how one ring becomes three bars.
++//
++// The presets are round-capped strokes along a centerline (a straight segment or an arc),
++// sampled the same way: side A, end cap, side B, start cap. Bars, dots (zero-length lines)
++// and arcs share that structure, so their points line up without twisting. Geometry follows
++// the voice-status mockup (option F, `.dev/mockups/voice-status-split.html`).
++//
++// Every worklet here sits above the worklets that call it (docs/coding-standards.md, React).
++
++/** A closed polygon as flat [x0, y0, x1, y1, ...] in box pixels, with its fill opacity. */
++export interface Outline {
++  points: number[];
++  opacity: number;
++}
++
++export interface ShapeParams {
++  /** Box size in px. 1 unit = 1px, origin at the top-left. */
++  width: number;
++  height: number;
++  /** Bar column geometry, as VolumeMeter lays it out (snapped widths). */
++  barWidth: number;
++  barGap: number;
++  /** Bar heights in px, one per bar. Used by `bars`; its length sets the column count. */
++  barHeights: readonly number[];
++  /** Bar opacities, one per bar. Defaults to BAR_OPACITY. */
++  barOpacities?: readonly number[];
++}
++
++/** A shape: outlines at time `t` (ms). Must be a worklet when passed to a renderer. */
++export type ShapeFn = (t: number, params: ShapeParams) => Outline[];
++
++export const SHAPE_NAMES = ["orbit", "bars", "ring", "dot", "ellipsis", "lineup"] as const;
++/** `lineup` is the dots sitting on the bar columns: the keyframe between orbit and bars. */
++export type ShapeName = (typeof SHAPE_NAMES)[number];
++
++/** Outlines per normalized shape. Shapes with more parts keep their first SHAPE_OUTLINES. */
++export const SHAPE_OUTLINES = 3;
++const SIDE_POINTS = 24;
++const CAP_POINTS = 8;
++/** Points per outline: two sides and two caps. */
++export const OUTLINE_POINTS = 2 * SIDE_POINTS + 2 * CAP_POINTS;
++
++const TWO_PI = Math.PI * 2;
++const EPSILON = 1e-6;
++
++// Opacities match VolumeMeter: rest bars 0.5, live bars 0.9-1.0. Loaders sit between.
++export const LOADER_OPACITY = 0.8;
++export const BAR_OPACITY = 0.9;
++
++// Orbit, at the 18px mini meter: a 4.5px radius (a quarter of the box height), 3.5px dots
++// (the bar width plus 0.5), one clockwise turn every 3.2s at constant speed.
++export const ORBIT_TURN_MS = 3200;
++const ORBIT_RADIUS_PER_HEIGHT = 0.25;
++const ORBIT_DOT_EXTRA = 0.5;
++// Ring: one broken arc, a spinner. Radius and stroke scale with the box and bar width.
++const RING_TURN_MS = 1600;
++const RING_RADIUS_PER_HEIGHT = 0.3;
++const RING_STROKE_PER_BAR = 0.42;
++const RING_GAP = 1.2;
++// Dot: one breathing dot.
++const DOT_PERIOD_MS = 1800;
++const DOT_RADIUS_PER_HEIGHT = 0.133;
++const DOT_BREATH_PER_HEIGHT = 0.044;
++// Ellipsis: typing-indicator dots on the bar columns, bouncing in sequence.
++const ELLIPSIS_PERIOD_MS = 1500;
++const ELLIPSIS_BOUNCE_PER_HEIGHT = 0.144;
++const ELLIPSIS_LAG = 0.75;
++
++interface LineBlob {
++  kind: "line";
++  ax: number;
++  ay: number;
++  bx: number;
++  by: number;
++  r: number;
++}
++
++interface ArcBlob {
++  kind: "arc";
++  ox: number;
++  oy: number;
++  R: number;
++  a0: number;
++  a1: number;
++  r: number;
++}
++
++type Blob = LineBlob | ArcBlob;
++
++function lineBlob(ax: number, ay: number, bx: number, by: number, r: number): LineBlob {
++  "worklet";
++  return { kind: "line", ax, ay, bx, by, r };
++}
++
++function dotBlob(x: number, y: number, r: number): LineBlob {
++  "worklet";
++  return lineBlob(x, y, x, y, r);
++}
++
++/**
++ * Samples a round-capped stroke into OUTLINE_POINTS points: side A from start to end, the
++ * end cap, side B back, then the start cap. A zero-length line points up, so dots and
++ * vertical bars start at the same place.
++ */
++function blobOutline(blob: Blob): number[] {
++  "worklet";
++  const pts: number[] = [];
++  const r = blob.r;
++  let cx0: number;
++  let cy0: number;
++  let cx1: number;
++  let cy1: number;
++  let tx0: number;
++  let ty0: number;
++  let tx1: number;
++  let ty1: number;
++  const center = (u: number): [number, number] => {
++    "worklet";
++    if (blob.kind === "arc") {
++      const a = blob.a0 + (blob.a1 - blob.a0) * u;
++      return [blob.ox + blob.R * Math.cos(a), blob.oy + blob.R * Math.sin(a)];
++    }
++    return [blob.ax + (blob.bx - blob.ax) * u, blob.ay + (blob.by - blob.ay) * u];
++  };
++  const tangent = (u: number): [number, number] => {
++    "worklet";
++    if (blob.kind === "arc") {
++      const dir = Math.sign(blob.a1 - blob.a0) || 1;
++      const a = blob.a0 + (blob.a1 - blob.a0) * u;
++      return [-Math.sin(a) * dir, Math.cos(a) * dir];
++    }
++    const dx = blob.bx - blob.ax;
++    const dy = blob.by - blob.ay;
++    const len = Math.hypot(dx, dy);
++    return len > EPSILON ? [dx / len, dy / len] : [0, -1];
++  };
++  for (let i = 0; i < SIDE_POINTS; i += 1) {
++    const u = i / (SIDE_POINTS - 1);
++    const [cx, cy] = center(u);
++    const [tx, ty] = tangent(u);
++    pts.push(cx - ty * r, cy + tx * r);
++  }
++  [cx1, cy1] = center(1);
++  [tx1, ty1] = tangent(1);
++  for (let j = 1; j <= CAP_POINTS; j += 1) {
++    const th = (Math.PI * j) / (CAP_POINTS + 1);
++    const c = Math.cos(th);
++    const s = Math.sin(th);
++    pts.push(cx1 + (-ty1 * c + tx1 * s) * r, cy1 + (tx1 * c + ty1 * s) * r);
++  }
++  for (let i = SIDE_POINTS - 1; i >= 0; i -= 1) {
++    const u = i / (SIDE_POINTS - 1);
++    const [cx, cy] = center(u);
++    const [tx, ty] = tangent(u);
++    pts.push(cx + ty * r, cy - tx * r);
++  }
++  [cx0, cy0] = center(0);
++  [tx0, ty0] = tangent(0);
++  for (let j = 1; j <= CAP_POINTS; j += 1) {
++    const th = (Math.PI * j) / (CAP_POINTS + 1);
++    const c = Math.cos(th);
++    const s = Math.sin(th);
++    pts.push(cx0 + (ty0 * c - tx0 * s) * r, cy0 + (-tx0 * c - ty0 * s) * r);
++  }
++  return pts;
++}
++
++function solid(blob: Blob, opacity: number): Outline {
++  "worklet";
++  return { points: blobOutline(blob), opacity };
++}
++
++/** Column count: one per bar height, at least one. */
++function columnCount(params: ShapeParams): number {
++  "worklet";
++  return Math.max(1, Math.min(SHAPE_OUTLINES, params.barHeights.length));
++}
++
++/** Center x of bar column k, with the columns centered in the box. */
++export function columnX(params: ShapeParams, k: number): number {
++  "worklet";
++  const n = columnCount(params);
++  const groupWidth = n * params.barWidth + (n - 1) * params.barGap;
++  const left = (params.width - groupWidth) / 2;
++  return left + k * (params.barWidth + params.barGap) + params.barWidth / 2;
++}
++
++/** A bar painted as VolumeMeter paints it: centered vertically, caps of radius width / 2. */
++function barBlob(params: ShapeParams, k: number, height: number): LineBlob {
++  "worklet";
++  const cy = params.height / 2;
++  const r = params.barWidth / 2;
++  const half = Math.max(0, (height - params.barWidth) / 2);
++  const x = columnX(params, k);
++  // Drawn bottom to top, the direction a dot points.
++  return lineBlob(x, cy + half, x, cy - half, r);
++}
++
++function orbitShape(t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  const cx = params.width / 2;
++  const cy = params.height / 2;
++  const radius = params.height * ORBIT_RADIUS_PER_HEIGHT;
++  const dot = (params.barWidth + ORBIT_DOT_EXTRA) / 2;
++  const angle = (TWO_PI * t) / ORBIT_TURN_MS;
++  const out: Outline[] = [];
++  for (let k = 0; k < 3; k += 1) {
++    const b = angle + (k * TWO_PI) / 3;
++    out.push(
++      solid(dotBlob(cx + radius * Math.cos(b), cy + radius * Math.sin(b), dot), LOADER_OPACITY),
++    );
++  }
++  return out;
++}
++
++function barsShape(_t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  const out: Outline[] = [];
++  const n = columnCount(params);
++  for (let k = 0; k < n; k += 1) {
++    const height = params.barHeights[k] ?? params.barWidth;
++    const opacity = params.barOpacities?.[k] ?? BAR_OPACITY;
++    out.push(solid(barBlob(params, k, height), Math.min(1, opacity)));
++  }
++  return out;
++}
++
++function ringShape(t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  const start = (TWO_PI * t) / RING_TURN_MS - Math.PI / 2;
++  return [
++    solid(
++      {
++        kind: "arc",
++        ox: params.width / 2,
++        oy: params.height / 2,
++        R: params.height * RING_RADIUS_PER_HEIGHT,
++        a0: start,
++        a1: start + TWO_PI - RING_GAP,
++        r: params.barWidth * RING_STROKE_PER_BAR,
++      },
++      LOADER_OPACITY,
++    ),
++  ];
++}
++
++function dotShape(t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  const breath = 0.5 + 0.5 * Math.sin((TWO_PI * t) / DOT_PERIOD_MS);
++  const r = params.height * (DOT_RADIUS_PER_HEIGHT + DOT_BREATH_PER_HEIGHT * breath);
++  return [solid(dotBlob(params.width / 2, params.height / 2, r), LOADER_OPACITY)];
++}
++
++function ellipsisShape(t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  const r = (params.barWidth + ORBIT_DOT_EXTRA) / 2;
++  const bounce = params.height * ELLIPSIS_BOUNCE_PER_HEIGHT;
++  const out: Outline[] = [];
++  for (let k = 0; k < 3; k += 1) {
++    const lift = Math.max(0, Math.sin((TWO_PI * t) / ELLIPSIS_PERIOD_MS - k * ELLIPSIS_LAG));
++    out.push(
++      solid(dotBlob(columnX(params, k), params.height / 2 - bounce * lift, r), LOADER_OPACITY),
++    );
++  }
++  return out;
++}
++
++/** Dots on the bar columns at radius width / 2: each is exactly a bar's cap. */
++function lineupShape(_t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  const out: Outline[] = [];
++  for (let k = 0; k < 3; k += 1) {
++    out.push(
++      solid(dotBlob(columnX(params, k), params.height / 2, params.barWidth / 2), LOADER_OPACITY),
++    );
++  }
++  return out;
++}
++
++/** True when the shape moves on its own, so a renderer must keep its clock running. */
++export function isAnimatedShape(name: ShapeName): boolean {
++  "worklet";
++  return name === "orbit" || name === "ring" || name === "dot" || name === "ellipsis";
++}
++
++/** A preset's raw outlines at time `t`. */
++export function evaluateShape(name: ShapeName, t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  switch (name) {
++    case "orbit":
++      return orbitShape(t, params);
++    case "bars":
++      return barsShape(t, params);
++    case "ring":
++      return ringShape(t, params);
++    case "dot":
++      return dotShape(t, params);
++    case "ellipsis":
++      return ellipsisShape(t, params);
++    case "lineup":
++      return lineupShape(t, params);
++  }
++}
++
++function signedArea(points: number[]): number {
++  "worklet";
++  let area = 0;
++  const n = points.length / 2;
++  for (let i = 0; i < n; i += 1) {
++    const j = (i + 1) % n;
++    area += points[2 * i] * points[2 * j + 1] - points[2 * j] * points[2 * i + 1];
++  }
++  return area / 2;
++}
++
++/** Centroid of the outline's points. Empty outlines collapse onto it. */
++export function outlineCenter(outline: Outline): [number, number] {
++  "worklet";
++  let x = 0;
++  let y = 0;
++  const n = outline.points.length / 2;
++  for (let i = 0; i < n; i += 1) {
++    x += outline.points[2 * i];
++    y += outline.points[2 * i + 1];
++  }
++  return n > 0 ? [x / n, y / n] : [0, 0];
++}
++
++/** An outline with no extent: every point on (x, y). */
++export function emptyOutline(x: number, y: number, opacity = 0): Outline {
++  "worklet";
++  const points: number[] = [];
++  for (let i = 0; i < OUTLINE_POINTS; i += 1) points.push(x, y);
++  return { points, opacity };
++}
++
++export function isEmptyOutline(outline: Outline): boolean {
++  "worklet";
++  let minX = Infinity;
++  let maxX = -Infinity;
++  let minY = Infinity;
++  let maxY = -Infinity;
++  const n = outline.points.length / 2;
++  for (let i = 0; i < n; i += 1) {
++    const x = outline.points[2 * i];
++    const y = outline.points[2 * i + 1];
++    if (x < minX) minX = x;
++    if (x > maxX) maxX = x;
++    if (y < minY) minY = y;
++    if (y > maxY) maxY = y;
++  }
++  return !(maxX - minX > EPSILON || maxY - minY > EPSILON);
++}
++
++/** Resamples a closed polygon to `count` points evenly spaced by arc length, from point 0. */
++function resample(points: number[], count: number): number[] {
++  "worklet";
++  const n = points.length / 2;
++  if (n === count) return points;
++  if (n === 0) return emptyOutline(0, 0).points;
++  const lengths: number[] = [0];
++  for (let i = 0; i < n; i += 1) {
++    const j = (i + 1) % n;
++    const seg = Math.hypot(points[2 * j] - points[2 * i], points[2 * j + 1] - points[2 * i + 1]);
++    lengths.push(lengths[i] + seg);
++  }
++  const total = lengths[n];
++  const out: number[] = [];
++  let seg = 0;
++  for (let k = 0; k < count; k += 1) {
++    const at = (total * k) / count;
++    while (seg < n - 1 && lengths[seg + 1] < at) seg += 1;
++    const span = lengths[seg + 1] - lengths[seg];
++    const u = span > EPSILON ? (at - lengths[seg]) / span : 0;
++    const j = (seg + 1) % n;
++    out.push(
++      points[2 * seg] + (points[2 * j] - points[2 * seg]) * u,
++      points[2 * seg + 1] + (points[2 * j + 1] - points[2 * seg + 1]) * u,
++    );
++  }
++  return out;
++}
++
++function finite(value: number, fallback: number): number {
++  "worklet";
++  return Number.isFinite(value) ? value : fallback;
++}
++
++/**
++ * Brings raw outlines to SHAPE_OUTLINES × OUTLINE_POINTS: resamples odd point counts,
++ * winds every outline clockwise on screen (keeping point 0 as the start), replaces NaN,
++ * and pads with empty outlines at the box center.
++ */
++export function normalizeOutlines(outlines: readonly Outline[], params: ShapeParams): Outline[] {
++  "worklet";
++  const cx = params.width / 2;
++  const cy = params.height / 2;
++  const out: Outline[] = [];
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) {
++    const source = outlines[k];
++    if (!source) {
++      out.push(emptyOutline(cx, cy));
++      continue;
++    }
++    let points = resample(source.points, OUTLINE_POINTS);
++    const clean: number[] = [];
++    for (let i = 0; i < points.length; i += 2) {
++      clean.push(finite(points[i], cx), finite(points[i + 1], cy));
++    }
++    points = clean;
++    // Screen y points down, so a clockwise outline has a positive shoelace area.
++    if (signedArea(points) < -EPSILON) {
++      const reversed: number[] = [points[0], points[1]];
++      for (let i = OUTLINE_POINTS - 1; i >= 1; i -= 1)
++        reversed.push(points[2 * i], points[2 * i + 1]);
++      points = reversed;
++    }
++    out.push({ points, opacity: Math.min(1, Math.max(0, finite(source.opacity, 0))) });
++  }
++  return out;
++}
++
++/** A preset at time `t`, normalized. */
++export function shapeAt(name: ShapeName, t: number, params: ShapeParams): Outline[] {
++  "worklet";
++  return normalizeOutlines(evaluateShape(name, t, params), params);
++}
++
++/** Spreads m sorted items over n > m sorted slots, keeping order: 1 of 3 takes the middle. */
++function spread(m: number, n: number, i: number): number {
++  "worklet";
++  return Math.min(n - 1, Math.max(0, Math.round(((i + 0.5) * n) / m - 0.5)));
++}
++
++function realByX(outlines: readonly Outline[]): number[] {
++  "worklet";
++  const real: number[] = [];
++  for (let k = 0; k < outlines.length; k += 1) if (!isEmptyOutline(outlines[k])) real.push(k);
++  real.sort((a, b) => outlineCenter(outlines[a])[0] - outlineCenter(outlines[b])[0]);
++  return real;
++}
++
++/**
++ * Which source outline morphs into each target slot: `pairing[k]` is the source index for
++ * target k. Real outlines pair in x order so paths never cross. When the counts differ,
++ * the fewer spread over the more (1 ring takes the middle of 3 bars), and the rest pair
++ * with empty outlines, which grow out of or shrink into their partner in place. Compute it
++ * once at morph start and keep it, so the pairing never flips mid-morph.
++ */
++export function pairOutlines(from: readonly Outline[], to: readonly Outline[]): number[] {
++  "worklet";
++  const a = realByX(from);
++  const b = realByX(to);
++  const pairing: number[] = [];
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) pairing.push(-1);
++  const usedFrom: boolean[] = [];
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) usedFrom.push(false);
++  if (a.length <= b.length) {
++    for (let i = 0; i < a.length; i += 1) {
++      pairing[b[spread(a.length, b.length, i)]] = a[i];
++      usedFrom[a[i]] = true;
++    }
++  } else {
++    for (let j = 0; j < b.length; j += 1) {
++      const i = spread(b.length, a.length, j);
++      pairing[b[j]] = a[i];
++      usedFrom[a[i]] = true;
++    }
++  }
++  // Leftover slots on either side pair with each other in index order.
++  let next = 0;
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) {
++    if (pairing[k] !== -1) continue;
++    while (next < SHAPE_OUTLINES && usedFrom[next]) next += 1;
++    pairing[k] = next;
++    usedFrom[next] = true;
++  }
++  return pairing;
++}
++
++export function identityPairing(): number[] {
++  "worklet";
++  const pairing: number[] = [];
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) pairing.push(k);
++  return pairing;
++}
++
++function lerp(from: number, to: number, progress: number): number {
++  "worklet";
++  return from + (to - from) * progress;
++}
++
++/** Pointwise lerp of two normalized shapes. An empty partner sits at the other's center. */
++export function tweenOutlines(
++  from: readonly Outline[],
++  to: readonly Outline[],
++  pairing: readonly number[],
++  progress: number,
++  opacityProgress: number = progress,
++): Outline[] {
++  "worklet";
++  const out: Outline[] = [];
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) {
++    let a = from[pairing[k]];
++    let b = to[k];
++    const aEmpty = isEmptyOutline(a);
++    const bEmpty = isEmptyOutline(b);
++    if (aEmpty && !bEmpty) {
++      const [x, y] = outlineCenter(b);
++      a = emptyOutline(x, y, b.opacity);
++    } else if (bEmpty && !aEmpty) {
++      const [x, y] = outlineCenter(a);
++      b = emptyOutline(x, y, a.opacity);
++    }
++    const points: number[] = [];
++    for (let i = 0; i < a.points.length; i += 1)
++      points.push(lerp(a.points[i], b.points[i], progress));
++    out.push({ points, opacity: lerp(a.opacity, b.opacity, opacityProgress) });
++  }
++  return out;
++}
++
++/** Cubic ease-in-out, the same curve as Reanimated's Easing.inOut(Easing.cubic). */
++export function easeInOutCubic(p: number): number {
++  "worklet";
++  return p < 0.5 ? 4 * p * p * p : 1 - (-2 * p + 2) ** 3 / 2;
++}
++
++export interface MorphPlan {
++  /** Source → via (or → target when there is no via). */
++  first: number[];
++  /** Via → target. Unused without a via. */
++  second: number[];
++}
++
++/**
++ * Plans a morph. `to` and `via` are evaluated where the morph will meet them (the end and
++ * the midpoint), so a live target such as the orbit pairs by where its dots will be.
++ */
++export function planMorph(
++  from: readonly Outline[],
++  viaAtMid: readonly Outline[] | null,
++  toAtEnd: readonly Outline[],
++): MorphPlan {
++  "worklet";
++  if (!viaAtMid) return { first: pairOutlines(from, toAtEnd), second: identityPairing() };
++  return { first: pairOutlines(from, viaAtMid), second: pairOutlines(viaAtMid, toAtEnd) };
++}
++
++/** Opacity runs straight from source to target; the via keyframe only steers the points. */
++function withOpacities(
++  frame: Outline[],
++  from: readonly Outline[],
++  to: readonly Outline[],
++  plan: MorphPlan,
++  progress: number,
++): Outline[] {
++  "worklet";
++  const out: Outline[] = [];
++  for (let k = 0; k < SHAPE_OUTLINES; k += 1) {
++    const target = to[k];
++    const source = from[plan.first[plan.second[k]]];
++    const a = isEmptyOutline(source) ? target.opacity : source.opacity;
++    const b = isEmptyOutline(target) ? a : target.opacity;
++    out.push({ points: frame[k].points, opacity: lerp(a, b, progress) });
++  }
++  return out;
++}
++
++/**
++ * One frame of a morph at linear progress `p` (0..1). With a via, each half eases on its
++ * own (line up, then stretch). Opacity eases across the whole morph.
++ */
++export function morphFrame(input: {
++  from: readonly Outline[];
++  via: readonly Outline[] | null;
++  to: readonly Outline[];
++  plan: MorphPlan;
++  progress: number;
++  easing?: (p: number) => number;
++}): Outline[] {
++  "worklet";
++  const ease = input.easing ?? easeInOutCubic;
++  const p = Math.min(1, Math.max(0, finite(input.progress, 0)));
++  const opacity = ease(p);
++  if (!input.via) return tweenOutlines(input.from, input.to, input.plan.first, ease(p), opacity);
++  if (p < 0.5) {
++    const first = tweenOutlines(input.from, input.via, input.plan.first, ease(p * 2), 0);
++    return withOpacities(first, input.from, input.to, input.plan, opacity);
++  }
++  const second = tweenOutlines(input.via, input.to, input.plan.second, ease(p * 2 - 1), 1);
++  return withOpacities(second, input.from, input.to, input.plan, opacity);
++}
++
++/** The keyframe a morph passes through by default: orbit and bars meet lined up. */
++export function defaultVia(from: ShapeName, to: ShapeName): ShapeName | null {
++  "worklet";
++  const touchesOrbitAndBars =
++    (from === "orbit" && to === "bars") || (from === "bars" && to === "orbit");
++  return touchesOrbitAndBars ? "lineup" : null;
++}
++
++/** An SVG path `d` for one outline. */
++export function outlineToSvgPath(outline: Outline): string {
++  "worklet";
++  const p = outline.points;
++  let d = `M${p[0].toFixed(2)} ${p[1].toFixed(2)}`;
++  for (let i = 2; i < p.length; i += 2) d += `L${p[i].toFixed(2)} ${p[i + 1].toFixed(2)}`;
++  return `${d}Z`;
++}
+diff --git a/packages/app/src/components/ui/shape-morph/use-shape-morph.ts b/packages/app/src/components/ui/shape-morph/use-shape-morph.ts
+new file mode 100644
+index 000000000..115aa374a
+--- /dev/null
++++ b/packages/app/src/components/ui/shape-morph/use-shape-morph.ts
+@@ -0,0 +1,251 @@
++import { useCallback, useEffect } from "react";
++import {
++  isSharedValue,
++  useDerivedValue,
++  useFrameCallback,
++  useReducedMotion,
++  useSharedValue,
++  type FrameInfo,
++  type SharedValue,
++} from "react-native-reanimated";
++import {
++  ORBIT_TURN_MS,
++  defaultVia,
++  easeInOutCubic,
++  identityPairing,
++  isAnimatedShape,
++  morphFrame,
++  planMorph,
++  shapeAt,
++  type MorphPlan,
++  type Outline,
++  type ShapeName,
++  type ShapeParams,
++} from "./shapes";
++
++/** Thinking ↔ Speaking in the voice-status spec: 800ms, two eased halves. */
++export const SHAPE_MORPH_DURATION_MS = 800;
++/**
++ * Where animated shapes freeze under reduced motion and while scrubbing: an eighth of an
++ * orbit turn, so no two orbit dots share a column.
++ */
++export const SHAPE_FROZEN_TIME_MS = ORBIT_TURN_MS / 8;
++
++type MaybeShared<T> = T | SharedValue<T>;
++
++export interface ShapeMorphProps {
++  /** The shape to show. Changing it morphs from whatever is on screen to the new shape. */
++  shape: ShapeName;
++  /**
++   * Scrub mode: with `progress`, the renderer shows `from` → `shape` at that progress
++   * (0..1) and stops its clock, so animated shapes hold still.
++   */
++  from?: ShapeName;
++  progress?: MaybeShared<number>;
++  /** Keyframe to pass through halfway. "auto" lines up between orbit and bars. */
++  via?: ShapeName | "auto" | null;
++  durationMs?: number;
++  /** A worklet easing for each half of the morph. Defaults to cubic ease-in-out. */
++  easing?: (progress: number) => number;
++  width: number;
++  height: number;
++  /** Bar column geometry. Defaults to three columns and two gaps of width / 5. */
++  barWidth?: number;
++  barGap?: number;
++  /** Bar heights in px for `bars`. A shared value lets a morph track live bars. */
++  barHeights?: MaybeShared<number[]>;
++  barOpacities?: MaybeShared<number[]>;
++  /** Fill color. Defaults to theme.colors.foreground. */
++  color?: string;
++  /**
++   * Written on the UI thread: the shape name once a morph lands, "" while one runs. Read it
++   * in the same frame to swap this layer for another (see VolumeMeter's handoff).
++   */
++  settled?: SharedValue<string>;
++  /** Stops the clock, e.g. while the layer is hidden. */
++  paused?: boolean;
++}
++
++interface MorphState {
++  active: boolean;
++  from: Outline[];
++  to: ShapeName;
++  via: ShapeName | null;
++  start: number;
++  duration: number;
++  plan: MorphPlan;
++}
++
++function settledState(to: ShapeName): MorphState {
++  return {
++    active: false,
++    from: [],
++    to,
++    via: null,
++    start: 0,
++    duration: 0,
++    plan: { first: identityPairing(), second: identityPairing() },
++  };
++}
++
++const DEFAULT_HEIGHTS: number[] = [];
++
++/** Shared by the Skia and SVG renderers: the outlines to draw this frame. */
++export function useShapeMorphFrame({
++  shape,
++  from,
++  progress,
++  via = "auto",
++  durationMs = SHAPE_MORPH_DURATION_MS,
++  easing = easeInOutCubic,
++  width,
++  height,
++  barWidth = width / 5,
++  barGap = width / 5,
++  barHeights,
++  barOpacities,
++  settled,
++  paused = false,
++}: ShapeMorphProps): SharedValue<Outline[]> {
++  const reduceMotion = useReducedMotion();
++  const isScrubbing = from !== undefined && progress !== undefined;
++  const isFrozen = reduceMotion || isScrubbing;
++
++  const clock = useSharedValue(SHAPE_FROZEN_TIME_MS);
++  const requested = useSharedValue<ShapeName>(shape);
++  const morph = useSharedValue<MorphState>(settledState(shape));
++  const ownSettled = useSharedValue<string>(shape);
++  const settledOut = settled ?? ownSettled;
++
++  const staticHeights = useSharedValue<number[]>(DEFAULT_HEIGHTS);
++  const staticOpacities = useSharedValue<number[] | undefined>(undefined);
++  const staticProgress = useSharedValue(0);
++  const heightsInput = isSharedValue<number[]>(barHeights) ? barHeights : staticHeights;
++  const opacitiesInput = isSharedValue<number[]>(barOpacities) ? barOpacities : staticOpacities;
++  const progressInput = isSharedValue<number>(progress) ? progress : staticProgress;
++
++  useEffect(() => {
++    if (!isSharedValue<number[]>(barHeights)) {
++      staticHeights.value = barHeights ? [...barHeights] : DEFAULT_HEIGHTS;
++    }
++  }, [barHeights, staticHeights]);
++  useEffect(() => {
++    if (!isSharedValue<number[]>(barOpacities)) {
++      staticOpacities.value = barOpacities ? [...barOpacities] : undefined;
++    }
++  }, [barOpacities, staticOpacities]);
++  useEffect(() => {
++    if (typeof progress === "number") staticProgress.value = progress;
++  }, [progress, staticProgress]);
++
++  const frame = useDerivedValue<Outline[]>(() => {
++    const params: ShapeParams = {
++      width,
++      height,
++      barWidth,
++      barGap,
++      barHeights: heightsInput.value,
++      barOpacities: opacitiesInput.value,
++    };
++    const t = clock.value;
++    if (isScrubbing && from !== undefined) {
++      const source = shapeAt(from, t, params);
++      const target = shapeAt(shape, t, params);
++      const viaName = via === "auto" ? defaultVia(from, shape) : via;
++      const keyframe = viaName ? shapeAt(viaName, t, params) : null;
++      return morphFrame({
++        from: source,
++        via: keyframe,
++        to: target,
++        plan: planMorph(source, keyframe, target),
++        progress: progressInput.value,
++        easing,
++      });
++    }
++    const state = morph.value;
++    const target = shapeAt(state.to, t, params);
++    if (!state.active) return target;
++    return morphFrame({
++      from: state.from,
++      via: state.via ? shapeAt(state.via, t, params) : null,
++      to: target,
++      plan: state.plan,
++      progress: (t - state.start) / state.duration,
++      easing,
++    });
++  });
++
++  // Starts a morph from the frame on screen. The target and keyframe are paired where the
++  // morph will meet them, and that pairing holds for the whole morph.
++  const tick = useCallback(
++    (info: FrameInfo) => {
++      "worklet";
++      const state = morph.value;
++      const next = requested.value;
++      if (next !== state.to) {
++        const t = clock.value;
++        const params: ShapeParams = {
++          width,
++          height,
++          barWidth,
++          barGap,
++          barHeights: heightsInput.value,
++          barOpacities: opacitiesInput.value,
++        };
++        const viaName = via === "auto" ? defaultVia(state.to, next) : via;
++        const keyframe = viaName ? shapeAt(viaName, t + durationMs / 2, params) : null;
++        const source = frame.value;
++        morph.value = {
++          active: true,
++          from: source,
++          to: next,
++          via: viaName,
++          start: t,
++          duration: Math.max(1, durationMs),
++          plan: planMorph(source, keyframe, shapeAt(next, t + durationMs, params)),
++        };
++        settledOut.value = "";
++        return;
++      }
++      if (state.active || isAnimatedShape(state.to)) {
++        clock.value += Math.min(info.timeSincePreviousFrame ?? 0, 100);
++      }
++      if (state.active && clock.value - state.start >= state.duration) {
++        morph.value = { ...state, active: false };
++        settledOut.value = state.to;
++      }
++    },
++    [
++      morph,
++      requested,
++      clock,
++      frame,
++      settledOut,
++      heightsInput,
++      opacitiesInput,
++      width,
++      height,
++      barWidth,
++      barGap,
++      via,
++      durationMs,
++    ],
++  );
++  const frameCallback = useFrameCallback(tick, false);
++  const isRunning = !isFrozen && !paused;
++
++  useEffect(() => {
++    frameCallback.setActive(isRunning);
++  }, [frameCallback, isRunning]);
++
++  // Without a running clock there is no morph: swap straight to the shape.
++  useEffect(() => {
++    requested.value = shape;
++    if (isRunning) return;
++    clock.value = SHAPE_FROZEN_TIME_MS;
++    morph.value = settledState(shape);
++    settledOut.value = shape;
++  }, [shape, isRunning, requested, clock, morph, settledOut]);
++
++  return frame;
++}
+diff --git a/packages/app/src/components/volume-meter.tsx b/packages/app/src/components/volume-meter.tsx
+index 8049c7f01..f3096ecd7 100644
+--- a/packages/app/src/components/volume-meter.tsx
++++ b/packages/app/src/components/volume-meter.tsx
+@@ -3,6 +3,7 @@ import { View, useWindowDimensions } from "react-native";
+ import ReanimatedAnimated, {
+   useSharedValue,
+   useAnimatedStyle,
++  useDerivedValue,
+   useFrameCallback,
+   useReducedMotion,
+   withTiming,
+@@ -13,6 +14,7 @@ import ReanimatedAnimated, {
+   type SharedValue,
+ } from "react-native-reanimated";
+ import { StyleSheet } from "react-native-unistyles";
++import { ShapeMorph } from "@/components/ui/shape-morph";
+ import { isWeb } from "@/constants/platform";
+ 
+ type VolumeMeterVariant = "default" | "compact" | "mini";
+@@ -22,6 +24,11 @@ type VolumeMeterOrientation = "vertical" | "horizontal";
+  * breathing wave left to right, and thinking breathes out from the middle bar, slower.
+  */
+ export type VolumeMeterIdle = "pulse" | "listening" | "thinking";
++/**
++ * The agent's side. think draws the orbit loader over the bars; live morphs the orbit into
++ * the live bars and hands off to them. Leave it unset for a mic meter.
++ */
++export type VolumeMeterMode = "think" | "live";
+ 
+ interface VolumeMeterProps {
+   volume: number;
+@@ -31,6 +38,7 @@ interface VolumeMeterProps {
+   variant?: VolumeMeterVariant;
+   color?: string;
+   idle?: VolumeMeterIdle;
++  mode?: VolumeMeterMode;
+ }
+ 
+ interface MeterSize {
+@@ -157,6 +165,8 @@ const IDLE_WAVES: Record<Exclude<VolumeMeterIdle, "pulse">, IdleWave> = {
+ /** Below this volume the idle wave fades in. Higher than the pulse's so it hands off to speech. */
+ const IDLE_WAVE_FADE = 0.15;
+ const TWO_PI = Math.PI * 2;
++/** The ShapeMorph preset that matches the bars exactly, so the handoff is invisible. */
++const BARS_SHAPE = "bars";
+ 
+ interface BarStyleInput {
+   bar: BarTuning;
+@@ -173,7 +183,13 @@ interface BarStyleInput {
+   reduceMotion: boolean;
+ }
+ 
+-function useBarStyle({
++interface BarLevel {
++  height: number;
++  opacity: number;
++}
++
++/** A bar's height and opacity on the UI thread. The bar's style and the agent morph read it. */
++function useBarLevel({
+   bar,
+   size,
+   volume,
+@@ -184,8 +200,8 @@ function useBarStyle({
+   isMuted,
+   isSpeaking,
+   reduceMotion,
+-}: BarStyleInput) {
+-  return useAnimatedStyle(() => {
++}: BarStyleInput): SharedValue<BarLevel> {
++  return useDerivedValue(() => {
+     let baseOpacity: number;
+     if (isMuted) baseOpacity = 0.3;
+     else if (isSpeaking) baseOpacity = 0.9;
+@@ -221,11 +237,20 @@ function useBarStyle({
+     const volumeBoost = isMuted || !isSpeaking ? 0 : currentVolume * 0.3;
+     return {
+       height: Math.min(size.maxHeight, Math.max(size.minHeight, height)),
+-      opacity: baseOpacity + volumeBoost,
++      // Native clamps view opacity at 1; clamp here so the morph paints the same value.
++      opacity: Math.min(1, baseOpacity + volumeBoost),
+     };
+   });
+ }
+ 
++/** Hidden while the agent morph layer is showing, so only one of the two ever paints. */
++function useBarStyle(level: SharedValue<BarLevel>, settled: SharedValue<string>) {
++  return useAnimatedStyle(() => ({
++    height: level.value.height,
++    opacity: settled.value === BARS_SHAPE ? level.value.opacity : 0,
++  }));
++}
++
+ /**
+  * Bar widths and gaps in whole snapping units, so every bar sits the same fraction of a
+  * unit into its step and all three paint at one width. Unsnapped, a 3px bar at 110% page
+@@ -265,6 +290,7 @@ export function VolumeMeter({
+   variant = "default",
+   color,
+   idle = "pulse",
++  mode,
+ }: VolumeMeterProps) {
+   const size = SIZES[variant][orientation];
+   // On web, scale is devicePixelRatio and follows page zoom, so the snap tracks Cmd +/-.
+@@ -274,6 +300,13 @@ export function VolumeMeter({
+   const reduceMotion = useReducedMotion();
+   const isAnimating = !isMuted && !reduceMotion;
+   const idleWave = idle === "pulse" ? null : IDLE_WAVES[idle];
++  const isAgent = mode !== undefined;
++  // The agent's bars run in talk mode even while the orbit hides them, so a morph into live
++  // meets bars that are already moving.
++  const isTalking = isAgent || isSpeaking;
++  // Which layer paints: "bars" shows the bars, anything else shows the morph layer.
++  // ShapeMorph writes it on the UI thread in the frame a morph starts or lands.
++  const settled = useSharedValue<string>(mode === "think" ? "orbit" : BARS_SHAPE);
+ 
+   const animatedVolume = useSharedValue(0);
+   const clock = useSharedValue(0);
+@@ -336,17 +369,41 @@ export function VolumeMeter({
+     drift,
+     idleWave,
+     isMuted,
+-    isSpeaking,
++    isSpeaking: isTalking,
+     reduceMotion,
+   };
+-  const line1Style = useBarStyle({ ...shared, bar: BARS[0], idlePulse: line1Pulse });
+-  const line2Style = useBarStyle({ ...shared, bar: BARS[1], idlePulse: line2Pulse });
+-  const line3Style = useBarStyle({ ...shared, bar: BARS[2], idlePulse: line3Pulse });
++  const line1Level = useBarLevel({ ...shared, bar: BARS[0], idlePulse: line1Pulse });
++  const line2Level = useBarLevel({ ...shared, bar: BARS[1], idlePulse: line2Pulse });
++  const line3Level = useBarLevel({ ...shared, bar: BARS[2], idlePulse: line3Pulse });
++  const line1Style = useBarStyle(line1Level, settled);
++  const line2Style = useBarStyle(line2Level, settled);
++  const line3Style = useBarStyle(line3Level, settled);
++  const barHeights = useDerivedValue(() => [
++    line1Level.value.height,
++    line2Level.value.height,
++    line3Level.value.height,
++  ]);
++  const barOpacities = useDerivedValue(() => [
++    line1Level.value.opacity,
++    line2Level.value.opacity,
++    line3Level.value.opacity,
++  ]);
++  const morphStyle = useAnimatedStyle(() => ({
++    opacity: settled.value === BARS_SHAPE ? 0 : 1,
++  }));
+ 
++  // The agent meter pins its width to the bars, so the morph layer's box is the bars' box.
++  const boxWidth = 3 * lineWidth + 2 * lineSpacing;
+   const containerStyle = useMemo(
+-    () => [styles.container, { height: size.containerHeight }],
+-    [size.containerHeight],
++    () => [
++      styles.container,
++      isAgent
++        ? { height: size.containerHeight, width: boxWidth }
++        : { height: size.containerHeight },
++    ],
++    [size.containerHeight, isAgent, boxWidth],
+   );
++  const morphLayerStyle = useMemo(() => [MORPH_LAYER, morphStyle], [morphStyle]);
+   const spacerStyle = useMemo(() => ({ width: lineSpacing }), [lineSpacing]);
+   const widthStyle = useMemo(() => ({ width: lineWidth }), [lineWidth]);
+   // Reanimated owns the outer bar node, which gets plain styles only. Unistyles
+@@ -373,10 +430,28 @@ export function VolumeMeter({
+       <ReanimatedAnimated.View style={line3CombinedStyle}>
+         <View style={fillStyle} />
+       </ReanimatedAnimated.View>
++      {isAgent ? (
++        <ReanimatedAnimated.View style={morphLayerStyle} pointerEvents="none">
++          <ShapeMorph
++            shape={mode === "think" ? "orbit" : BARS_SHAPE}
++            width={boxWidth}
++            height={size.containerHeight}
++            barWidth={lineWidth}
++            barGap={lineSpacing}
++            barHeights={barHeights}
++            barOpacities={barOpacities}
++            color={color}
++            settled={settled}
++          />
++        </ReanimatedAnimated.View>
++      ) : null}
+     </View>
+   );
+ }
+ 
++// The morph layer sits exactly over the bars: 1 unit = 1px from the meter's top-left.
++const MORPH_LAYER = { position: "absolute", top: 0, left: 0 } as const;
++
+ const styles = StyleSheet.create((theme) => ({
+   container: {
+     flexDirection: "row",
+diff --git a/packages/app/src/composer/index.tsx b/packages/app/src/composer/index.tsx
+index ba42d1c5d..32cf9c866 100644
+--- a/packages/app/src/composer/index.tsx
++++ b/packages/app/src/composer/index.tsx
+@@ -282,6 +282,7 @@ function buildAgentStateSelector(serverId: string, agentId: string) {
+       contextWindowUsedTokens: agent?.lastUsage?.contextWindowUsedTokens ?? null,
+       totalCostUsd: agent?.lastUsage?.totalCostUsd ?? null,
+       model: agent?.model ?? null,
++      provider: agent?.provider ?? null,
+     };
+   };
+ }
+@@ -1299,6 +1300,7 @@ function ComposerContentImpl({
+   const { settings: appSettings } = useAppSettings();
+ 
+   const agentState = useSessionStore(useShallow(buildAgentStateSelector(serverId, agentId)));
++  const agentProvider = agentState.provider ?? undefined;
+ 
+   const queuedMessagesRaw = useSessionStore((state) =>
+     state.sessions[serverId]?.queuedMessages?.get(agentId),
+@@ -2516,6 +2518,7 @@ function ComposerContentImpl({
+                   activeActionContent={activeActionContent}
+                   voiceServerId={serverId}
+                   voiceAgentId={agentId}
++                  voiceAgentProvider={agentProvider}
+                   isAgentRunning={isAgentRunning}
+                   defaultSendBehavior={activeSendBehavior}
+                   onQueue={handleQueue}
+diff --git a/packages/app/src/composer/input/input.tsx b/packages/app/src/composer/input/input.tsx
+index 78605519f..6ba47fc73 100644
+--- a/packages/app/src/composer/input/input.tsx
++++ b/packages/app/src/composer/input/input.tsx
+@@ -156,6 +156,8 @@ export interface MessageInputProps {
+   activeActionContent?: React.ReactNode;
+   voiceServerId?: string;
+   voiceAgentId?: string;
++  /** The agent's provider id, for the voice mode agent tab's name and icon. */
++  voiceAgentProvider?: string;
+   /** When true and there's sendable content, calls onQueue instead of onSubmit */
+   isAgentRunning?: boolean;
+   /** Controls what the default send action (Enter, send button, dictation) does when the agent is
+@@ -1073,6 +1075,7 @@ interface ResolvedMessageInputProps {
+   activeActionContent: React.ReactNode;
+   voiceServerId: string | undefined;
+   voiceAgentId: string | undefined;
++  voiceAgentProvider: string | undefined;
+   isAgentRunning: boolean;
+   defaultSendBehavior: "interrupt" | "steer" | "queue";
+   onQueue: ((payload: MessagePayload) => void) | undefined;
+@@ -1120,6 +1123,7 @@ function resolveMessageInputProps(props: MessageInputProps): ResolvedMessageInpu
+     activeActionContent: props.activeActionContent,
+     voiceServerId: props.voiceServerId,
+     voiceAgentId: props.voiceAgentId,
++    voiceAgentProvider: props.voiceAgentProvider,
+     isAgentRunning: props.isAgentRunning ?? false,
+     defaultSendBehavior: props.defaultSendBehavior,
+     onQueue: props.onQueue,
+@@ -1197,6 +1201,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+       activeActionContent,
+       voiceServerId,
+       voiceAgentId,
++      voiceAgentProvider,
+       isAgentRunning,
+       defaultSendBehavior,
+       onQueue,
+@@ -2151,6 +2156,18 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+         handleRealtimeVoiceStop,
+       ],
+     );
++    const agentVoiceSession = useMemo(
++      () =>
++        isRealtimeVoiceForCurrentAgent && voice && voiceServerId
++          ? {
++              serverId: voiceServerId,
++              provider: voiceAgentProvider ?? null,
++              cwd,
++              phase: voice.phase,
++            }
++          : null,
++      [isRealtimeVoiceForCurrentAgent, voice, voiceServerId, voiceAgentProvider, cwd],
++    );
+     return (
+       <View
+         ref={rootRef}
+@@ -2175,6 +2192,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+           inputWrapperStyle={inputWrapperCombinedStyle}
+           inputPointerEvents={surfacePresentation.input.pointerEvents}
+           voiceStrip={voiceStrip}
++          agentVoiceSession={agentVoiceSession}
+           attachmentSlot={attachmentSlot}
+           showFullscreenButton={shouldShowFullscreenControl(
+             isCompact,
+diff --git a/packages/app/src/composer/input/labels.test.ts b/packages/app/src/composer/input/labels.test.ts
+index 2e267c5e1..fee3d394f 100644
+--- a/packages/app/src/composer/input/labels.test.ts
++++ b/packages/app/src/composer/input/labels.test.ts
+@@ -1,6 +1,9 @@
+ import { describe, expect, it } from "vitest";
+ import {
+-  resolveRealtimeVoiceStatusKey,
++  resolveAgentVoiceStatus,
++  resolveAgentVoiceStatusKey,
++  resolveAgentVoiceTabState,
++  resolveMicState,
+   resolveSendTooltipLabel,
+   resolveSubmitAccessibilityLabel,
+   resolveVoiceAccessibilityLabel,
+@@ -153,36 +156,70 @@ describe("composer input labels", () => {
+   });
+ });
+ 
+-describe("realtime voice status", () => {
+-  it("maps each voice phase to a status label", () => {
+-    const phases = [
+-      "starting",
+-      "listening",
+-      "submitting",
+-      "waiting",
+-      "playing",
+-      "stopping",
+-      "disabled",
+-    ] as const;
+-    const keys = phases.map((phase) => resolveRealtimeVoiceStatusKey({ phase, isMuted: false }));
++describe("voice mic state", () => {
++  it("reports mute as is", () => {
++    expect(resolveMicState({ isMuted: false, isSwitching: false })).toEqual({
++      isMuted: false,
++      isPending: false,
++    });
++    expect(resolveMicState({ isMuted: true, isSwitching: false })).toEqual({
++      isMuted: true,
++      isPending: false,
++    });
++  });
++
++  it("is pending while voice starts or ends, muted or not", () => {
++    expect(resolveMicState({ isMuted: false, isSwitching: true }).isPending).toBe(true);
++    expect(resolveMicState({ isMuted: true, isSwitching: true })).toEqual({
++      isMuted: true,
++      isPending: true,
++    });
++  });
++});
+ 
+-    expect(keys).toEqual([
+-      "realtimeVoice.status.connecting",
+-      "realtimeVoice.status.listening",
+-      "realtimeVoice.status.thinking",
+-      "realtimeVoice.status.thinking",
+-      "realtimeVoice.status.speaking",
+-      "realtimeVoice.status.ending",
+-      "realtimeVoice.status.listening",
++describe("agent voice status", () => {
++  const phases = [
++    "disabled",
++    "starting",
++    "listening",
++    "submitting",
++    "waiting",
++    "playing",
++    "stopping",
++  ] as const;
++
++  it("maps each voice phase to what the agent is doing", () => {
++    expect(phases.map((phase) => resolveAgentVoiceStatus({ phase }))).toEqual([
++      "waiting",
++      "connecting",
++      "waiting",
++      "thinking",
++      "thinking",
++      "speaking",
++      "ending",
+     ]);
+   });
+ 
+-  it("shows muted over any phase", () => {
+-    expect(resolveRealtimeVoiceStatusKey({ phase: "playing", isMuted: true })).toBe(
+-      "realtimeVoice.status.muted",
++  it("names each status with a label key", () => {
++    const keys = phases.map((phase) =>
++      resolveAgentVoiceStatusKey(resolveAgentVoiceStatus({ phase })),
+     );
+-    expect(resolveRealtimeVoiceStatusKey({ phase: "starting", isMuted: true })).toBe(
+-      "realtimeVoice.status.muted",
++    expect(new Set(keys)).toEqual(
++      new Set([
++        "realtimeVoice.status.waiting",
++        "realtimeVoice.status.connecting",
++        "realtimeVoice.status.thinking",
++        "realtimeVoice.status.speaking",
++        "realtimeVoice.status.ending",
++      ]),
+     );
+   });
++
++  it("expands the tab only while the agent is busy and hides it as voice ends", () => {
++    expect(resolveAgentVoiceTabState("thinking")).toBe("expanded");
++    expect(resolveAgentVoiceTabState("speaking")).toBe("expanded");
++    expect(resolveAgentVoiceTabState("waiting")).toBe("compact");
++    expect(resolveAgentVoiceTabState("connecting")).toBe("compact");
++    expect(resolveAgentVoiceTabState("ending")).toBe("hidden");
++  });
+ });
+diff --git a/packages/app/src/composer/input/labels.ts b/packages/app/src/composer/input/labels.ts
+index 8c92b8fd5..d5d5b3d97 100644
+--- a/packages/app/src/composer/input/labels.ts
++++ b/packages/app/src/composer/input/labels.ts
+@@ -1,4 +1,5 @@
+ import type { TFunction } from "i18next";
++import type { PanelTabState } from "@/components/ui/panel-tab";
+ import type { SendBehavior } from "@/hooks/use-settings/storage";
+ import type { VoiceRuntimePhase } from "@/voice/voice-runtime";
+ 
+@@ -62,30 +63,48 @@ export function resolveSendTooltipLabel(input: {
+     : input.t("composer.input.send");
+ }
+ 
+-export type RealtimeVoiceStatusKey =
+-  | "realtimeVoice.status.connecting"
+-  | "realtimeVoice.status.listening"
+-  | "realtimeVoice.status.thinking"
+-  | "realtimeVoice.status.speaking"
+-  | "realtimeVoice.status.muted"
+-  | "realtimeVoice.status.ending";
++/** Your side of a voice session. Mute only ever changes this, never the agent's status. */
++export interface MicState {
++  isMuted: boolean;
++  /** Voice is starting or ending: the toggle shows progress and can't be pressed. */
++  isPending: boolean;
++}
++
++export function resolveMicState(input: { isMuted: boolean; isSwitching: boolean }): MicState {
++  return { isMuted: input.isMuted, isPending: input.isSwitching };
++}
++
++/** The agent's side of a voice session, from the runtime phase alone. */
++export type AgentVoiceStatus = "connecting" | "waiting" | "thinking" | "speaking" | "ending";
+ 
+-const REALTIME_VOICE_STATUS_BY_PHASE: Record<VoiceRuntimePhase, RealtimeVoiceStatusKey> = {
+-  // The strip only mounts in voice mode; disabled is the one-frame gap before the snapshot lands.
+-  disabled: "realtimeVoice.status.listening",
+-  starting: "realtimeVoice.status.connecting",
+-  listening: "realtimeVoice.status.listening",
+-  submitting: "realtimeVoice.status.thinking",
+-  waiting: "realtimeVoice.status.thinking",
+-  playing: "realtimeVoice.status.speaking",
+-  stopping: "realtimeVoice.status.ending",
++const AGENT_VOICE_STATUS_BY_PHASE: Record<VoiceRuntimePhase, AgentVoiceStatus> = {
++  // The tab only shows in voice mode; disabled is the one-frame gap before the snapshot lands.
++  disabled: "waiting",
++  starting: "connecting",
++  // The agent is listening to you, so from its side it waits.
++  listening: "waiting",
++  submitting: "thinking",
++  waiting: "thinking",
++  playing: "speaking",
++  stopping: "ending",
+ };
+ 
+-/** Muted wins over every phase: it is the one state where the user is not being heard. */
+-export function resolveRealtimeVoiceStatusKey(input: {
+-  phase: VoiceRuntimePhase;
+-  isMuted: boolean;
+-}): RealtimeVoiceStatusKey {
+-  if (input.isMuted) return "realtimeVoice.status.muted";
+-  return REALTIME_VOICE_STATUS_BY_PHASE[input.phase];
++export function resolveAgentVoiceStatus(input: { phase: VoiceRuntimePhase }): AgentVoiceStatus {
++  return AGENT_VOICE_STATUS_BY_PHASE[input.phase];
++}
++
++export type AgentVoiceStatusKey = `realtimeVoice.status.${AgentVoiceStatus}`;
++
++export function resolveAgentVoiceStatusKey(status: AgentVoiceStatus): AgentVoiceStatusKey {
++  return `realtimeVoice.status.${status}`;
++}
++
++/**
++ * How the agent tab shows a status. It names what the agent is doing only while it is busy;
++ * while it waits or connects it shrinks to its avatar, and it sinks away as voice ends.
++ */
++export function resolveAgentVoiceTabState(status: AgentVoiceStatus): PanelTabState {
++  if (status === "thinking" || status === "speaking") return "expanded";
++  if (status === "ending") return "hidden";
++  return "compact";
+ }
+diff --git a/packages/app/src/composer/input/presentation.tsx b/packages/app/src/composer/input/presentation.tsx
+index 22ea5a728..cebb1e594 100644
+--- a/packages/app/src/composer/input/presentation.tsx
++++ b/packages/app/src/composer/input/presentation.tsx
+@@ -2,6 +2,7 @@ import { useCallback, useMemo, type ReactNode, type Ref } from "react";
+ import { View, type ViewProps } from "react-native";
+ import { Maximize2, Minimize2 } from "lucide-react-native";
+ import { useTranslation } from "react-i18next";
++import { AgentVoiceTab, type AgentVoiceSession } from "@/components/agent-voice-tab";
+ import { Button } from "@/components/ui/button";
+ import { ComposerFullscreenBody, ComposerFullscreenFooter } from "@/composer/dock";
+ import { useComposerKeyboardScope } from "@/composer/keyboard-scope";
+@@ -37,6 +38,7 @@ export function ComposerInputPresentation({
+   inputWrapperStyle,
+   inputPointerEvents,
+   voiceStrip,
++  agentVoiceSession,
+   attachmentSlot,
+   showFullscreenButton,
+   onEnter,
+@@ -54,6 +56,8 @@ export function ComposerInputPresentation({
+   inputPointerEvents: ViewProps["pointerEvents"];
+   /** Voice mode controls, the first row of the card. Not drawn in fullscreen. */
+   voiceStrip: ReactNode;
++  /** The agent's side of voice mode, a tab behind the card. Not drawn in fullscreen. */
++  agentVoiceSession: AgentVoiceSession | null;
+   attachmentSlot: ReactNode;
+   showFullscreenButton: boolean;
+   onEnter: () => void;
+@@ -103,32 +107,34 @@ export function ComposerInputPresentation({
+         </View>
+       ) : null}
+       <ComposerFullscreenBody fullscreen={fullscreen}>
+-        <View
+-          ref={inputWrapperRef}
+-          style={fullscreen ? styles.fullscreenInputWrapper : inputWrapperStyle}
+-          pointerEvents={inputPointerEvents}
+-        >
+-          {fullscreen ? null : voiceStrip}
+-          {fullscreen ? null : attachmentSlot}
+-          <View style={fullscreen ? styles.fullscreenTextSurface : styles.inlineTextSurface}>
+-            {surface}
+-            {showFullscreenButton && !fullscreen ? (
+-              <Button
+-                variant="ghost"
+-                size="xs"
+-                accessibilityLabel={t("composer.input.fullscreen")}
+-                leftIcon={maximizeIcon}
+-                onPointerDown={keepEditorFocused}
+-                onPress={onEnter}
+-                style={enterStyle}
+-                hitSlop={8}
+-              >
+-                {null}
+-              </Button>
+-            ) : null}
++        <AgentVoiceTab session={fullscreen ? null : agentVoiceSession} fill={fullscreen}>
++          <View
++            ref={inputWrapperRef}
++            style={fullscreen ? styles.fullscreenInputWrapper : inputWrapperStyle}
++            pointerEvents={inputPointerEvents}
++          >
++            {fullscreen ? null : voiceStrip}
++            {fullscreen ? null : attachmentSlot}
++            <View style={fullscreen ? styles.fullscreenTextSurface : styles.inlineTextSurface}>
++              {surface}
++              {showFullscreenButton && !fullscreen ? (
++                <Button
++                  variant="ghost"
++                  size="xs"
++                  accessibilityLabel={t("composer.input.fullscreen")}
++                  leftIcon={maximizeIcon}
++                  onPointerDown={keepEditorFocused}
++                  onPress={onEnter}
++                  style={enterStyle}
++                  hitSlop={8}
++                >
++                  {null}
++                </Button>
++              ) : null}
++            </View>
++            {fullscreen ? null : toolbar}
+           </View>
+-          {fullscreen ? null : toolbar}
+-        </View>
++        </AgentVoiceTab>
+       </ComposerFullscreenBody>
+       {fullscreen ? (
+         <ComposerFullscreenFooter style={styles.footer}>
+diff --git a/packages/app/src/contexts/voice-context.tsx b/packages/app/src/contexts/voice-context.tsx
+index 929c6a17d..5d0a72a8e 100644
+--- a/packages/app/src/contexts/voice-context.tsx
++++ b/packages/app/src/contexts/voice-context.tsx
+@@ -82,6 +82,18 @@ export function useVoiceOptional(): VoiceContextValue | null {
+   }, [snapshot, runtime]);
+ }
+ 
++/** Whether voice mode is on for one agent. Re-renders only when that answer changes. */
++export function useIsVoiceModeForAgent(serverId: string, agentId: string | undefined): boolean {
++  const runtime = useContext(VoiceRuntimeContext);
++  const getIsVoiceMode = () =>
++    Boolean(runtime && agentId && runtime.isVoiceModeForAgent(serverId, agentId));
++  return useSyncExternalStore(
++    runtime ? runtime.subscribe : noopSubscribe,
++    getIsVoiceMode,
++    getIsVoiceMode,
++  );
++}
++
+ export function useVoiceTelemetry() {
+   const telemetry = useVoiceTelemetryOptional();
+   if (!telemetry) {
+diff --git a/packages/app/src/design/designs/catalog.tsx b/packages/app/src/design/designs/catalog.tsx
+index e680aa3b7..8b951fc1f 100644
+--- a/packages/app/src/design/designs/catalog.tsx
++++ b/packages/app/src/design/designs/catalog.tsx
+@@ -1,4 +1,4 @@
+-import { useMemo, useState } from "react";
++import { useEffect, useMemo, useState } from "react";
+ import { Text, useWindowDimensions, View } from "react-native";
+ import { StyleSheet, UnistylesRuntime, withUnistyles } from "react-native-unistyles";
+ import { Mic, Plus, Settings } from "lucide-react-native";
+@@ -10,7 +10,11 @@ import { DropdownTrigger } from "@/components/ui/dropdown-trigger";
+ import { ExternalLink } from "@/components/ui/external-link";
+ import { Field, FormTextInput } from "@/components/ui/form-field";
+ import { LoadingSpinner } from "@/components/ui/loading-spinner";
++import { PanelTab } from "@/components/ui/panel-tab";
+ import { SearchField } from "@/components/ui/search-field";
++import { ShapeMorph } from "@/components/ui/shape-morph";
++import { SHAPE_NAMES, type ShapeName } from "@/components/ui/shape-morph/shapes";
++import { SHAPE_MORPH_DURATION_MS } from "@/components/ui/shape-morph/use-shape-morph";
+ import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
+ import { Shortcut } from "@/components/ui/shortcut";
+ import { StatusBadge, type StatusBadgeVariant } from "@/components/ui/status-badge";
+@@ -371,6 +375,74 @@ function VolumeMeterTriplet({
+   );
+ }
+ 
++function PanelTabExamples() {
++  const leading = useMemo(() => <View style={styles.tabLeading} />, []);
++  const label = useMemo(() => <Text style={styles.caption}>Label</Text>, []);
++  return (
++    <DesignSection title="PanelTab" description="compact / expanded, behind a panel">
++      <DesignRow>
++        <DesignSpecimen label="compact">
++          <View style={styles.tabSpecimen}>
++            <PanelTab state="compact" leading={leading}>
++              <View style={styles.tabPanel} />
++            </PanelTab>
++          </View>
++        </DesignSpecimen>
++        <DesignSpecimen label="expanded">
++          <View style={styles.tabSpecimen}>
++            <PanelTab state="expanded" leading={leading} label={label}>
++              <View style={styles.tabPanel} />
++            </PanelTab>
++          </View>
++        </DesignSpecimen>
++      </DesignRow>
++    </DesignSection>
++  );
++}
++
++// The mini meter box: 3px bars and gaps, 15 × 18, with bars at a mid level.
++const MORPH_BOX = { width: 15, height: 18, barWidth: 3, barGap: 3 } as const;
++const MORPH_BAR_HEIGHTS = [9, 13, 10];
++const MORPH_HOLD_MS = 2000;
++
++function ShapeMorphLoop() {
++  const [shape, setShape] = useState<ShapeName>("orbit");
++  useEffect(() => {
++    const timer = setTimeout(
++      () => setShape(shape === "orbit" ? "bars" : "orbit"),
++      MORPH_HOLD_MS + SHAPE_MORPH_DURATION_MS,
++    );
++    return () => clearTimeout(timer);
++  }, [shape]);
++  return <ShapeMorph shape={shape} barHeights={MORPH_BAR_HEIGHTS} {...MORPH_BOX} />;
++}
++
++function ShapeMorphExamples() {
++  return (
++    <DesignSection
++      title="ShapeMorph"
++      description="presets at the 18px meter size, orbit ↔ bars, and the agent VolumeMeter modes"
++    >
++      <DesignRow>
++        {SHAPE_NAMES.map((shape) => (
++          <DesignSpecimen key={shape} label={shape}>
++            <ShapeMorph shape={shape} barHeights={MORPH_BAR_HEIGHTS} {...MORPH_BOX} />
++          </DesignSpecimen>
++        ))}
++        <DesignSpecimen label="orbit ↔ bars">
++          <ShapeMorphLoop />
++        </DesignSpecimen>
++        <DesignSpecimen label="VolumeMeter · think">
++          <VolumeMeter volume={0} mode="think" variant="mini" orientation="horizontal" />
++        </DesignSpecimen>
++        <DesignSpecimen label="VolumeMeter · live">
++          <VolumeMeter volume={0.5} mode="live" variant="mini" orientation="horizontal" />
++        </DesignSpecimen>
++      </DesignRow>
++    </DesignSection>
++  );
++}
++
+ function FeedbackExamples() {
+   return (
+     <>
+@@ -507,6 +579,8 @@ function Components() {
+     <DesignPage>
+       <LayoutInfo />
+       <VolumeMeterExamples />
++      <PanelTabExamples />
++      <ShapeMorphExamples />
+       <FeedbackExamples />
+       <OverlayExamples />
+       <InputExamples />
+@@ -526,6 +600,22 @@ const design: DesignDefinition = {
+ export default design;
+ 
+ const styles = StyleSheet.create((theme) => ({
++  tabSpecimen: {
++    width: theme.spacing[32] + theme.spacing[16],
++  },
++  tabPanel: {
++    height: theme.spacing[12],
++    backgroundColor: theme.colors.surface1,
++    borderWidth: theme.borderWidth[1],
++    borderColor: theme.colors.borderAccent,
++    borderRadius: theme.borderRadius["2xl"],
++  },
++  tabLeading: {
++    width: theme.iconSize.lg,
++    height: theme.iconSize.lg,
++    borderRadius: theme.borderRadius.full,
++    backgroundColor: theme.colors.surface3,
++  },
+   keyValues: {
+     flexDirection: "row",
+     flexWrap: "wrap",
+diff --git a/packages/app/src/design/designs/panel-tab.md b/packages/app/src/design/designs/panel-tab.md
+new file mode 100644
+index 000000000..8a064e985
+--- /dev/null
++++ b/packages/app/src/design/designs/panel-tab.md
+@@ -0,0 +1,45 @@
++# Panel tab
++
++## Problem
++
++In voice mode the strip carries both parties: your mic and the agent's status. On phone
++the agent chip truncates and crowds the mic toggle. The panel tab gives the agent its own
++place on the edge between the transcript and the composer, so the strip holds only your
++controls. This design covers the tab itself; `AgentVoiceTab`
++(`components/agent-voice-tab.tsx`) wires it into the composer, and `/design/voice-strip`
++shows it there. Spec: option F in `.dev/mockups/voice-status-split.html`.
++
++## States
++
++| State id    | When the user sees it                                    | What they can do                      |
++| ----------- | -------------------------------------------------------- | ------------------------------------- |
++| `hidden`    | Voice is off. The tab is behind the card, the row closed | Nothing; the composer sits as today   |
++| `compact`   | The agent waits for you. Avatar only, sunk 6px           | Read who is on the line               |
++| `expanded`  | The agent thinks or speaks. Avatar plus label            | Read the agent's status               |
++| `lifecycle` | Loops rise, expanded, compact, expanded, sink            | Review the motion                     |
++| `composer`  | Expanded over a composer card with voice controls        | Check the tab against the card's edge |
++
++## Flow
++
++1. Voice starts: the row opens and the tab rises from `hidden` (860ms).
++2. The agent thinks or speaks: `expanded`; the label fades in after the tab widens.
++3. The agent waits: the label fades out, then the tab narrows and sinks to `compact` (680ms).
++4. Voice ends: the tab sinks to `hidden` (820ms) and the row closes.
++
++## Components
++
++`PanelTab` (`components/ui/panel-tab.tsx`) wraps the panel and takes `state`, `leading`
++and `label`. The outline, flares included, is one `react-native-svg` path rebuilt on the
++UI thread. The wrapper always renders so the panel never remounts; the tab mounts when it
++first leaves `hidden` and unmounts once it has sunk again. The avatar here is a stand-in;
++the composer's is local to `AgentVoiceTab`.
++
++## Decisions
++
++- Light theme status word: `foregroundMuted` on `surface2` is 4.40:1 in light, under AA
++  (4.5:1) for 12px text, so light uses `foreground`. Dark keeps `foregroundMuted` (5.82:1). `AgentVoiceTab`
++  applies it; this design's stand-in label does not.
++
++## Open questions
++
++- Promote the avatar to a primitive if a second surface needs one.
+diff --git a/packages/app/src/design/designs/panel-tab.tsx b/packages/app/src/design/designs/panel-tab.tsx
+new file mode 100644
+index 000000000..9bce092f0
+--- /dev/null
++++ b/packages/app/src/design/designs/panel-tab.tsx
+@@ -0,0 +1,262 @@
++import { useEffect, useMemo, useState, type ReactNode } from "react";
++import { Text, View } from "react-native";
++import { StyleSheet, withUnistyles } from "react-native-unistyles";
++import { ClaudeIcon } from "@/components/icons/claude-icon";
++import { Button } from "@/components/ui/button";
++import { PanelTab, type PanelTabState } from "@/components/ui/panel-tab";
++import { VolumeMeter } from "@/components/volume-meter";
++import { DesignPage, DesignSection } from "@/design/kit";
++import type { DesignDefinition } from "@/design/types";
++import type { Theme } from "@/styles/theme";
++
++// PanelTab peeks up from behind a mock composer card. The card stands in for the real
++// MessageInput surface (surface1, borderAccent, 2xl radius); the tab is not wired into
++// the composer yet.
++
++type AgentStatus = "Thinking" | "Speaking" | "Waiting for you";
++
++const ThemedClaudeIcon = withUnistyles(ClaudeIcon);
++function avatarIconMapping(theme: Theme) {
++  return { color: theme.colors.foreground, size: theme.iconSize.xs };
++}
++
++function Avatar() {
++  return (
++    <View style={styles.avatar}>
++      <ThemedClaudeIcon uniProps={avatarIconMapping} />
++    </View>
++  );
++}
++
++function StatusLabel({ status }: { status: AgentStatus }) {
++  return (
++    <View style={styles.label}>
++      <Text style={styles.name}>Claude</Text>
++      <Text style={styles.dot}>·</Text>
++      {status === "Thinking" ? <VolumeMeter volume={0} variant="mini" idle="thinking" /> : null}
++      <Text style={styles.status} numberOfLines={1}>
++        {status}
++      </Text>
++    </View>
++  );
++}
++
++function AgentTab({
++  state,
++  status,
++  children,
++}: {
++  state: PanelTabState;
++  status: AgentStatus;
++  children: ReactNode;
++}) {
++  const avatar = useMemo(() => <Avatar />, []);
++  const label = useMemo(() => <StatusLabel status={status} />, [status]);
++  return (
++    <PanelTab
++      state={state}
++      leading={avatar}
++      label={label}
++      role="status"
++      aria-live="polite"
++      aria-label={`Claude: ${status}`}
++    >
++      {children}
++    </PanelTab>
++  );
++}
++
++function MockCard() {
++  return (
++    <View style={styles.card}>
++      <Text style={styles.placeholder}>Message the agent</Text>
++    </View>
++  );
++}
++
++function Stage({
++  title,
++  description,
++  children,
++}: {
++  title: string;
++  description: string;
++  children: ReactNode;
++}) {
++  return (
++    <DesignPage>
++      <DesignSection title={title} description={description}>
++        <View style={styles.stage}>
++          <View style={styles.stream}>
++            <Text style={styles.message}>
++              The stream ends here. The tab row sits between it and the card.
++            </Text>
++          </View>
++          {children}
++        </View>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++function StaticState({ state, description }: { state: PanelTabState; description: string }) {
++  return (
++    <Stage title={state} description={description}>
++      <AgentTab state={state} status="Thinking">
++        <MockCard />
++      </AgentTab>
++    </Stage>
++  );
++}
++
++interface LifecycleStep {
++  state: PanelTabState;
++  status: AgentStatus;
++  label: string;
++  holdMs: number;
++}
++
++// Each hold is about 0.9s of motion plus 2.5s to read the state.
++const LIFECYCLE: readonly LifecycleStep[] = [
++  { state: "hidden", status: "Thinking", label: "Before voice", holdMs: 1500 },
++  { state: "expanded", status: "Thinking", label: "Rise: thinking", holdMs: 3400 },
++  { state: "compact", status: "Waiting for you", label: "Compact: waiting", holdMs: 3400 },
++  { state: "expanded", status: "Speaking", label: "Expand: speaking", holdMs: 3400 },
++  { state: "hidden", status: "Speaking", label: "Sink: voice ends", holdMs: 3200 },
++];
++
++function Lifecycle() {
++  const [index, setIndex] = useState(0);
++  const step = LIFECYCLE[index];
++  useEffect(() => {
++    const timer = setTimeout(() => setIndex((index + 1) % LIFECYCLE.length), step.holdMs);
++    return () => clearTimeout(timer);
++  }, [index, step.holdMs]);
++  return (
++    <Stage
++      title="Lifecycle"
++      description="Loops rise, expanded, compact, expanded, sink. Reduced motion makes each change instant."
++    >
++      <AgentTab state={step.state} status={step.status}>
++        <MockCard />
++      </AgentTab>
++      <Text style={styles.step}>{step.label}</Text>
++    </Stage>
++  );
++}
++
++function ComposerSample() {
++  return (
++    <Stage title="Composer sample" description="Expanded over a composer card in voice mode">
++      <AgentTab state="expanded" status="Thinking">
++        <View style={styles.card}>
++          <Text style={styles.placeholder}>Type while you talk</Text>
++          <View style={styles.toolbar}>
++            <Button variant="secondary" size="sm">
++              Mic on
++            </Button>
++            <Button variant="outline" size="sm">
++              End
++            </Button>
++          </View>
++        </View>
++      </AgentTab>
++    </Stage>
++  );
++}
++
++const design: DesignDefinition = {
++  title: "Panel tab",
++  states: [
++    {
++      id: "hidden",
++      label: "Hidden",
++      render: () => (
++        <StaticState
++          state="hidden"
++          description="Fully sunk behind the card; the row is given back"
++        />
++      ),
++    },
++    {
++      id: "compact",
++      label: "Compact",
++      render: () => (
++        <StaticState state="compact" description="Sunk 6px, leading content only, flares at 0.75" />
++      ),
++    },
++    {
++      id: "expanded",
++      label: "Expanded",
++      render: () => <StaticState state="expanded" description="Leading content and label" />,
++    },
++    { id: "lifecycle", label: "Lifecycle (auto)", render: Lifecycle },
++    { id: "composer", label: "Over a composer card", render: ComposerSample },
++  ],
++};
++
++export default design;
++
++const styles = StyleSheet.create((theme) => ({
++  stage: {
++    width: "100%",
++    maxWidth: theme.contentMaxWidth,
++    alignSelf: "center",
++  },
++  stream: {
++    paddingBottom: theme.spacing[3],
++  },
++  message: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.content,
++  },
++  card: {
++    gap: theme.spacing[3],
++    padding: theme.spacing[4],
++    backgroundColor: theme.colors.surface1,
++    borderWidth: theme.borderWidth[1],
++    borderColor: theme.colors.borderAccent,
++    borderRadius: theme.borderRadius["2xl"],
++  },
++  placeholder: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.content,
++  },
++  toolbar: {
++    flexDirection: "row",
++    justifyContent: "space-between",
++  },
++  step: {
++    paddingTop: theme.spacing[3],
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++    textAlign: "center",
++  },
++  avatar: {
++    width: theme.iconSize.lg,
++    height: theme.iconSize.lg,
++    alignItems: "center",
++    justifyContent: "center",
++    borderRadius: theme.borderRadius.full,
++    backgroundColor: theme.colors.surface3,
++  },
++  label: {
++    flexDirection: "row",
++    alignItems: "center",
++    gap: theme.spacing[1.5],
++  },
++  name: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++  },
++  dot: {
++    color: theme.colors.foregroundExtraMuted,
++    fontSize: theme.fontSize.sm,
++  },
++  status: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++    fontWeight: theme.fontWeight.medium,
++  },
++}));
+diff --git a/packages/app/src/design/designs/shape-morph.md b/packages/app/src/design/designs/shape-morph.md
+new file mode 100644
+index 000000000..7a6a6aa3c
+--- /dev/null
++++ b/packages/app/src/design/designs/shape-morph.md
+@@ -0,0 +1,43 @@
++# Shape morph
++
++## Problem
++
++The agent's voice status needs Thinking to turn into Speaking as one shape, with no swap
++or crossfade: three orbiting dots line up on the bar columns, then stretch into the live
++bars. The same motion should be reusable for other loaders, so this is a design-system
++primitive that morphs any preset into any other. Orbit → bars is the first use.
++Spec: option F's "Orbit → bars build spec" in `.dev/mockups/voice-status-split.html`.
++
++## States
++
++| State id         | When the user sees it                                  | What they can do                        |
++| ---------------- | ------------------------------------------------------ | --------------------------------------- |
++| `scrub`          | Review: any two presets at a chosen progress           | Pick from and to, drag or step progress |
++| `loop`           | Review: the morph running, both ways, with live shapes | Pick from and to, watch the loop        |
++| `reduced-motion` | The OS asks for reduced motion                         | See the shape swap with a still orbit   |
++| `presets`        | Review: every preset live, mini and 5×                 | Compare the shapes                      |
++
++## Flow
++
++1. The owner sets `shape`. ShapeMorph snapshots what is on screen and morphs to it.
++2. Orbit ↔ bars pass through `lineup` at the halfway point: 800ms, each half ease-in-out.
++3. The orbit keeps turning and bars keep tracking their heights during the morph, so it
++   ends on the exact frame of the live shape.
++4. When it lands, ShapeMorph writes the shape name to `settled` on the UI thread. The
++   agent VolumeMeter reads it in the same frame to swap the morph layer for its snapped
++   bars, and back.
++
++## Components
++
++`ShapeMorph` (`components/ui/shape-morph`): Skia on native, an SVG on web, sharing the
++pure shape model in `shapes.ts`. Presets: orbit, bars, ring, dot, ellipsis, plus the
++lineup keyframe. `VolumeMeter` takes `mode="think" | "live"` for the agent's side; the
++mic meter leaves it unset and is unchanged.
++
++## Open questions
++
++- Native: the Skia renderer is typechecked only; check the morph and the handoff on a
++  device before wiring it into the composer.
++- Ring → bars passes through a thick crescent. It reads as unrolling at 18px; at large
++  sizes it is less clean than orbit → bars.
++- The agent level is simulated until voice telemetry reports playback.
+diff --git a/packages/app/src/design/designs/shape-morph.tsx b/packages/app/src/design/designs/shape-morph.tsx
+new file mode 100644
+index 000000000..c38bfcb8a
+--- /dev/null
++++ b/packages/app/src/design/designs/shape-morph.tsx
+@@ -0,0 +1,356 @@
++import { useCallback, useEffect, useMemo, useState } from "react";
++import { Text, View, type GestureResponderEvent, type LayoutChangeEvent } from "react-native";
++import { useSharedValue } from "react-native-reanimated";
++import { StyleSheet } from "react-native-unistyles";
++import { Button } from "@/components/ui/button";
++import { SegmentedControl, type SegmentedControlOption } from "@/components/ui/segmented-control";
++import { ShapeMorph } from "@/components/ui/shape-morph";
++import type { ShapeName } from "@/components/ui/shape-morph/shapes";
++import { SHAPE_MORPH_DURATION_MS } from "@/components/ui/shape-morph/use-shape-morph";
++import { DesignPage, DesignRow, DesignSection, DesignSpecimen } from "@/design/kit";
++import { useSimulatedVolume } from "@/design/simulated-volume";
++import type { DesignDefinition } from "@/design/types";
++
++// ShapeMorph morphs any preset into any other, point by point. Orbit → bars is the
++// flagship: the agent meter's Thinking → Speaking. Every specimen renders at the 18px mini
++// meter size and at 5×, so the geometry is readable.
++
++type PickableShape = Exclude<ShapeName, "lineup">;
++
++const SHAPE_OPTIONS: SegmentedControlOption<PickableShape>[] = [
++  { value: "orbit", label: "Orbit" },
++  { value: "bars", label: "Bars" },
++  { value: "ring", label: "Ring" },
++  { value: "dot", label: "Dot" },
++  { value: "ellipsis", label: "Ellipsis" },
++];
++const ALL_SHAPES: readonly ShapeName[] = ["orbit", "bars", "ring", "dot", "ellipsis", "lineup"];
++const SCRUB_STOPS = [0, 0.25, 0.5, 0.75, 1] as const;
++
++interface Scale {
++  label: string;
++  factor: number;
++}
++
++// The mini meter box (MINI_SIZE in volume-meter.tsx): 3px bars and gaps, 15 × 18.
++const MINI_BAR = 3;
++const MINI_HEIGHT = 18;
++const MINI_MIN_BAR = 7;
++const MINI_MAX_BAR = 16;
++const SCALES: readonly Scale[] = [
++  { label: "18px mini", factor: 1 },
++  { label: "5×", factor: 5 },
++];
++/** Per-bar share of a speech level, as the meter's budget splits it. */
++const BAR_SHARES = [0.85, 1.15, 0.95] as const;
++
++/** Bar heights for a speech level at a scale, between the meter's rest and ceiling heights. */
++function barHeightsFor(level: number, factor: number): number[] {
++  return BAR_SHARES.map(
++    (share) =>
++      factor *
++      Math.min(MINI_MAX_BAR, MINI_MIN_BAR + (MINI_MAX_BAR - MINI_MIN_BAR) * level * share * 1.4),
++  );
++}
++
++function useSpeakingHeights(factor: number): number[] {
++  const volume = useSimulatedVolume(0.45);
++  return useMemo(() => barHeightsFor(volume, factor), [volume, factor]);
++}
++
++function geometry(factor: number) {
++  return {
++    width: factor * (3 * MINI_BAR + 2 * MINI_BAR),
++    height: factor * MINI_HEIGHT,
++    barWidth: factor * MINI_BAR,
++    barGap: factor * MINI_BAR,
++  };
++}
++
++function ShapePickers({
++  from,
++  to,
++  onFrom,
++  onTo,
++}: {
++  from: PickableShape;
++  to: PickableShape;
++  onFrom: (value: PickableShape) => void;
++  onTo: (value: PickableShape) => void;
++}) {
++  return (
++    <View style={styles.controls}>
++      <View style={styles.control}>
++        <Text style={styles.controlLabel}>From</Text>
++        <SegmentedControl size="sm" options={SHAPE_OPTIONS} value={from} onValueChange={onFrom} />
++      </View>
++      <View style={styles.control}>
++        <Text style={styles.controlLabel}>To</Text>
++        <SegmentedControl size="sm" options={SHAPE_OPTIONS} value={to} onValueChange={onTo} />
++      </View>
++    </View>
++  );
++}
++
++/** A drag track for progress, plus stops for exact frames. */
++function ProgressScrub({ value, onChange }: { value: number; onChange: (value: number) => void }) {
++  const [trackWidth, setTrackWidth] = useState(0);
++  const handleLayout = useCallback(
++    (event: LayoutChangeEvent) => setTrackWidth(event.nativeEvent.layout.width),
++    [],
++  );
++  const handleTouch = useCallback(
++    (event: GestureResponderEvent) => {
++      if (trackWidth <= 0) return;
++      onChange(Math.min(1, Math.max(0, event.nativeEvent.locationX / trackWidth)));
++    },
++    [onChange, trackWidth],
++  );
++  const grant = useCallback(() => true, []);
++  return (
++    <View style={styles.control}>
++      <Text style={styles.controlLabel}>Progress {value.toFixed(2)}</Text>
++      <View
++        style={styles.track}
++        onLayout={handleLayout}
++        onStartShouldSetResponder={grant}
++        onMoveShouldSetResponder={grant}
++        onResponderGrant={handleTouch}
++        onResponderMove={handleTouch}
++        testID="shape-morph-scrub"
++      >
++        <View pointerEvents="none" style={styles.trackFill(value)} />
++      </View>
++      <View style={styles.stops}>
++        {SCRUB_STOPS.map((stop) => (
++          <ScrubStop key={stop} stop={stop} active={stop === value} onChange={onChange} />
++        ))}
++      </View>
++    </View>
++  );
++}
++
++function ScrubStop({
++  stop,
++  active,
++  onChange,
++}: {
++  stop: number;
++  active: boolean;
++  onChange: (value: number) => void;
++}) {
++  const handlePress = useCallback(() => onChange(stop), [onChange, stop]);
++  return (
++    <Button
++      size="xs"
++      variant={active ? "secondary" : "ghost"}
++      onPress={handlePress}
++      testID={`shape-morph-stop-${stop}`}
++    >
++      {String(stop)}
++    </Button>
++  );
++}
++
++function ScrubSpecimen({
++  scale,
++  from,
++  to,
++  progress,
++}: {
++  scale: Scale;
++  from: PickableShape;
++  to: PickableShape;
++  progress: number;
++}) {
++  const heights = useSpeakingHeights(scale.factor);
++  const progressValue = useSharedValue(progress);
++  useEffect(() => {
++    progressValue.value = progress;
++  }, [progress, progressValue]);
++  return (
++    <DesignSpecimen label={scale.label}>
++      <ShapeMorph
++        from={from}
++        shape={to}
++        progress={progressValue}
++        barHeights={heights}
++        {...geometry(scale.factor)}
++      />
++    </DesignSpecimen>
++  );
++}
++
++function Scrub() {
++  const [from, setFrom] = useState<PickableShape>("orbit");
++  const [to, setTo] = useState<PickableShape>("bars");
++  const [progress, setProgress] = useState(0.25);
++  return (
++    <DesignPage>
++      <DesignSection
++        title="Scrub"
++        description="Pick two presets and drag the progress. Orbit ↔ bars pass through the dots lined up on the bar columns at 0.5. Animated shapes hold still while scrubbing."
++      >
++        <ShapePickers from={from} to={to} onFrom={setFrom} onTo={setTo} />
++        <ProgressScrub value={progress} onChange={setProgress} />
++        <DesignRow>
++          {SCALES.map((scale) => (
++            <ScrubSpecimen
++              key={scale.label}
++              scale={scale}
++              from={from}
++              to={to}
++              progress={progress}
++            />
++          ))}
++        </DesignRow>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++const HOLD_MS = 2200;
++
++/** Flips between the two shapes, holding each long enough to read it. */
++function useLoopTarget(from: PickableShape, to: PickableShape): PickableShape {
++  const [atTarget, setAtTarget] = useState(false);
++  useEffect(() => {
++    const timer = setTimeout(() => setAtTarget(!atTarget), HOLD_MS + SHAPE_MORPH_DURATION_MS);
++    return () => clearTimeout(timer);
++  }, [atTarget]);
++  return atTarget ? to : from;
++}
++
++function LoopSpecimen({
++  scale,
++  shape,
++  paused,
++}: {
++  scale: Scale;
++  shape: PickableShape;
++  paused?: boolean;
++}) {
++  const heights = useSpeakingHeights(scale.factor);
++  return (
++    <DesignSpecimen label={scale.label}>
++      <ShapeMorph shape={shape} barHeights={heights} paused={paused} {...geometry(scale.factor)} />
++    </DesignSpecimen>
++  );
++}
++
++function Loop() {
++  const [from, setFrom] = useState<PickableShape>("orbit");
++  const [to, setTo] = useState<PickableShape>("bars");
++  const shape = useLoopTarget(from, to);
++  return (
++    <DesignPage>
++      <DesignSection
++        title="Auto loop"
++        description={`Morphs ${from} → ${to} and back over ${SHAPE_MORPH_DURATION_MS}ms, holding each. Animated shapes keep moving through the morph, and bars track live heights.`}
++      >
++        <ShapePickers from={from} to={to} onFrom={setFrom} onTo={setTo} />
++        <Text style={styles.status}>Target: {shape}</Text>
++        <DesignRow>
++          {SCALES.map((scale) => (
++            <LoopSpecimen key={scale.label} scale={scale} shape={shape} />
++          ))}
++        </DesignRow>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++function ReducedMotion() {
++  const shape = useLoopTarget("orbit", "bars");
++  return (
++    <DesignPage>
++      <DesignSection
++        title="Reduced motion"
++        description="With the OS setting on, there is no morph: the shape swaps on the same loop, and the orbit holds still at a fixed angle. A stopped clock takes the same path, which this state uses to show it."
++      >
++        <Text style={styles.status}>Target: {shape}</Text>
++        <DesignRow>
++          {SCALES.map((scale) => (
++            <LoopSpecimen key={scale.label} scale={scale} shape={shape} paused />
++          ))}
++        </DesignRow>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++function PresetSpecimen({ shape, factor }: { shape: ShapeName; factor: number }) {
++  const heights = useSpeakingHeights(factor);
++  return (
++    <DesignSpecimen label={shape === "lineup" ? "lineup (keyframe)" : shape}>
++      <ShapeMorph shape={shape} barHeights={heights} {...geometry(factor)} />
++    </DesignSpecimen>
++  );
++}
++
++function Presets() {
++  return (
++    <DesignPage>
++      {SCALES.map((scale) => (
++        <DesignSection
++          key={scale.label}
++          title={`Presets · ${scale.label}`}
++          description="Each preset live. lineup is the keyframe between orbit and bars."
++        >
++          <DesignRow>
++            {ALL_SHAPES.map((shape) => (
++              <PresetSpecimen key={shape} shape={shape} factor={scale.factor} />
++            ))}
++          </DesignRow>
++        </DesignSection>
++      ))}
++    </DesignPage>
++  );
++}
++
++const design: DesignDefinition = {
++  title: "Shape morph",
++  states: [
++    { id: "scrub", label: "Scrub (orbit → bars)", render: Scrub },
++    { id: "loop", label: "Auto loop", render: Loop },
++    { id: "reduced-motion", label: "Reduced motion", render: ReducedMotion },
++    { id: "presets", label: "Presets", render: Presets },
++  ],
++};
++
++export default design;
++
++const styles = StyleSheet.create((theme) => ({
++  controls: {
++    gap: theme.spacing[3],
++  },
++  control: {
++    gap: theme.spacing[1.5],
++    alignItems: "flex-start",
++  },
++  controlLabel: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++  status: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++    fontFamily: theme.fontFamily.mono,
++  },
++  track: {
++    width: theme.spacing[32] * 2,
++    height: theme.spacing[4],
++    borderRadius: theme.borderRadius.full,
++    backgroundColor: theme.colors.surface3,
++    overflow: "hidden",
++  },
++  trackFill: (value: number) => ({
++    width: `${value * 100}%`,
++    height: "100%",
++    backgroundColor: theme.colors.accent,
++  }),
++  stops: {
++    flexDirection: "row",
++    gap: theme.spacing[1],
++  },
++}));
+diff --git a/packages/app/src/design/designs/voice-strip.tsx b/packages/app/src/design/designs/voice-strip.tsx
+index adc69a1a3..6d2de851b 100644
+--- a/packages/app/src/design/designs/voice-strip.tsx
++++ b/packages/app/src/design/designs/voice-strip.tsx
+@@ -1,8 +1,9 @@
+ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+ import { useTranslation } from "react-i18next";
+-import { View } from "react-native";
++import { Text, View } from "react-native";
+ import { StyleSheet, withUnistyles } from "react-native-unistyles";
+-import { FileText } from "lucide-react-native";
++import { ChevronDown, FileText } from "lucide-react-native";
++import { AGENT_VOICE_TAB_JUMP_GAP } from "@/components/agent-voice-tab";
+ import { AttachmentFrame, AttachmentLabel } from "@/components/attachment-pill";
+ import { buildCancelButtonStyle, ComposerCancelButton } from "@/composer/index";
+ import { MessageInput } from "@/composer/input/input";
+@@ -21,14 +22,16 @@ import type {
+ } from "@/voice/voice-runtime";
+ 
+ // The real MessageInput in voice mode, so the strip sits in the real card above the
+-// real text box and toolbar. A staged runtime stands in for the voice runtime: it
+-// reports the state's phase and feeds the meter the simulated speech level. The model
+-// chips and context meter come from the full Composer and are absent here.
++// real text box and toolbar, with the agent tab behind the card. A staged runtime stands
++// in for the voice runtime: it reports the state's phase and feeds the mic meter the
++// simulated speech level. The model chips and context meter come from the full Composer
++// and are absent here.
+ 
+ const SERVER_ID = "design-server";
+ const AGENT_ID = "design-agent";
+ 
+ interface StagedVoiceRuntime extends VoiceRuntime {
++  setSnapshot(snapshot: VoiceRuntimeSnapshot): void;
+   setTelemetry(telemetry: VoiceRuntimeTelemetrySnapshot): void;
+ }
+ 
+@@ -55,6 +58,10 @@ function createStagedVoiceRuntime(initial: VoiceRuntimeSnapshot): StagedVoiceRun
+     getSnapshot: () => snapshot,
+     subscribeTelemetry: (listener) => subscribeTo(telemetryListeners, listener),
+     getTelemetrySnapshot: () => telemetry,
++    setSnapshot(next) {
++      snapshot = next;
++      for (const listener of listeners) listener();
++    },
+     setTelemetry(next) {
+       telemetry = next;
+       for (const listener of telemetryListeners) listener();
+@@ -63,7 +70,8 @@ function createStagedVoiceRuntime(initial: VoiceRuntimeSnapshot): StagedVoiceRun
+       snapshot = { ...snapshot, isMuted: !snapshot.isMuted };
+       for (const listener of listeners) listener();
+     },
+-    isVoiceModeForAgent: (serverId, agentId) => serverId === SERVER_ID && agentId === AGENT_ID,
++    isVoiceModeForAgent: (serverId, agentId) =>
++      snapshot.isVoiceMode && serverId === SERVER_ID && agentId === AGENT_ID,
+     registerSession: () => noop,
+     updateSessionConnection: noop,
+     handleCapturePcm: noop,
+@@ -84,6 +92,8 @@ function createStagedVoiceRuntime(initial: VoiceRuntimeSnapshot): StagedVoiceRun
+ 
+ interface StageInput {
+   phase: VoiceRuntimePhase;
++  /** False stages the composer with voice off, for the lifecycle's ends. */
++  isVoiceMode?: boolean;
+   isMuted?: boolean;
+   isSwitching?: boolean;
+   /** Mic level fed to the meter; 0 is silence. */
+@@ -93,12 +103,54 @@ interface StageInput {
+   draft?: string;
+   isAgentRunning?: boolean;
+   attachment?: boolean;
++  /** The stream above the composer: empty, or scrolled up with its jump button showing. */
++  stream?: "empty" | "scrolled-up";
+ }
+ 
+-function VoiceStage({ runtime, children }: { runtime: StagedVoiceRuntime; children: ReactNode }) {
++// The stream's 48px jump button and its glyph (agent-stream/view.tsx). Drawn here as a
++// stand-in, since the real one lives inside the agent stream.
++const JUMP_BUTTON_SIZE = 48;
++const JUMP_GLYPH_SIZE = 24;
++
++const ThemedChevronDown = withUnistyles(ChevronDown);
++const jumpGlyphMapping = (theme: Theme) => ({
++  color: theme.colors.foreground,
++  size: JUMP_GLYPH_SIZE,
++});
++
++function ScrolledUpStream() {
++  return (
++    <View style={styles.chat}>
++      <View style={styles.transcript}>
++        <Text style={styles.agentMessage}>
++          Here is the plan: first the resolver split, then the tab, then telemetry.
++        </Text>
++        <View style={styles.userBubble}>
++          <Text style={styles.userMessage}>Sounds good. Start with the resolver.</Text>
++        </View>
++        <Text style={styles.agentMessage}>Starting with resolveMicState.</Text>
++      </View>
++      <View style={styles.jumpRow} pointerEvents="none">
++        <View style={styles.jumpButton}>
++          <ThemedChevronDown uniProps={jumpGlyphMapping} />
++        </View>
++      </View>
++    </View>
++  );
++}
++
++function VoiceStage({
++  runtime,
++  stream,
++  children,
++}: {
++  runtime: StagedVoiceRuntime;
++  stream: StageInput["stream"];
++  children: ReactNode;
++}) {
+   return (
+     <View style={styles.page}>
+-      <View style={styles.chat} />
++      {stream === "scrolled-up" ? <ScrolledUpStream /> : <View style={styles.chat} />}
+       <View style={styles.composer}>
+         <VoiceRuntimeProvider runtime={runtime}>{children}</VoiceRuntimeProvider>
+       </View>
+@@ -115,6 +167,7 @@ const fileIcon = <ThemedFileText uniProps={fileIconMapping} />;
+ 
+ function StagedComposer({
+   phase,
++  isVoiceMode = true,
+   isMuted = false,
+   isSwitching = false,
+   level = 0,
+@@ -122,21 +175,27 @@ function StagedComposer({
+   draft = "",
+   isAgentRunning = false,
+   attachment = false,
++  stream = "empty",
+ }: StageInput) {
+   const { t } = useTranslation();
+   const isCompact = useIsCompactFormFactor();
+-  const runtime = useMemo(
+-    () =>
+-      createStagedVoiceRuntime({
+-        phase,
+-        isVoiceMode: true,
+-        isVoiceSwitching: isSwitching,
+-        isMuted,
+-        activeServerId: SERVER_ID,
+-        activeAgentId: AGENT_ID,
+-      }),
+-    [phase, isMuted, isSwitching],
++  const snapshot = useMemo<VoiceRuntimeSnapshot>(
++    () => ({
++      phase,
++      isVoiceMode,
++      isVoiceSwitching: isSwitching,
++      isMuted,
++      activeServerId: SERVER_ID,
++      activeAgentId: AGENT_ID,
++    }),
++    [phase, isVoiceMode, isSwitching, isMuted],
+   );
++  // One runtime for the stage's life, so a lifecycle walks the same composer and the tab
++  // animates between states instead of remounting.
++  const [runtime] = useState(() => createStagedVoiceRuntime(snapshot));
++  useEffect(() => {
++    runtime.setSnapshot(snapshot);
++  }, [runtime, snapshot]);
+   const simulatedVolume = useSimulatedVolume(trace ? 0 : level);
+   const traceVolume = useRecordedVoiceTrace(trace ?? "current", Boolean(trace));
+   const volume = trace ? traceVolume : simulatedVolume;
+@@ -180,7 +239,7 @@ function StagedComposer({
+   const handleSubmit = useCallback(() => setValue(""), []);
+ 
+   return (
+-    <VoiceStage runtime={runtime}>
++    <VoiceStage runtime={runtime} stream={stream}>
+       <MessageInput
+         value={value}
+         onChangeText={setValue}
+@@ -196,6 +255,7 @@ function StagedComposer({
+         textReplacement={textReplacement}
+         voiceServerId={SERVER_ID}
+         voiceAgentId={AGENT_ID}
++        voiceAgentProvider="claude"
+         isAgentRunning={isAgentRunning}
+         activeActionContent={activeActionContent}
+         attachmentSlot={attachmentSlot}
+@@ -210,24 +270,83 @@ const DRAFT = [
+   "and check the light theme hairline against the card border.",
+ ].join("\n");
+ 
++interface LifecycleStep {
++  label: string;
++  input: StageInput;
++  holdMs: number;
++}
++
++// Each hold is about 0.9s of motion plus 2.5s to read the state.
++const LIFECYCLE: readonly LifecycleStep[] = [
++  { label: "Voice off", input: { phase: "disabled", isVoiceMode: false }, holdMs: 2000 },
++  { label: "Connecting", input: { phase: "starting", isSwitching: true }, holdMs: 2400 },
++  { label: "Listening", input: { phase: "listening", level: 0.35 }, holdMs: 3400 },
++  { label: "Thinking", input: { phase: "waiting" }, holdMs: 3400 },
++  { label: "Speaking", input: { phase: "playing" }, holdMs: 3400 },
++  { label: "Speaking, muted", input: { phase: "playing", isMuted: true }, holdMs: 3000 },
++  { label: "Listening", input: { phase: "listening" }, holdMs: 3400 },
++  { label: "Ending", input: { phase: "stopping", isSwitching: true }, holdMs: 1600 },
++  { label: "Voice off", input: { phase: "disabled", isVoiceMode: false }, holdMs: 1600 },
++];
++
++function Lifecycle() {
++  const [index, setIndex] = useState(0);
++  const step = LIFECYCLE[index];
++  useEffect(() => {
++    const timer = setTimeout(() => setIndex((index + 1) % LIFECYCLE.length), step.holdMs);
++    return () => clearTimeout(timer);
++  }, [index, step.holdMs]);
++  return (
++    <View style={styles.lifecycle}>
++      <StagedComposer {...step.input} />
++      <Text style={styles.step} testID="design-lifecycle-step">
++        {step.label}
++      </Text>
++    </View>
++  );
++}
++
+ const design: DesignDefinition = {
+   title: "Voice strip",
+   states: [
++    {
++      id: "listening",
++      label: "Listening (you speaking)",
++      render: () => <StagedComposer phase="listening" level={0.35} />,
++    },
++    {
++      id: "muted-idle",
++      label: "Muted, agent waiting",
++      render: () => <StagedComposer phase="listening" isMuted />,
++    },
++    { id: "thinking", label: "Thinking", render: () => <StagedComposer phase="waiting" /> },
++    {
++      id: "muted-thinking",
++      label: "Muted, agent thinking",
++      render: () => <StagedComposer phase="waiting" isMuted />,
++    },
++    { id: "speaking", label: "Speaking", render: () => <StagedComposer phase="playing" /> },
++    {
++      id: "muted-speaking",
++      label: "Muted, agent speaking",
++      render: () => <StagedComposer phase="playing" isMuted />,
++    },
++    { id: "lifecycle", label: "Lifecycle (auto)", render: Lifecycle },
++    {
++      id: "scrolled-up",
++      label: "Scrolled up, jump button",
++      render: () => <StagedComposer phase="playing" isMuted stream="scrolled-up" />,
++    },
+     {
+       id: "connecting",
+       label: "Connecting",
+       render: () => <StagedComposer phase="starting" isSwitching />,
+     },
+     {
+-      id: "listening",
++      id: "listening-silent",
+       label: "Listening (silent)",
+       render: () => <StagedComposer phase="listening" />,
+     },
+-    {
+-      id: "user-speaking",
+-      label: "Listening (user speaking)",
+-      render: () => <StagedComposer phase="listening" level={0.35} />,
+-    },
+     {
+       id: "real-input",
+       label: "Listening (recorded-style input)",
+@@ -238,9 +357,6 @@ const design: DesignDefinition = {
+       label: "Listening (recorded-style input, original calibration)",
+       render: () => <StagedComposer phase="listening" trace="original" />,
+     },
+-    { id: "thinking", label: "Thinking", render: () => <StagedComposer phase="waiting" /> },
+-    { id: "speaking", label: "Speaking", render: () => <StagedComposer phase="playing" /> },
+-    { id: "muted", label: "Muted", render: () => <StagedComposer phase="listening" isMuted /> },
+     {
+       id: "ending",
+       label: "Ending",
+@@ -274,11 +390,66 @@ const styles = StyleSheet.create((theme) => ({
+   chat: {
+     flex: 1,
+   },
++  // The composer's own frame (composer/index.tsx inputAreaContainer): no top padding, so the
++  // stream ends where the tab row starts, as in the app.
+   composer: {
+     width: "100%",
+     maxWidth: theme.contentMaxWidth,
+     alignSelf: "center",
+-    padding: theme.spacing[4],
++    paddingHorizontal: theme.spacing[4],
++    paddingBottom: theme.spacing[4],
++  },
++  transcript: {
++    flex: 1,
++    justifyContent: "flex-end",
++    gap: theme.spacing[3],
++    width: "100%",
++    maxWidth: theme.contentMaxWidth,
++    alignSelf: "center",
++    paddingHorizontal: theme.spacing[4],
++    paddingBottom: theme.spacing[4],
++  },
++  agentMessage: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.content,
++  },
++  userBubble: {
++    alignSelf: "flex-end",
++    paddingHorizontal: theme.spacing[3],
++    paddingVertical: theme.spacing[2],
++    borderRadius: theme.borderRadius["2xl"],
++    backgroundColor: theme.colors.surface2,
++  },
++  userMessage: {
++    color: theme.colors.foreground,
++    fontSize: theme.fontSize.content,
++  },
++  // Same placement as the stream's scrollToBottomContainer: centered, AGENT_VOICE_TAB_JUMP_GAP
++  // above the stream's bottom edge, which is the tab's top in voice mode.
++  jumpRow: {
++    position: "absolute",
++    left: 0,
++    right: 0,
++    bottom: AGENT_VOICE_TAB_JUMP_GAP,
++    alignItems: "center",
++  },
++  jumpButton: {
++    width: JUMP_BUTTON_SIZE,
++    height: JUMP_BUTTON_SIZE,
++    borderRadius: theme.borderRadius.full,
++    backgroundColor: theme.colors.surface2,
++    alignItems: "center",
++    justifyContent: "center",
++    ...theme.shadow.sm,
++  },
++  lifecycle: {
++    flex: 1,
++  },
++  step: {
++    paddingBottom: theme.spacing[3],
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++    textAlign: "center",
+   },
+   attachmentTray: {
+     flexDirection: "row",
+diff --git a/packages/app/src/design/designs/volume-meter.tsx b/packages/app/src/design/designs/volume-meter.tsx
+index 1fb849008..6b4084fca 100644
+--- a/packages/app/src/design/designs/volume-meter.tsx
++++ b/packages/app/src/design/designs/volume-meter.tsx
+@@ -1,4 +1,8 @@
+-import { VolumeMeter } from "@/components/volume-meter";
++import { useEffect, useState } from "react";
++import { Text } from "react-native";
++import { StyleSheet } from "react-native-unistyles";
++import { VolumeMeter, type VolumeMeterMode } from "@/components/volume-meter";
++import { SHAPE_MORPH_DURATION_MS } from "@/components/ui/shape-morph/use-shape-morph";
+ import { DesignPage, DesignRow, DesignSection, DesignSpecimen } from "@/design/kit";
+ import { useSimulatedVolume } from "@/design/simulated-volume";
+ import type { DesignDefinition } from "@/design/types";
+@@ -92,6 +96,56 @@ function Muted() {
+   return <MeterVariants level={0} isSpeaking={false} isMuted />;
+ }
+ 
++// The agent's meter: think draws the orbit, live morphs it into the bars and hands off to
++// them. The level stands in for agent playback, which voice telemetry does not report yet.
++const AGENT_LEVEL = 0.4;
++const AGENT_HOLD_MS = 2500;
++
++function AgentMeters({ mode, caption }: { mode: VolumeMeterMode; caption?: string }) {
++  const volume = useSimulatedVolume(mode === "live" ? AGENT_LEVEL : 0);
++  return (
++    <DesignPage>
++      <DesignSection
++        title="Agent"
++        description="Thinking is the orbit; Speaking morphs it into the live bars over 800ms, then the snapped bars take over."
++      >
++        {caption ? <Text style={styles.caption}>{caption}</Text> : null}
++        <DesignRow>
++          <DesignSpecimen label="Mini">
++            <VolumeMeter volume={volume} mode={mode} variant="mini" orientation="horizontal" />
++          </DesignSpecimen>
++          <DesignSpecimen label="Compact">
++            <VolumeMeter volume={volume} mode={mode} variant="compact" orientation="horizontal" />
++          </DesignSpecimen>
++          <DesignSpecimen label="Default">
++            <VolumeMeter volume={volume} mode={mode} orientation="horizontal" />
++          </DesignSpecimen>
++        </DesignRow>
++      </DesignSection>
++    </DesignPage>
++  );
++}
++
++function Think() {
++  return <AgentMeters mode="think" />;
++}
++
++function Live() {
++  return <AgentMeters mode="live" />;
++}
++
++function ThinkLiveLoop() {
++  const [mode, setMode] = useState<VolumeMeterMode>("think");
++  useEffect(() => {
++    const timer = setTimeout(
++      () => setMode(mode === "think" ? "live" : "think"),
++      AGENT_HOLD_MS + SHAPE_MORPH_DURATION_MS,
++    );
++    return () => clearTimeout(timer);
++  }, [mode]);
++  return <AgentMeters mode={mode} caption={mode === "think" ? "Thinking" : "Speaking"} />;
++}
++
+ const design: DesignDefinition = {
+   title: "Volume meter",
+   states: [
+@@ -99,7 +153,17 @@ const design: DesignDefinition = {
+     { id: "speaking", label: "Speaking", render: Speaking },
+     { id: "loud", label: "Loud", render: Loud },
+     { id: "muted", label: "Muted", render: Muted },
++    { id: "think", label: "Agent: thinking", render: Think },
++    { id: "think-live", label: "Agent: think ↔ live (auto)", render: ThinkLiveLoop },
++    { id: "live", label: "Agent: speaking", render: Live },
+   ],
+ };
+ 
+ export default design;
++
++const styles = StyleSheet.create((theme) => ({
++  caption: {
++    color: theme.colors.foregroundMuted,
++    fontSize: theme.fontSize.sm,
++  },
++}));
+diff --git a/packages/app/src/design/registry.ts b/packages/app/src/design/registry.ts
+index f47d9a64d..898b7a015 100644
+--- a/packages/app/src/design/registry.ts
++++ b/packages/app/src/design/registry.ts
+@@ -1,4 +1,6 @@
+ import catalog from "@/design/designs/catalog";
++import panelTab from "@/design/designs/panel-tab";
++import shapeMorph from "@/design/designs/shape-morph";
+ import voiceStrip from "@/design/designs/voice-strip";
+ import volumeMeter from "@/design/designs/volume-meter";
+ import type { DesignDefinition } from "@/design/types";
+@@ -9,6 +11,8 @@ import type { DesignDefinition } from "@/design/types";
+  */
+ export const DESIGNS: Record<string, DesignDefinition> = {
+   catalog,
++  "panel-tab": panelTab,
++  "shape-morph": shapeMorph,
+   "voice-strip": voiceStrip,
+   "volume-meter": volumeMeter,
+ };
+diff --git a/packages/app/src/i18n/resources/ar.ts b/packages/app/src/i18n/resources/ar.ts
+index b39bfac07..8f978aa67 100644
+--- a/packages/app/src/i18n/resources/ar.ts
++++ b/packages/app/src/i18n/resources/ar.ts
+@@ -1880,17 +1880,18 @@ export const ar: TranslationResources = {
+     },
+     strip: {
+       label: "وضع الصوت",
+-      mute: "كتم",
+-      unmute: "إلغاء الكتم",
++      micOn: "الميكروفون مفعّل",
++      muted: "مكتوم",
+     },
+     status: {
+       connecting: "جارٍ الاتصال…",
+-      listening: "يستمع",
++      waiting: "بانتظارك",
+       thinking: "يفكر",
+       speaking: "يتحدث",
+-      muted: "مكتوم",
+       ending: "جارٍ الإنهاء…",
+     },
++    agentStatus: "{{provider}}: {{status}}",
++    agentFallbackName: "الوكيل",
+   },
+   rewind: {
+     tooltip: "الترجيع إلى هذه الرسالة",
+diff --git a/packages/app/src/i18n/resources/en.ts b/packages/app/src/i18n/resources/en.ts
+index 02a681b81..e40c680ce 100644
+--- a/packages/app/src/i18n/resources/en.ts
++++ b/packages/app/src/i18n/resources/en.ts
+@@ -1905,17 +1905,18 @@ export const en = {
+     },
+     strip: {
+       label: "Voice mode",
+-      mute: "Mute",
+-      unmute: "Unmute",
++      micOn: "Mic on",
++      muted: "Muted",
+     },
+     status: {
+       connecting: "Connecting…",
+-      listening: "Listening",
++      waiting: "Waiting for you",
+       thinking: "Thinking",
+       speaking: "Speaking",
+-      muted: "Muted",
+       ending: "Ending…",
+     },
++    agentStatus: "{{provider}}: {{status}}",
++    agentFallbackName: "Agent",
+   },
+   rewind: {
+     tooltip: "Rewind to this message",
+diff --git a/packages/app/src/i18n/resources/es.ts b/packages/app/src/i18n/resources/es.ts
+index 80c524bee..867726686 100644
+--- a/packages/app/src/i18n/resources/es.ts
++++ b/packages/app/src/i18n/resources/es.ts
+@@ -1928,17 +1928,18 @@ export const es: TranslationResources = {
+     },
+     strip: {
+       label: "Modo de voz",
+-      mute: "Silenciar",
+-      unmute: "Activar",
++      micOn: "Micro activado",
++      muted: "Silenciado",
+     },
+     status: {
+       connecting: "Conectando…",
+-      listening: "Escuchando",
++      waiting: "Esperándote",
+       thinking: "Pensando",
+       speaking: "Hablando",
+-      muted: "Silenciado",
+       ending: "Finalizando…",
+     },
++    agentStatus: "{{provider}}: {{status}}",
++    agentFallbackName: "Agente",
+   },
+   rewind: {
+     tooltip: "Rebobinar a este mensaje",
+diff --git a/packages/app/src/i18n/resources/fr.ts b/packages/app/src/i18n/resources/fr.ts
+index ff0c1f05c..7330252cc 100644
+--- a/packages/app/src/i18n/resources/fr.ts
++++ b/packages/app/src/i18n/resources/fr.ts
+@@ -1926,17 +1926,18 @@ export const fr: TranslationResources = {
+     },
+     strip: {
+       label: "Mode vocal",
+-      mute: "Couper",
+-      unmute: "Réactiver",
++      micOn: "Micro activé",
++      muted: "Micro coupé",
+     },
+     status: {
+       connecting: "Connexion…",
+-      listening: "Écoute",
++      waiting: "Vous attend",
+       thinking: "Réflexion",
+       speaking: "Parole",
+-      muted: "Micro coupé",
+       ending: "Fin…",
+     },
++    agentStatus: "{{provider}} : {{status}}",
++    agentFallbackName: "Agent",
+   },
+   rewind: {
+     tooltip: "Revenir à ce message",
+diff --git a/packages/app/src/i18n/resources/ja.ts b/packages/app/src/i18n/resources/ja.ts
+index 64c54aa23..41424053b 100644
+--- a/packages/app/src/i18n/resources/ja.ts
++++ b/packages/app/src/i18n/resources/ja.ts
+@@ -1899,17 +1899,18 @@ export const ja: TranslationResources = {
+     },
+     strip: {
+       label: "音声モード",
+-      mute: "ミュート",
+-      unmute: "ミュート解除",
++      micOn: "マイクオン",
++      muted: "ミュート中",
+     },
+     status: {
+       connecting: "接続中…",
+-      listening: "聞き取り中",
++      waiting: "入力待ち",
+       thinking: "考え中",
+       speaking: "話し中",
+-      muted: "ミュート中",
+       ending: "終了中…",
+     },
++    agentStatus: "{{provider}}：{{status}}",
++    agentFallbackName: "エージェント",
+   },
+   rewind: {
+     tooltip: "このメッセージに巻き戻す",
+diff --git a/packages/app/src/i18n/resources/ko.ts b/packages/app/src/i18n/resources/ko.ts
+index 1bbbdc14f..fc96edb52 100644
+--- a/packages/app/src/i18n/resources/ko.ts
++++ b/packages/app/src/i18n/resources/ko.ts
+@@ -1890,17 +1890,18 @@ export const ko: TranslationResources = {
+     },
+     strip: {
+       label: "음성 모드",
+-      mute: "음소거",
+-      unmute: "음소거 해제",
++      micOn: "마이크 켜짐",
++      muted: "음소거됨",
+     },
+     status: {
+       connecting: "연결 중…",
+-      listening: "듣는 중",
++      waiting: "입력 대기 중",
+       thinking: "생각 중",
+       speaking: "말하는 중",
+-      muted: "음소거됨",
+       ending: "종료 중…",
+     },
++    agentStatus: "{{provider}}: {{status}}",
++    agentFallbackName: "에이전트",
+   },
+   rewind: {
+     tooltip: "이 메시지로 되감기",
+diff --git a/packages/app/src/i18n/resources/pt-BR.ts b/packages/app/src/i18n/resources/pt-BR.ts
+index fc0e683d3..ccd8bce42 100644
+--- a/packages/app/src/i18n/resources/pt-BR.ts
++++ b/packages/app/src/i18n/resources/pt-BR.ts
+@@ -1913,17 +1913,18 @@ export const ptBR: TranslationResources = {
+     },
+     strip: {
+       label: "Modo de voz",
+-      mute: "Silenciar",
+-      unmute: "Ativar",
++      micOn: "Microfone ligado",
++      muted: "Silenciado",
+     },
+     status: {
+       connecting: "Conectando…",
+-      listening: "Ouvindo",
++      waiting: "Aguardando você",
+       thinking: "Pensando",
+       speaking: "Falando",
+-      muted: "Silenciado",
+       ending: "Encerrando…",
+     },
++    agentStatus: "{{provider}}: {{status}}",
++    agentFallbackName: "Agente",
+   },
+   rewind: {
+     tooltip: "Voltar para esta mensagem",
+diff --git a/packages/app/src/i18n/resources/ru.ts b/packages/app/src/i18n/resources/ru.ts
+index 32c4dbc4d..3bed9d732 100644
+--- a/packages/app/src/i18n/resources/ru.ts
++++ b/packages/app/src/i18n/resources/ru.ts
+@@ -1912,17 +1912,18 @@ export const ru: TranslationResources = {
+     },
+     strip: {
+       label: "Голосовой режим",
+-      mute: "Выкл. звук",
+-      unmute: "Вкл. звук",
++      micOn: "Микрофон вкл.",
++      muted: "Микрофон выкл.",
+     },
+     status: {
+       connecting: "Подключение…",
+-      listening: "Слушаю",
++      waiting: "Ждёт вас",
+       thinking: "Думаю",
+       speaking: "Говорю",
+-      muted: "Микрофон выкл.",
+       ending: "Завершение…",
+     },
++    agentStatus: "{{provider}}: {{status}}",
++    agentFallbackName: "Агент",
+   },
+   rewind: {
+     tooltip: "Вернуться к этому сообщению",
+diff --git a/packages/app/src/i18n/resources/zh-CN.ts b/packages/app/src/i18n/resources/zh-CN.ts
+index 2d7e99027..bb784b2c4 100644
+--- a/packages/app/src/i18n/resources/zh-CN.ts
++++ b/packages/app/src/i18n/resources/zh-CN.ts
+@@ -1858,17 +1858,18 @@ export const zhCN: TranslationResources = {
+     },
+     strip: {
+       label: "语音模式",
+-      mute: "静音",
+-      unmute: "取消静音",
++      micOn: "麦克风已开",
++      muted: "已静音",
+     },
+     status: {
+       connecting: "连接中…",
+-      listening: "聆听中",
++      waiting: "等待你",
+       thinking: "思考中",
+       speaking: "播报中",
+-      muted: "已静音",
+       ending: "正在结束…",
+     },
++    agentStatus: "{{provider}}：{{status}}",
++    agentFallbackName: "Agent",
+   },
+   rewind: {
+     tooltip: "回退到此消息",
+diff --git a/packages/app/src/panels/agent-panel.tsx b/packages/app/src/panels/agent-panel.tsx
+index af14b9422..5fead5627 100644
+--- a/packages/app/src/panels/agent-panel.tsx
++++ b/packages/app/src/panels/agent-panel.tsx
+@@ -37,6 +37,8 @@ import {
+   resolveComposerTrackControlClearance,
+   resolveComposerTrackTailClearance,
+ } from "@/composer/pill-styles";
++import { useIsVoiceModeForAgent } from "@/contexts/voice-context";
++import { AGENT_VOICE_TAB_JUMP_GAP } from "@/components/agent-voice-tab";
+ import { getActiveMessageSubmissions } from "@/composer/submission/model";
+ import { RewindComposerRestoreProvider } from "@/components/rewind/composer-restore";
+ import { useAgentDescriptor } from "@/agent-presentation";
+@@ -1354,6 +1356,10 @@ const AgentStreamSection = memo(function AgentStreamSection({
+   const bottomOverlayControlClearance = hasVisibleComposerTracks
+     ? resolveComposerTrackControlClearance(isCompactFormFactor)
+     : 0;
++  // In voice mode the composer's agent tab rises into the row above the card, and the jump
++  // button sits just above the tab, on its axis.
++  const hasAgentVoiceTab = useIsVoiceModeForAgent(serverId, agent.id) && hasActiveComposer;
++  const bottomOverlayControlGap = hasAgentVoiceTab ? AGENT_VOICE_TAB_JUMP_GAP : undefined;
+   const streamItemsRaw = useSessionStore((state) =>
+     agentId ? state.sessions[serverId]?.agentStreamTail?.get(agentId) : undefined,
+   );
+@@ -1411,6 +1417,7 @@ const AgentStreamSection = memo(function AgentStreamSection({
+       isAuthoritativeHistoryReady={hasAppliedAuthoritativeHistory}
+       bottomOverlayTailClearance={bottomOverlayTailClearance}
+       bottomOverlayControlClearance={bottomOverlayControlClearance}
++      bottomOverlayControlGap={bottomOverlayControlGap}
+       toast={toast}
+       pendingMessageSubmissions={pendingMessageSubmissions}
+       turnPresentation={turnPresentation}
+diff --git a/packages/app/src/utils/provider-definitions.test.ts b/packages/app/src/utils/provider-definitions.test.ts
+new file mode 100644
+index 000000000..d2f2c8411
+--- /dev/null
++++ b/packages/app/src/utils/provider-definitions.test.ts
+@@ -0,0 +1,25 @@
++import { describe, expect, it } from "vitest";
++import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
++import { resolveProviderDisplayName } from "./provider-definitions";
++
++function entry(provider: string, label: string): ProviderSnapshotEntry {
++  return { provider, label, status: "ready", enabled: true };
++}
++
++describe("resolveProviderDisplayName", () => {
++  it("prefers the host snapshot's label", () => {
++    expect(resolveProviderDisplayName("claude", [entry("claude", "Claude (work)")])).toBe(
++      "Claude (work)",
++    );
++  });
++
++  it("falls back to the built-in name before the snapshot loads", () => {
++    expect(resolveProviderDisplayName("claude", undefined)).toBe("Claude");
++    expect(resolveProviderDisplayName("codex", [entry("claude", "Claude")])).toBe("Codex");
++  });
++
++  it("falls back to the ACP catalog title, then the raw id", () => {
++    expect(resolveProviderDisplayName("amp-acp", undefined)).toBe("Amp");
++    expect(resolveProviderDisplayName("my-custom-agent", undefined)).toBe("my-custom-agent");
++  });
++});
+diff --git a/packages/app/src/utils/provider-definitions.ts b/packages/app/src/utils/provider-definitions.ts
+index f4a9fe2ff..8adebf40e 100644
+--- a/packages/app/src/utils/provider-definitions.ts
++++ b/packages/app/src/utils/provider-definitions.ts
+@@ -1,5 +1,7 @@
+ import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
++import { ACP_PROVIDER_CATALOG } from "@/data/acp-provider-catalog";
+ import {
++  AGENT_PROVIDER_DEFINITIONS,
+   type AgentModeColorTier,
+   type AgentModeIcon,
+   type AgentProviderDefinition,
+@@ -40,6 +42,22 @@ export function resolveProviderLabel(
+   return snapshotEntries?.find((entry) => entry.provider === provider)?.label ?? provider;
+ }
+ 
++/**
++ * A provider's name for people, before the host's snapshot has loaded too: the snapshot's
++ * label, then the built-in or catalog name, then the raw id.
++ */
++export function resolveProviderDisplayName(
++  provider: string,
++  snapshotEntries: ProviderSnapshotEntry[] | undefined,
++): string {
++  return (
++    snapshotEntries?.find((entry) => entry.provider === provider)?.label ??
++    AGENT_PROVIDER_DEFINITIONS.find((definition) => definition.id === provider)?.label ??
++    ACP_PROVIDER_CATALOG.find((entry) => entry.id === provider)?.title ??
++    provider
++  );
++}
++
+ export function resolveProviderDefinition(
+   provider: string,
+   snapshotEntries: ProviderSnapshotEntry[] | undefined,
+-- 
+2.52.0
+
