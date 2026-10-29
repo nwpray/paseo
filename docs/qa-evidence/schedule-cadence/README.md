@@ -50,6 +50,9 @@ same minute", and the DST notes describe what the daemon does today.
 - Patch stack: `FORK_BUILD_DIR=/private/tmp/paseo-cadence-verify fork-patches/prepare.sh`
   applied 0001–0018 to a fresh v0.13.2 worktree. The resulting tree is identical to the build
   worktree.
+- Fork packaging: `FORK_BUILD_DIR=/private/tmp/paseo-cadence-verify fork-patches/build.sh`
+  built `Paseo-0.13.2-arm64.dmg` and `.zip` from that stack (exit 0, ad-hoc signed). Nothing
+  was installed or launched.
 - Typecheck (all workspaces), lint, and format on the changed files: clean. The lefthook
   pre-commit checks passed.
 - Targeted tests (196 passed):
