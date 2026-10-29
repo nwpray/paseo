@@ -45,7 +45,9 @@ No wire or schema change. `server_info.features` gating is not needed.
 Phase 1 doesn't fake any of these. A mixed-minute time list shows "All times need the
 same minute", and the DST notes describe what the daemon does today.
 
-## Verification
+## Initial verification (before independent QA)
+
+These earlier build artifacts predate the fixes. Use the final artifacts listed below.
 
 - Patch stack: `FORK_BUILD_DIR=/private/tmp/paseo-cadence-verify fork-patches/prepare.sh`
   applied 0001–0018 to a fresh v0.13.2 worktree. The resulting tree is identical to the build
@@ -67,6 +69,42 @@ same minute", and the DST notes describe what the daemon does today.
     unchanged.
   - Edited `0 9,13,17 * * *` Denver: removed 1 PM, picked UTC, ended Dec 31. Stored
     `0 9,17 * * *` UTC with `expiresAt` 2027-01-01T00:00:00Z.
+
+## QA fixes and final verification
+
+The independent verdict in `review.md` was **APPROVE WITH FIXES**. The corrected patch addresses
+its three bounded findings:
+
+- The strip counts runs across the full 14 local days and retains at most one ordinary mark per
+  10 minutes, plus the first mark of each day. The count is exact, including the Denver fall-back
+  hour. Rolling `every` cadences use arithmetic counting and sampled marks. Tests cover 1-, 2-,
+  and 5-minute cron intervals, DST, a 1,501-run limit, and a limit ending just after midnight.
+- An untouched edit preview applies both saved `expiresAt` and `maxRuns`. Changing Ends replaces
+  those limits according to the chosen mode. Form tests cover past and future combined limits,
+  an Ends change, and an unrelated edit that leaves the submitted Ends fields untouched.
+- Cadence modes use an opt-in radio group on the shared segmented control. Web uses checked state,
+  a roving tab stop, arrow keys, Home, and End. Native receives radio roles and checked state;
+  keyboard DOM handling is web-gated. The isolated Chrome test passed against temporary Metro
+  and fixture daemon ports; raw output is `radio-e2e.txt`.
+
+`npx vitest run packages/app/src/schedules/cadence-preview.test.ts packages/app/src/schedules/schedule-form-model.test.ts --bail=1`: **37 passed**. `npm run typecheck`, `npm run lint`, and `npm run format`: clean. A direct preview measurement of `* * * * *` in Denver counted **19,604** runs in **79 ms** with marks on every day (Node 22, local Mac). Browser QA covers keyboard and accessibility-tree semantics on web. Native iOS/Android screen readers were not exercised.
+
+The regenerated `0018` patch applies with `fork-patches/prepare.sh` in
+`/private/tmp/paseo-cadence-final-verify/v0.13.2`. Its source tree matches the verified editable
+stack at `f9ab15b97fa7830216e004c7a5f852398e1689c2`.
+
+`FORK_BUILD_DIR=/private/tmp/paseo-cadence-final-verify fork-patches/build.sh` finished in
+2m 3s. Raw output: `final-build.txt`. Fixed ARM64 artifacts:
+
+| Artifact                                                                                          | SHA-256                                                            |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `/private/tmp/paseo-cadence-final-verify/v0.13.2/packages/desktop/release/Paseo-0.13.2-arm64.dmg` | `b706700728d5c95c45424edbc884d24e03d53ea927c80f9b981d9da66c4cd2a8` |
+| `/private/tmp/paseo-cadence-final-verify/v0.13.2/packages/desktop/release/Paseo-0.13.2-arm64.zip` | `8960b85fef31b13f155219e3d223fe35acf6874f01b2d1341ca55a955b4191f6` |
+
+The package was built, not launched or installed. Electron packaging added a `packageManager`
+field in the verification worktree's `package.json`; that generated change was restored after
+packaging, leaving the worktree clean. `hdiutil verify` reported a valid DMG checksum, and
+`unzip -tqq` accepted the ZIP.
 
 ## Screenshots
 

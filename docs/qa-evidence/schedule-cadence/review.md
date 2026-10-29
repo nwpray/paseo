@@ -1,0 +1,26 @@
+# Independent QA review: PASEO-21
+
+**Verdict: APPROVE WITH FIXES.** Keep the item in review until the two preview defects below are fixed and exercised. This verdict covers the shipped Phase 1 cadence builder only. The mock's Phase 2 mixed-minute times, last-day rules, start date, and new DST policy are deferred and are not approved as implemented.
+
+Reviewed `fork-patches/0018-schedule-cadence-builder.patch` on the isolated v0.13.2 stack and compared the author screenshots with `designs/schedule-cadence/index.html` and `notes.md`. The build and clean verification stacks have byte-identical copies of the new cron matcher, preview, Ends, and editor source. The clean stack contains `packages/desktop/release/Paseo-0.13.2-arm64.dmg` (178 MB) and `.zip` (172 MB). `git apply --check` succeeds for patch 0018. I did not launch or install the packaged app.
+
+## Fixes required
+
+1. **The 14-day strip falsely shows dense intervals stopping after a few days.** `packages/app/src/schedules/cadence-preview.ts:19` caps strip collection at 1,500 runs; lines 290–296 apply that cap to the whole 14 days; lines 371–380 put marks only on days in the truncated list. Reproduction at `2026-10-29T10:15:00Z`, UTC, no end limit: `* * * * *` produces marks by day `[824,676,0,0,0,0,0,0,0,0,0,0,0,0]`; `*/2 * * * *` produces `[412,720,368,0,...]`; `*/5 * * * *` produces `[164,288,288,288,288,184,0,...]`. The schedule runs throughout all 14 days. The strip is a central part of the approved mock, and these intervals are selectable in Phase 1. Aggregate or sample each day's marks/counts without leaving later days blank. Add coverage for a dense cadence across the full strip.
+
+2. **An untouched edit preview ignores a saved end date when both limits exist.** The daemon and CLI allow `expiresAt` and `maxRuns` together. `packages/app/src/schedules/schedule-ends.ts:35` selects the runs UI when both are saved, and `resolveExpiresAt` returns null for that mode. `packages/app/src/schedules/schedule-cadence-state.ts:145-167` then previews only the run count. Reproduction: saved `0 9 * * *` UTC, `expiresAt=2026-10-28T00:00:00.000Z`, `maxRuns=10`, no completed runs, form clock `2026-10-29T00:00:00Z`. `deriveCadenceState` returns `preview.status="upcoming"`, `nextRunAt=2026-10-29T09:00:00.000Z`, `expiresAt=null`, although the daemon will not run it. Untouched save correctly sends neither end field, so the discrepancy is in the preview. Apply both persisted limits until the user changes Ends; cover the combined-limit case.
+
+## Other scope and accessibility observations
+
+- The approved mock specifies a radiogroup with arrow-key movement for cadence mode. The implementation uses the shared `SegmentedControl`, whose items are buttons with `aria-selected` and no radiogroup or arrow-key handler (`packages/app/src/components/ui/segmented-control.tsx:75-146`). This is a remaining mock accessibility gap. The weekday toggles do expose checked state, and the strip has an image label. Verify keyboard and screen-reader behavior on web and native while fixing this.
+- The author reports no native iOS/Android run. I reviewed the compact web screenshots at 390 px; the form remains a scrollable bottom sheet, but this does not establish native touch, keyboard, or screen-reader behavior. Desktop macOS was packaged, not launched; Windows/Linux were not exercised.
+- The browser dev run logs a React `uniProps` warning originating in `sidebar-menu-toggle.tsx`, outside this patch. The test passes despite that warning. The author also observed it before opening the schedule sheet.
+
+## Independent checks
+
+- One real browser/daemon Playwright flow passed: `npm run test:e2e --workspace=@getpaseo/app -- --config qa-review-playwright.config.ts e2e/browser/schedules-project-target.spec.ts -g 'creates a schedule from a project picker instead of a raw CWD selector'`. The temporary config selected installed Google Chrome and disabled video because the Playwright browser/ffmpeg cache is absent. Metro ran on port 55991; the fixture daemon ran on port 56019 in its own temporary home. Result: **1 passed (28.2s)**. The temporary config was removed. Raw output: `browser-e2e.txt`.
+- Independent optimized matcher vs minute-by-minute oracle: 10 cases across Denver DST, Lord Howe DST, Apia's skipped date, Kathmandu, Kiritimati, Casablanca, and London; all next matches agreed. Sparse `0 9 30 2 *` returned no match in 62 ms; five monthly day-31 matches took 36 ms in the local built protocol package. The 366-day search limit remains the daemon's existing policy, so a leap-day schedule more than a year away cannot be created; this was not introduced by this patch.
+- Pure form-state and preview probes produced both defect reproductions above. The author's 196 targeted unit tests were not rerun. The updated schedule E2E specs were not run as a whole suite.
+- `git apply --check fork-patches/0018-schedule-cadence-builder.patch` succeeded. The isolated build and verification worktrees were clean after review.
+
+Plane was not writable from this review session: no matching Plane connector/API credentials were available, and Chrome computer control was denied. The parent agent should post **APPROVE WITH FIXES** and these findings to PASEO-21 (item `6f1c72a7-9806-49d5-a9bc-863442278f3c`) without closing it.

@@ -1,4 +1,4 @@
-From e019212a6b852a97f4b21bb4ddb4f41bf43435fc Mon Sep 17 00:00:00 2001
+From 91162c6457181755dea6ab15603a33e4e191d8aa Mon Sep 17 00:00:00 2001
 From: Nick Pray <nickwpray@gmail.com>
 Date: Thu, 29 Oct 2026 00:47:50 -0600
 Subject: [PATCH] fork: build schedule cadence from intervals, times, days and
@@ -30,24 +30,25 @@ PASEO-21
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../schedules-edit-model-hydration.spec.ts    |    9 +-
- .../browser/schedules-project-target.spec.ts  |   17 +-
- .../components/schedules/cadence-editor.tsx   | 1482 +++++++++++++++--
+ .../browser/schedules-project-target.spec.ts  |   48 +-
+ .../components/schedules/cadence-editor.tsx   | 1481 +++++++++++++++--
  .../schedules/schedule-form-sheet.tsx         |  158 +-
+ .../src/components/ui/segmented-control.tsx   |   86 +-
  .../app/src/schedules/cadence-builder.test.ts |  135 ++
  packages/app/src/schedules/cadence-builder.ts |  791 +++++++++
- .../app/src/schedules/cadence-preview.test.ts |  209 +++
- packages/app/src/schedules/cadence-preview.ts |  459 +++++
+ .../app/src/schedules/cadence-preview.test.ts |  262 +++
+ packages/app/src/schedules/cadence-preview.ts |  550 ++++++
  .../schedule-cadence-options.test.ts          |   56 -
  .../src/schedules/schedule-cadence-options.ts |   62 -
  .../src/schedules/schedule-cadence-state.ts   |  217 +++
- packages/app/src/schedules/schedule-ends.ts   |  163 ++
- .../src/schedules/schedule-form-model.test.ts |  120 +-
+ packages/app/src/schedules/schedule-ends.ts   |  166 ++
+ .../src/schedules/schedule-form-model.test.ts |  174 +-
  .../app/src/schedules/schedule-form-model.ts  |  100 +-
  .../schedules/use-schedule-cadence-inputs.ts  |   56 +
  .../src/schedule/cron-next-run.test.ts        |  108 ++
  .../protocol/src/schedule/cron-next-run.ts    |  143 ++
  packages/server/src/server/schedule/cron.ts   |  112 +-
- 18 files changed, 3971 insertions(+), 426 deletions(-)
+ 19 files changed, 4281 insertions(+), 433 deletions(-)
  create mode 100644 packages/app/src/schedules/cadence-builder.test.ts
  create mode 100644 packages/app/src/schedules/cadence-builder.ts
  create mode 100644 packages/app/src/schedules/cadence-preview.test.ts
@@ -89,10 +90,48 @@ index de91c8856..97286db0a 100644
  
    test("create opens pristine after closing an edit form", async ({ page }) => {
 diff --git a/packages/app/e2e/browser/schedules-project-target.spec.ts b/packages/app/e2e/browser/schedules-project-target.spec.ts
-index 4c36eb398..5f787f3e3 100644
+index 4c36eb398..af88d3282 100644
 --- a/packages/app/e2e/browser/schedules-project-target.spec.ts
 +++ b/packages/app/e2e/browser/schedules-project-target.spec.ts
-@@ -199,7 +199,7 @@ test.describe("Schedules project target", () => {
+@@ -151,6 +151,37 @@ test.describe("Schedules project target", () => {
+     cleanupTasks.length = 0;
+   });
+ 
++  test("cadence modes expose radio state and roving arrow-key focus", async ({ page }) => {
++    const workspace = await seedWorkspace({ repoPrefix: "schedule-cadence-radio-", git: false });
++    cleanupTasks.push(() => workspace.cleanup());
++
++    await gotoAppShell(page);
++    await waitForSidebarHydration(page);
++    await page.goto(buildSchedulesRoute());
++    await openNewScheduleSheet(page);
++
++    const group = page.getByRole("radiogroup", { name: "Cadence" });
++    await expect(group).toBeVisible();
++    const interval = group.getByRole("radio", { name: "Interval" });
++    const daily = group.getByRole("radio", { name: "Daily" });
++    const cron = group.getByRole("radio", { name: "Cron" });
++    await expect(daily).toBeChecked();
++    await expect(daily).toHaveAttribute("tabindex", "0");
++    await expect(interval).toHaveAttribute("tabindex", "-1");
++
++    await daily.focus();
++    await page.keyboard.press("ArrowLeft");
++    await expect(interval).toBeChecked();
++    await expect(interval).toBeFocused();
++    await expect(daily).toHaveAttribute("tabindex", "-1");
++    await page.keyboard.press("End");
++    await expect(cron).toBeChecked();
++    await expect(cron).toBeFocused();
++    await page.keyboard.press("Home");
++    await expect(interval).toBeChecked();
++    await expect(interval).toBeFocused();
++  });
++
+   test("dismisses the new schedule sheet without reopening", async ({ page }) => {
+     const workspace = await seedWorkspace({ repoPrefix: "schedule-sheet-dismiss-", git: false });
+     cleanupTasks.push(() => workspace.cleanup());
+@@ -199,7 +230,7 @@ test.describe("Schedules project target", () => {
      await expect(page.getByTestId("cadence-mode")).toHaveCount(0);
      await expect(page.getByTestId("cadence-interval-value")).toHaveCount(0);
      await expect(page.getByText(/Times are in/)).toHaveCount(0);
@@ -101,7 +140,7 @@ index 4c36eb398..5f787f3e3 100644
  
      await page.getByRole("button", { name: /select project/i }).click();
      await page
-@@ -222,10 +222,11 @@ test.describe("Schedules project target", () => {
+@@ -222,10 +253,11 @@ test.describe("Schedules project target", () => {
        0,
      );
  
@@ -117,7 +156,7 @@ index 4c36eb398..5f787f3e3 100644
  
      await page.getByLabel("Schedule name").fill(scheduleName);
      await page.getByLabel("Prompt").fill("Summarize the project status.");
-@@ -366,8 +367,10 @@ test.describe("Schedules project target", () => {
+@@ -366,8 +398,10 @@ test.describe("Schedules project target", () => {
      await page.getByTestId("schedule-archive-on-finish-switch").click();
      await page.getByLabel("Schedule name").fill(scheduleName);
      await page.getByLabel("Prompt").fill("Run with custom workspace cleanup.");
@@ -131,10 +170,10 @@ index 4c36eb398..5f787f3e3 100644
  
      await expect(page.getByTestId("schedule-form-sheet")).toHaveCount(0, { timeout: 30_000 });
 diff --git a/packages/app/src/components/schedules/cadence-editor.tsx b/packages/app/src/components/schedules/cadence-editor.tsx
-index 2774edd18..b2befa4e4 100644
+index 2774edd18..04d9e6f80 100644
 --- a/packages/app/src/components/schedules/cadence-editor.tsx
 +++ b/packages/app/src/components/schedules/cadence-editor.tsx
-@@ -1,136 +1,1209 @@
+@@ -1,136 +1,1208 @@
 -import { useCallback, useMemo, useReducer, useState, type ReactNode } from "react";
 +import { useCallback, useMemo, type ReactElement } from "react";
  import { Text, View } from "react-native";
@@ -405,6 +444,7 @@ index 2774edd18..b2befa4e4 100644
 +            onValueChange={handleMode}
 +            size={size}
 +            testID="schedule-cadence-mode"
++            radioGroupLabel="Cadence"
 +          />
 +          {draft.legacyEveryMs !== null ? (
 +            <Text style={styles.hint} testID="schedule-cadence-legacy">
@@ -1061,9 +1101,7 @@ index 2774edd18..b2befa4e4 100644
 +    value?.type === "every"
 +      ? `Every ${describeEvery(value.everyMs).replace(/^every /, "")}`
 +      : (cadence.compiled.summary ?? "Custom cron schedule");
-+  const stripCount = preview.stripRunCountCapped
-+    ? "more than 1,500 runs"
-+    : `${preview.stripRunCount} ${preview.stripRunCount === 1 ? "run" : "runs"}`;
++  const stripCount = `${preview.stripRunCount} ${preview.stripRunCount === 1 ? "run" : "runs"}`;
  
    return (
 -    <Field label="Cadence">
@@ -1440,7 +1478,7 @@ index 2774edd18..b2befa4e4 100644
      fontSize: theme.fontSize.sm,
      color: theme.colors.foregroundMuted,
    },
-@@ -138,4 +1211,221 @@ const styles = StyleSheet.create((theme) => ({
+@@ -138,4 +1210,221 @@ const styles = StyleSheet.create((theme) => ({
      fontSize: theme.fontSize.sm,
      color: theme.colors.palette.red[300],
    },
@@ -1967,6 +2005,167 @@ index 230a41e2e..ba7e2802b 100644
      </>
    );
  }
+diff --git a/packages/app/src/components/ui/segmented-control.tsx b/packages/app/src/components/ui/segmented-control.tsx
+index e0bbdf3f7..2af73fa16 100644
+--- a/packages/app/src/components/ui/segmented-control.tsx
++++ b/packages/app/src/components/ui/segmented-control.tsx
+@@ -1,4 +1,4 @@
+-import { useCallback, useMemo, type ReactNode } from "react";
++import { useCallback, useMemo, type KeyboardEvent, type ReactNode } from "react";
+ import { Pressable, Text, View, type PressableStateCallbackType } from "react-native";
+ import type { StyleProp, TextStyle, ViewStyle } from "react-native";
+ import { StyleSheet, withUnistyles } from "react-native-unistyles";
+@@ -7,6 +7,7 @@ import {
+   segmentedIconSize,
+   type SegmentedControlSize,
+ } from "@/components/ui/control-geometry";
++import { isWeb } from "@/constants/platform";
+ import type { Theme } from "@/styles/theme";
+ 
+ type SegmentedControlIconRenderer = (props: { color: string; size: number }) => ReactNode;
+@@ -27,6 +28,8 @@ interface SegmentedControlProps<T extends string> {
+   hideLabels?: boolean;
+   style?: StyleProp<ViewStyle>;
+   testID?: string;
++  /** Opt into single-choice radio semantics and arrow-key navigation. */
++  radioGroupLabel?: string;
+ }
+ 
+ interface SegmentIconProps {
+@@ -44,6 +47,37 @@ const ThemedSegmentIcon = withUnistyles(SegmentIcon);
+ const selectedIconMapping = (theme: Theme) => ({ iconColor: theme.colors.foreground });
+ const mutedIconMapping = (theme: Theme) => ({ iconColor: theme.colors.foregroundMuted });
+ 
++function nextRadioIndex<T extends string>(
++  key: string,
++  options: SegmentedControlOption<T>[],
++  current: number,
++): number | null {
++  let next = current;
++  let direction = 0;
++  if (key === "ArrowRight" || key === "ArrowDown") {
++    direction = 1;
++  } else if (key === "ArrowLeft" || key === "ArrowUp") {
++    direction = -1;
++  } else if (key === "Home") {
++    next = 0;
++    direction = 1;
++  } else if (key === "End") {
++    next = options.length - 1;
++    direction = -1;
++  } else {
++    return null;
++  }
++  for (let attempts = 0; attempts < options.length; attempts += 1) {
++    if (key.startsWith("Arrow") || attempts > 0) {
++      next = (next + direction + options.length) % options.length;
++    }
++    if (!options[next]?.disabled) {
++      return next;
++    }
++  }
++  return null;
++}
++
+ export function SegmentedControl<T extends string>({
+   options,
+   value,
+@@ -52,6 +86,7 @@ export function SegmentedControl<T extends string>({
+   hideLabels = false,
+   style,
+   testID,
++  radioGroupLabel,
+ }: SegmentedControlProps<T>) {
+   const sizeStyles = {
+     xs: { container: styles.containerXs, segment: styles.segmentXs, label: styles.labelXs },
+@@ -69,8 +104,13 @@ export function SegmentedControl<T extends string>({
+   );
+ 
+   return (
+-    <View style={containerStyle} testID={testID}>
+-      {options.map((option) => {
++    <View
++      style={containerStyle}
++      testID={testID}
++      accessibilityRole={radioGroupLabel ? "radiogroup" : undefined}
++      accessibilityLabel={radioGroupLabel}
++    >
++      {options.map((option, index) => {
+         const isSelected = option.value === value;
+ 
+         return (
+@@ -84,6 +124,8 @@ export function SegmentedControl<T extends string>({
+             labelSizeStyle={labelSizeStyle}
+             currentValue={value}
+             onValueChange={onValueChange}
++            radioOptions={radioGroupLabel ? options : null}
++            radioIndex={index}
+           />
+         );
+       })}
+@@ -100,6 +142,8 @@ function SegmentItem<T extends string>({
+   labelSizeStyle,
+   currentValue,
+   onValueChange,
++  radioOptions,
++  radioIndex,
+ }: {
+   option: SegmentedControlOption<T>;
+   isSelected: boolean;
+@@ -109,6 +153,8 @@ function SegmentItem<T extends string>({
+   labelSizeStyle: StyleProp<TextStyle>;
+   currentValue: T;
+   onValueChange: (value: T) => void;
++  radioOptions: SegmentedControlOption<T>[] | null;
++  radioIndex: number;
+ }) {
+   const labelStyle = useMemo(
+     () => [styles.label, labelSizeStyle, isSelected && styles.labelSelected],
+@@ -131,14 +177,40 @@ function SegmentItem<T extends string>({
+     [isSelected, option.disabled, segmentSizeStyle],
+   );
+   const accessibilityState = useMemo(
+-    () => ({ selected: isSelected, disabled: option.disabled }),
+-    [isSelected, option.disabled],
++    () =>
++      radioOptions
++        ? { checked: isSelected, disabled: option.disabled }
++        : { selected: isSelected, disabled: option.disabled },
++    [isSelected, option.disabled, radioOptions],
++  );
++  const handleRadioKeyDown = useCallback(
++    (event: KeyboardEvent<HTMLElement>) => {
++      if (!radioOptions || event.altKey || event.ctrlKey || event.metaKey) {
++        return;
++      }
++      const next = nextRadioIndex(event.key, radioOptions, radioIndex);
++      if (next === null) {
++        return;
++      }
++      event.preventDefault();
++      onValueChange(radioOptions[next]!.value);
++      event.currentTarget.parentElement
++        ?.querySelectorAll<HTMLElement>('[role="radio"]')
++        .item(next)
++        ?.focus();
++    },
++    [radioOptions, radioIndex, onValueChange],
+   );
+   return (
+     <Pressable
+-      accessibilityRole="button"
++      accessibilityRole={radioOptions ? "radio" : "button"}
+       accessibilityState={accessibilityState}
+-      aria-selected={isSelected}
++      aria-selected={radioOptions ? undefined : isSelected}
++      aria-checked={radioOptions ? isSelected : undefined}
++      accessibilityLabel={radioOptions ? option.label : undefined}
++      {...(isWeb && radioOptions
++        ? { tabIndex: isSelected ? (0 as const) : (-1 as const), onKeyDown: handleRadioKeyDown }
++        : {})}
+       disabled={option.disabled}
+       testID={option.testID}
+       onPress={handlePress}
 diff --git a/packages/app/src/schedules/cadence-builder.test.ts b/packages/app/src/schedules/cadence-builder.test.ts
 new file mode 100644
 index 000000000..4669d16c5
@@ -2907,10 +3106,10 @@ index 000000000..42319a674
 +}
 diff --git a/packages/app/src/schedules/cadence-preview.test.ts b/packages/app/src/schedules/cadence-preview.test.ts
 new file mode 100644
-index 000000000..02a64fbff
+index 000000000..3f861918c
 --- /dev/null
 +++ b/packages/app/src/schedules/cadence-preview.test.ts
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,262 @@
 +import { describe, expect, it } from "vitest";
 +import { computeCadencePreview, formatRunTime, formatUtcOffset } from "./cadence-preview";
 +import {
@@ -2955,6 +3154,59 @@ index 000000000..02a64fbff
 +    expect(preview.days[0]).toMatchObject({ month: 10, day: 29, isToday: true });
 +    expect(preview.days[0].marks.map((mark) => mark.tone)).toEqual(["next", "run"]);
 +    expect(preview.stripRunCount).toBe(41);
++  });
++
++  it.each([
++    ["* * * * *", 19_544],
++    ["*/2 * * * *", 9_772],
++    ["*/5 * * * *", 3_908],
++  ])("covers all 14 days of dense %s without storing every mark", (expression, count) => {
++    const preview = computeCadencePreview({
++      source: cron(expression, "UTC"),
++      now: Date.parse("2026-10-29T10:15:00.000Z"),
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [],
++    });
++    expect(preview.stripRunCount).toBe(count);
++    expect(preview.days.every((day) => day.marks.length > 0)).toBe(true);
++    expect(preview.days.every((day) => day.marks.length <= 144)).toBe(true);
++  });
++
++  it("counts the extra fall-back hour and obeys a dense run limit", () => {
++    const now = Date.parse("2026-10-29T16:15:00.000Z");
++    const full = computeCadencePreview({
++      source: cron("* * * * *"),
++      now,
++      expiresAt: null,
++      remainingRuns: null,
++      clockTimes: [],
++    });
++    expect(full.days[3].marks.length).toBeGreaterThan(0);
++    expect(full.stripRunCount).toBe(19_604);
++    const limited = computeCadencePreview({
++      source: cron("* * * * *"),
++      now,
++      expiresAt: null,
++      remainingRuns: 1_501,
++      clockTimes: [],
++    });
++    expect(limited.stripRunCount).toBe(1_501);
++    expect(limited.days[2].pastEnd).toBe(true);
++    expect(limited.days[2].marks).toHaveLength(0);
++  });
++
++  it("marks the first run of a day even when a dense limit ends just after midnight", () => {
++    const preview = computeCadencePreview({
++      source: cron("* * * * *", "UTC"),
++      now: Date.parse("2026-10-29T10:15:00.000Z"),
++      expiresAt: null,
++      remainingRuns: 825,
++      clockTimes: [],
++    });
++    expect(preview.stripRunCount).toBe(825);
++    expect(preview.days[1].marks).toEqual([{ minuteOfDay: 0, tone: "run" }]);
++    expect(preview.days[2].pastEnd).toBe(true);
 +  });
 +
 +  it("flags the repeated run when clocks fall back", () => {
@@ -3122,10 +3374,10 @@ index 000000000..02a64fbff
 +});
 diff --git a/packages/app/src/schedules/cadence-preview.ts b/packages/app/src/schedules/cadence-preview.ts
 new file mode 100644
-index 000000000..c53dbe3a0
+index 000000000..5aaed7f8c
 --- /dev/null
 +++ b/packages/app/src/schedules/cadence-preview.ts
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,550 @@
 +import { parseCronExpression } from "@getpaseo/protocol/schedule/cron-expression";
 +import {
 +  createCronDatePartsReader,
@@ -3144,7 +3396,9 @@ index 000000000..c53dbe3a0
 +const MS_PER_DAY = 86_400_000;
 +export const PREVIEW_LIST_LENGTH = 5;
 +export const PREVIEW_STRIP_DAYS = 14;
-+const PREVIEW_STRIP_RUN_CAP = 1500;
++// A column is 144px tall. More than one ordinary mark per ten wall minutes
++// cannot add detail, so keep the count exact while sampling the drawing.
++const STRIP_MARK_SPACING = 10 * MS_PER_MINUTE;
 +
 +export type CadencePreviewSource =
 +  | { type: "cron"; expression: string; timezone: string }
@@ -3187,7 +3441,6 @@ index 000000000..c53dbe3a0
 +  entries: CadencePreviewEntry[];
 +  days: CadencePreviewDay[];
 +  stripRunCount: number;
-+  stripRunCountCapped: boolean;
 +}
 +
 +const readerCache = new Map<string, CronDatePartsReader>();
@@ -3391,6 +3644,101 @@ index 000000000..c53dbe3a0
 +  return skipped;
 +}
 +
++function collectRollingStrip(input: {
++  source: Extract<CadencePreviewSource, { type: "every" }>;
++  collector: RunCollector;
++  now: number;
++  until: number;
++  remainingRuns: number | null;
++  timezone: string;
++  days: CadencePreviewDay[];
++  dayStarts: number[];
++}): { count: number; lastRunAt: number | null } {
++  const { source, collector, now, until, remainingRuns, timezone, days, dayStarts } = input;
++  const first = collector.next(now);
++  if (first === null || first >= until) {
++    return { count: 0, lastRunAt: null };
++  }
++  const available = Math.floor((until - 1 - first) / source.everyMs) + 1;
++  const count = Math.min(available, remainingRuns ?? Number.POSITIVE_INFINITY);
++  const spacing = Math.max(1, Math.ceil(STRIP_MARK_SPACING / source.everyMs));
++  for (let dayIndex = 0; dayIndex < days.length; dayIndex += 1) {
++    const firstIndex = Math.max(0, Math.ceil((dayStarts[dayIndex] - first) / source.everyMs));
++    const dayEnd = Math.min(dayStarts[dayIndex + 1] ?? until, until);
++    const endIndex = Math.min(count, Math.ceil((dayEnd - first) / source.everyMs));
++    for (let index = firstIndex; index < endIndex; index += spacing) {
++      const at = first + index * source.everyMs;
++      const parts = readLocalParts(at, timezone);
++      days[dayIndex].marks.push({
++        minuteOfDay: parts.hour * 60 + parts.minute,
++        tone: index === 0 ? "next" : "run",
++      });
++    }
++  }
++  return { count, lastRunAt: first + (count - 1) * source.everyMs };
++}
++
++function collectStrip(input: {
++  source: CadencePreviewSource;
++  collector: RunCollector;
++  now: number;
++  until: number;
++  remainingRuns: number | null;
++  timezone: string;
++  todayKey: number;
++  days: CadencePreviewDay[];
++}): { count: number; lastRunAt: number | null } {
++  const { source, collector, now, until, remainingRuns, timezone, todayKey, days } = input;
++  let count = 0;
++  let lastRunAt: number | null = null;
++  if (remainingRuns === 0) {
++    return { count, lastRunAt };
++  }
++  const dayStarts = days.map((day) => startOfLocalDay(day, timezone));
++  if (source.type === "every") {
++    return collectRollingStrip({
++      source,
++      collector,
++      now,
++      until,
++      remainingRuns,
++      timezone,
++      days,
++      dayStarts,
++    });
++  }
++
++  // Cron has at most one run per absolute minute. The 14-day window bounds
++  // this scan even for `* * * * *`; only sampled marks are retained.
++  let lastMarkedAt = Number.NEGATIVE_INFINITY;
++  let next = collector.next(now);
++  let nextDayIndex = 1;
++  const maxCount = remainingRuns ?? Number.POSITIVE_INFINITY;
++  while (next !== null && next < until && count < maxCount) {
++    count += 1;
++    let crossedDay = false;
++    while (nextDayIndex < dayStarts.length && next >= dayStarts[nextDayIndex]) {
++      nextDayIndex += 1;
++      crossedDay = true;
++    }
++    if (crossedDay || next - lastMarkedAt >= STRIP_MARK_SPACING) {
++      const parts = readLocalParts(next, timezone);
++      const day = days[dayKey(parts) - todayKey];
++      if (day) {
++        let tone: CadencePreviewMark["tone"] = count === 1 ? "next" : "run";
++        if (lastRunAt !== null && isRepeat(readLocalParts(lastRunAt, timezone), parts)) {
++          tone = "repeat";
++        }
++        day.marks.push({ minuteOfDay: parts.hour * 60 + parts.minute, tone });
++      }
++      lastMarkedAt = next;
++    }
++    lastRunAt = next;
++    next = collector.next(next);
++  }
++  return { count, lastRunAt };
++}
++
 +export function computeCadencePreview(input: CadencePreviewInput): CadencePreview {
 +  const { source, now } = input;
 +  const timezone = source.timezone;
@@ -3411,14 +3759,6 @@ index 000000000..c53dbe3a0
 +    now,
 +    limit: PREVIEW_LIST_LENGTH,
 +    until: Number.POSITIVE_INFINITY,
-+    expiresAt: input.expiresAt,
-+    remainingRuns: input.remainingRuns,
-+  });
-+  const strip = collectRuns({
-+    collector,
-+    now,
-+    limit: PREVIEW_STRIP_RUN_CAP,
-+    until: stripEnd - 1,
 +    expiresAt: input.expiresAt,
 +    remainingRuns: input.remainingRuns,
 +  });
@@ -3475,14 +3815,6 @@ index 000000000..c53dbe3a0
 +    input.expiresAt !== null
 +      ? dayKey(readLocalParts(input.expiresAt - 1, timezone)) + 1
 +      : Number.POSITIVE_INFINITY;
-+  const runsEndDayKey =
-+    input.remainingRuns !== null &&
-+    strip.runs.length >= input.remainingRuns &&
-+    strip.runs.length > 0
-+      ? dayKey(readLocalParts(strip.runs[strip.runs.length - 1], timezone)) + 1
-+      : Number.POSITIVE_INFINITY;
-+  const firstEndKey = Math.min(endDayKey, runsEndDayKey);
-+
 +  const days: CadencePreviewDay[] = Array.from({ length: PREVIEW_STRIP_DAYS }, (_, offset) => {
 +    const date = new Date(Date.UTC(today.year, today.month - 1, today.day + offset));
 +    return {
@@ -3491,22 +3823,34 @@ index 000000000..c53dbe3a0
 +      day: date.getUTCDate(),
 +      weekday: date.getUTCDay(),
 +      isToday: offset === 0,
-+      pastEnd: todayKey + offset >= firstEndKey,
++      pastEnd: false,
 +      marks: [],
 +    };
 +  });
-+  let stripPrevious: CronDateParts | null = null;
-+  strip.runs.forEach((at, index) => {
-+    const parts = readLocalParts(at, timezone);
-+    const day = days[dayKey(parts) - todayKey];
-+    if (day) {
-+      let tone: CadencePreviewMark["tone"] = index === 0 ? "next" : "run";
-+      if (isRepeat(stripPrevious, parts)) {
-+        tone = "repeat";
-+      }
-+      day.marks.push({ minuteOfDay: parts.hour * 60 + parts.minute, tone });
-+    }
-+    stripPrevious = parts;
++  const until = Math.min(stripEnd, input.expiresAt ?? Number.POSITIVE_INFINITY);
++  const strip = collectStrip({
++    source,
++    collector,
++    now,
++    until,
++    remainingRuns: input.remainingRuns,
++    timezone,
++    todayKey,
++    days,
++  });
++  let runsEndDayKey = Number.POSITIVE_INFINITY;
++  if (input.remainingRuns === 0) {
++    runsEndDayKey = todayKey;
++  } else if (
++    input.remainingRuns !== null &&
++    strip.count >= input.remainingRuns &&
++    strip.lastRunAt !== null
++  ) {
++    runsEndDayKey = dayKey(readLocalParts(strip.lastRunAt, timezone)) + 1;
++  }
++  const firstEndKey = Math.min(endDayKey, runsEndDayKey);
++  days.forEach((day, offset) => {
++    day.pastEnd = todayKey + offset >= firstEndKey;
 +  });
 +  for (const entry of skipped) {
 +    const day = days[entry.dayKey - todayKey];
@@ -3523,8 +3867,7 @@ index 000000000..c53dbe3a0
 +    nextRunAt: list.runs[0] ?? null,
 +    entries,
 +    days,
-+    stripRunCount: strip.runs.length,
-+    stripRunCountCapped: strip.runs.length >= PREVIEW_STRIP_RUN_CAP,
++    stripRunCount: strip.count,
 +  };
 +}
 +
@@ -3940,10 +4283,10 @@ index 000000000..9e987a582
 +}
 diff --git a/packages/app/src/schedules/schedule-ends.ts b/packages/app/src/schedules/schedule-ends.ts
 new file mode 100644
-index 000000000..0b8f77f16
+index 000000000..5df28101e
 --- /dev/null
 +++ b/packages/app/src/schedules/schedule-ends.ts
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,166 @@
 +import { readLocalParts, startOfLocalDay } from "./cadence-preview";
 +
 +// How a schedule ends: never, after a date (expiresAt), or after a number of
@@ -4049,12 +4392,12 @@ index 000000000..0b8f77f16
 +
 +/** The instant runs stop: midnight after the end date in the cadence time zone. */
 +export function resolveExpiresAt(draft: EndsDraft, timezone: string): number | null {
-+  if (draft.kind !== "date") {
-+    return null;
-+  }
 +  if (!draft.touched && draft.savedExpiresAt) {
 +    const saved = Date.parse(draft.savedExpiresAt);
 +    return Number.isFinite(saved) ? saved : null;
++  }
++  if (draft.kind !== "date") {
++    return null;
 +  }
 +  const date = parseDateText(draft.dateText);
 +  if (!date) {
@@ -4068,6 +4411,9 @@ index 000000000..0b8f77f16
 +}
 +
 +export function resolveMaxRuns(draft: EndsDraft): number | null {
++  if (!draft.touched) {
++    return draft.savedMaxRuns;
++  }
 +  return draft.kind === "runs" ? parseRunsText(draft.runsText) : null;
 +}
 +
@@ -4108,10 +4454,18 @@ index 000000000..0b8f77f16
 +  return { ...draft, runsText, touched: true };
 +}
 diff --git a/packages/app/src/schedules/schedule-form-model.test.ts b/packages/app/src/schedules/schedule-form-model.test.ts
-index 9ec61dd7c..99de3f286 100644
+index 9ec61dd7c..80ce2c5d2 100644
 --- a/packages/app/src/schedules/schedule-form-model.test.ts
 +++ b/packages/app/src/schedules/schedule-form-model.test.ts
-@@ -510,14 +510,17 @@ describe("schedule form model", () => {
+@@ -8,6 +8,7 @@ import type { FormPreferences } from "@/create-agent-preferences/preferences";
+ import { describe, expect, it } from "vitest";
+ import { buildProjectOptionId, type ScheduleProjectTarget } from "./schedule-project-targets";
+ import { openScheduleForm, type ScheduleFormSnapshot } from "./schedule-form-model";
++import { setEndsKind } from "./schedule-ends";
+ 
+ type TestSchedule = ScheduleSummary & { serverId: string; serverName: string };
+ 
+@@ -510,14 +511,17 @@ describe("schedule form model", () => {
        },
      });
  
@@ -4134,7 +4488,7 @@ index 9ec61dd7c..99de3f286 100644
    });
  
    it("does not rewrite an unrepresentable legacy interval until cadence changes", () => {
-@@ -539,15 +542,12 @@ describe("schedule form model", () => {
+@@ -539,15 +543,12 @@ describe("schedule form model", () => {
        },
      });
  
@@ -4153,7 +4507,7 @@ index 9ec61dd7c..99de3f286 100644
  
      form.setCadence({
        type: "cron",
-@@ -555,13 +555,105 @@ describe("schedule form model", () => {
+@@ -555,13 +556,158 @@ describe("schedule form model", () => {
        timezone: "Europe/Madrid",
      });
  
@@ -4221,6 +4575,59 @@ index 9ec61dd7c..99de3f286 100644
 +    });
 +  });
 +
++  it("previews both saved limits until Ends changes on edit", () => {
++    const saved = scheduleOnHost({
++      serverId: "host-a",
++      serverName: "Host A",
++      cwd: "/repo/a",
++      model: "model-a",
++    });
++    const openCombined = (expiresAt: string) =>
++      open({
++        mode: "edit",
++        schedule: {
++          ...saved,
++          cadence: { type: "cron", expression: "0 9 * * *", timezone: "UTC" },
++          expiresAt,
++          maxRuns: 10,
++        },
++        defaults: {
++          serverId: null,
++          projectTargets: PROJECT_TARGETS,
++          preferences: {},
++          now: () => Date.parse("2026-10-29T00:00:00.000Z"),
++        },
++      });
++
++    const expired = openCombined("2026-10-28T00:00:00.000Z");
++    expired.applyCompletedRuns(0);
++    expect(expired.getState().cadence.preview).toMatchObject({
++      status: "ready",
++      maxRuns: 10,
++      expiresAt: Date.parse("2026-10-28T00:00:00.000Z"),
++      preview: { status: "ended", nextRunAt: null },
++    });
++    expired.setName("No-op cadence save");
++    expect(expired.getState().cadence.submitEnds).toBeNull();
++
++    const future = openCombined("2026-11-01T00:00:00.000Z");
++    future.applyCompletedRuns(0);
++    expect(future.getState().cadence.preview).toMatchObject({
++      status: "ready",
++      maxRuns: 10,
++      expiresAt: Date.parse("2026-11-01T00:00:00.000Z"),
++      preview: { status: "upcoming", stripRunCount: 3 },
++    });
++    future.updateEnds((draft) => setEndsKind(draft, "runs"));
++    expect(future.getState().cadence.preview).toMatchObject({
++      status: "ready",
++      maxRuns: 10,
++      expiresAt: null,
++      preview: { stripRunCount: 10 },
++    });
++    expect(future.getState().cadence.submitEnds).toEqual({ maxRuns: 10, expiresAt: null });
++  });
++
 +  it("submits a builder cadence and ends on create", () => {
 +    const form = open({
 +      mode: "create",
@@ -4260,7 +4667,7 @@ index 9ec61dd7c..99de3f286 100644
    it("requires a cron choice before updating a legacy heartbeat", () => {
      const form = open({
        mode: "edit",
-@@ -579,7 +671,9 @@ describe("schedule form model", () => {
+@@ -579,7 +725,9 @@ describe("schedule form model", () => {
      form.setCadence({ type: "cron", expression: "0 9 * * *", timezone: "Europe/Madrid" });
  
      expect(form.getState()).toMatchObject({
