@@ -86,6 +86,12 @@ npm run dev:android     # Build/install the debug app and start development
 npm run dev:ios         # Build/install the iOS development app
 ```
 
+The root `dev:android` and `dev:ios` commands run from the verified
+`.fork-build/v0.13.2` worktree. Use `dev:android:raw` or `dev:ios:raw` to test
+unpatched source. `build:apk`, `build:apk:arm64`, `android:production`, and
+`android:release` still build raw source; review fork packaging before using
+those release artifacts.
+
 `build:apk` writes `artifacts/paseo-dogfood-universal.apk`; `build:apk:arm64` writes
 `artifacts/paseo-dogfood-arm64.apk`. Neither command launches or installs on a device. Both enable
 `PASEO_WATCHDOG_BUILD=1`, the production React profiling renderer, and Android's shell-profileable

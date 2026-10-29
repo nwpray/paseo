@@ -1,0 +1,316 @@
+From 5359ac14eadde76e519cbe9e7a105efa968fb213 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 20:38:46 -0600
+Subject: [PATCH] fork: recover empty Codex thread for voice start
+
+---
+ .../src/server/agent/agent-manager.test.ts    |  33 ++++++
+ .../server/src/server/agent/agent-manager.ts  |   7 +-
+ .../providers/codex-app-server-agent.test.ts  | 110 ++++++++++++++++++
+ .../agent/providers/codex-app-server-agent.ts |  43 ++++++-
+ 4 files changed, 190 insertions(+), 3 deletions(-)
+
+diff --git a/packages/server/src/server/agent/agent-manager.test.ts b/packages/server/src/server/agent/agent-manager.test.ts
+index c01d47700..875f822a3 100644
+--- a/packages/server/src/server/agent/agent-manager.test.ts
++++ b/packages/server/src/server/agent/agent-manager.test.ts
+@@ -697,6 +697,39 @@ test("uses an injected timeline store without making it a production requirement
+   }
+ });
+ 
++test("captures provider persistence metadata after runtime info creates an empty thread", async () => {
++  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-late-persistence-"));
++  class LatePersistenceClient extends TestAgentClient {
++    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
++      const session: AgentSession = new TestAgentSession(config);
++      const getRuntimeInfo = session.getRuntimeInfo.bind(session);
++      let threadStarted = false;
++      session.describePersistence = () =>
++        threadStarted
++          ? { provider: "codex", sessionId: session.id!, metadata: { emptyThread: true } }
++          : null;
++      session.getRuntimeInfo = async () => {
++        const info = await getRuntimeInfo();
++        threadStarted = true;
++        return info;
++      };
++      return session;
++    }
++  }
++  const manager = new AgentManager({
++    clients: { codex: new LatePersistenceClient() },
++    logger,
++  });
++  try {
++    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
++      workspaceId: undefined,
++    });
++    expect(manager.getAgent(agent.id)?.persistence?.metadata?.emptyThread).toBe(true);
++  } finally {
++    rmSync(workdir, { recursive: true, force: true });
++  }
++});
++
+ test("refreshing an agent replaces the injected timeline store instead of appending a second copy", async () => {
+   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-timeline-rehydrate-"));
+   const store = new RecordingTimelineStore();
+diff --git a/packages/server/src/server/agent/agent-manager.ts b/packages/server/src/server/agent/agent-manager.ts
+index b39fe782b..a5a8c5af3 100644
+--- a/packages/server/src/server/agent/agent-manager.ts
++++ b/packages/server/src/server/agent/agent-manager.ts
+@@ -4086,9 +4086,12 @@ export class AgentManager {
+         newInfo.sessionId !== agent.runtimeInfo?.sessionId ||
+         newInfo.modeId !== agent.runtimeInfo?.modeId;
+       agent.runtimeInfo = newInfo;
+-      if (!agent.persistence && newInfo.sessionId) {
++      if (newInfo.sessionId) {
+         agent.persistence = attachPersistenceCwd(
+-          { provider: agent.provider, sessionId: newInfo.sessionId },
++          agent.session.describePersistence() ?? {
++            provider: agent.provider,
++            sessionId: newInfo.sessionId,
++          },
+           agent.cwd,
+         );
+       }
+diff --git a/packages/server/src/server/agent/providers/codex-app-server-agent.test.ts b/packages/server/src/server/agent/providers/codex-app-server-agent.test.ts
+index 8fca5f24c..7d3aa577e 100644
+--- a/packages/server/src/server/agent/providers/codex-app-server-agent.test.ts
++++ b/packages/server/src/server/agent/providers/codex-app-server-agent.test.ts
+@@ -129,6 +129,7 @@ interface CodexClientLike {
+ type CodexTestSession = AgentSession & {
+   connectionState: "disconnected" | "history-ready" | "connected";
+   currentThreadId: string | null;
++  hasStartedTurn: boolean;
+   activeForegroundTurnId: string | null;
+   client: CodexClientLike | null;
+ };
+@@ -1889,6 +1890,48 @@ describe("Codex app-server provider", () => {
+     appServer.assertNoErrors();
+   });
+ 
++  test("resumes an empty agent without reading a rollout that does not exist", async () => {
++    const requests: string[] = [];
++    const appServer = createFakeCodexAppServer({
++      "thread/loaded/list": () => {
++        requests.push("thread/loaded/list");
++        return { data: [] };
++      },
++      "thread/resume": () => {
++        requests.push("thread/resume");
++        return Promise.reject(new Error("no rollout found for thread id empty-thread"));
++      },
++      "thread/start": () => {
++        requests.push("thread/start");
++        return { thread: { id: "replacement-thread" } };
++      },
++      "thread/read": () => {
++        requests.push("thread/read");
++        throw new Error("empty thread has no history to read");
++      },
++    });
++    const provider = createProviderWithFakeAppServer(appServer);
++
++    const session = await provider.resumeSession({
++      sessionId: "empty-thread",
++      metadata: {
++        cwd: "/tmp/codex-question-test",
++        modeId: "auto",
++        model: "gpt-5.4",
++        thinkingOptionId: "medium",
++        emptyThread: true,
++      },
++    });
++
++    expect(session.describePersistence()).toMatchObject({
++      sessionId: "replacement-thread",
++      metadata: { emptyThread: true },
++    });
++    expect(requests).toEqual(["thread/loaded/list", "thread/resume", "thread/start"]);
++    await session.close();
++    appServer.assertNoErrors();
++  });
++
+   test("closes Codex app-server when an interactive resume fails", async () => {
+     const appServer = createFakeCodexAppServer({
+       "thread/resume": () => Promise.reject(new Error("thread resume failed")),
+@@ -5466,6 +5509,73 @@ describe("Codex app-server provider", () => {
+     ]);
+   });
+ 
++  test("replaces an unstarted Codex thread when its rollout does not exist", async () => {
++    const newSession = createSession({ thinkingOptionId: "medium" });
++    const emptyHandle = newSession.describePersistence();
++    expect(emptyHandle?.metadata?.emptyThread).toBe(true);
++
++    const session = new CodexAppServerAgentSession(
++      createConfig({ thinkingOptionId: "medium", systemPrompt: "Voice instructions" }),
++      emptyHandle,
++      createTestLogger(),
++      () => {
++        throw new Error("Test session cannot spawn Codex app-server");
++      },
++    ) as CodexTestSession;
++    const requests: Array<{ method: string; params: unknown }> = [];
++    session.client = {
++      request: vi.fn(async (method: string, params: unknown) => {
++        requests.push({ method, params });
++        if (method === "thread/loaded/list") return { data: [] };
++        if (method === "thread/resume") {
++          throw new Error("no rollout found for thread id test-thread");
++        }
++        if (method === "thread/start") return { thread: { id: "new-empty-thread" } };
++        return {};
++      }),
++    };
++
++    await asInternals(session).ensureThreadLoaded();
++
++    expect(session.currentThreadId).toBe("new-empty-thread");
++    expect(session.describePersistence()?.metadata?.emptyThread).toBe(true);
++    expect(requests.map(({ method }) => method)).toEqual([
++      "thread/loaded/list",
++      "thread/resume",
++      "thread/start",
++    ]);
++    expect(requests[2]?.params).toMatchObject({ developerInstructions: "Voice instructions" });
++  });
++
++  test("keeps a started thread when its original handle was marked empty", async () => {
++    const session = new CodexAppServerAgentSession(
++      createConfig({ thinkingOptionId: "medium" }),
++      { sessionId: "started-thread", metadata: { emptyThread: true } },
++      createTestLogger(),
++      () => {
++        throw new Error("Test session cannot spawn Codex app-server");
++      },
++    ) as CodexTestSession;
++    session.hasStartedTurn = true;
++    const requests: string[] = [];
++    session.client = {
++      request: vi.fn(async (method: string) => {
++        requests.push(method);
++        if (method === "thread/loaded/list") return { data: [] };
++        if (method === "thread/resume") {
++          throw new Error("no rollout found for thread id started-thread");
++        }
++        return {};
++      }),
++    };
++
++    await expect(asInternals(session).ensureThreadLoaded()).rejects.toThrow(
++      "no rollout found for thread id started-thread",
++    );
++    expect(session.currentThreadId).toBe("started-thread");
++    expect(requests).toEqual(["thread/loaded/list", "thread/resume"]);
++  });
++
+   test("appends blank-line spacing to /goal status messages", async () => {
+     const requests: Array<{ method: string; params: unknown }> = [];
+     const session = createSession({}, { goalsEnabled: true });
+diff --git a/packages/server/src/server/agent/providers/codex-app-server-agent.ts b/packages/server/src/server/agent/providers/codex-app-server-agent.ts
+index 62ceb14c7..392365416 100644
+--- a/packages/server/src/server/agent/providers/codex-app-server-agent.ts
++++ b/packages/server/src/server/agent/providers/codex-app-server-agent.ts
+@@ -142,6 +142,17 @@ function isCodexAlreadyUnarchivedError(error: unknown, threadId: string): boolea
+   return message.includes(`no archived rollout found for thread id ${threadId}`);
+ }
+ 
++function isCodexMissingRolloutError(error: unknown, threadId: string): boolean {
++  const message = error instanceof Error ? error.message : String(error);
++  return message.includes(`no rollout found for thread id ${threadId}`);
++}
++
++function hasStartedCodexTurn(
++  handle: { sessionId: string; metadata?: Record<string, unknown> } | null,
++): boolean {
++  return Boolean(handle?.sessionId) && handle?.metadata?.emptyThread !== true;
++}
++
+ const TURN_START_TIMEOUT_MS = 90 * 1000;
+ const INTERRUPT_TIMEOUT_MS = 2_000;
+ const CODEX_PROVIDER = "codex" as const;
+@@ -3439,6 +3450,7 @@ export class CodexAppServerAgentSession implements AgentSession {
+   > | null = null;
+   private resolvedSandboxPolicy: Record<string, unknown> | null = null;
+   private currentThreadId: string | null = null;
++  private hasStartedTurn: boolean;
+   private currentTurnId: string | null = null;
+   private pendingForegroundTurnIdentification: {
+     foregroundTurnId: string;
+@@ -3560,6 +3572,7 @@ export class CodexAppServerAgentSession implements AgentSession {
+     this.providerOptions =
+       validateProviderOptions("codex", CodexProviderOptionsSchema, config.providerOptions) ?? {};
+     this.config = config;
++    this.hasStartedTurn = hasStartedCodexTurn(resumeHandle);
+     this.harnessEnvironment = deps.environment ?? buildCodexAppServerEnv();
+     this.asyncQuestions = new CodexAsyncQuestions(resumeHandle?.metadata?.asyncQuestions);
+     this.codexHome = deps.codexHome ?? resolveCodexHomeDir(process.env);
+@@ -3652,7 +3665,11 @@ export class CodexAppServerAgentSession implements AgentSession {
+ 
+       if (this.currentThreadId) {
+         await this.ensureThreadLoaded();
+-        await this.loadPersistedHistory(this.client);
++        if (this.hasStartedTurn) {
++          await this.loadPersistedHistory(this.client);
++        } else {
++          this.historyPending = false;
++        }
+         await this.applyDefaultModelAndThinking();
+       }
+ 
+@@ -4086,6 +4103,27 @@ export class CodexAppServerAgentSession implements AgentSession {
+     } catch (error) {
+       const threadId = this.currentThreadId;
+       const message = error instanceof Error ? error.message : String(error);
++      if (
++        !this.hasStartedTurn &&
++        this.resumeHandle?.metadata?.emptyThread === true &&
++        isCodexMissingRolloutError(error, threadId)
++      ) {
++        // Codex has no rollout to resume until the first turn. A fresh agent can
++        // acquire a new empty thread with its updated config instead.
++        this.currentThreadId = null;
++        this.cachedRuntimeInfo = null;
++        try {
++          await this.ensureThread();
++        } catch (startError) {
++          this.currentThreadId = threadId;
++          throw startError;
++        }
++        this.logger.info(
++          { previousThreadId: threadId, threadId: this.currentThreadId },
++          "Replaced unstarted Codex thread during reload",
++        );
++        return;
++      }
+       if (isArchivedCodexThreadResumeError(error, threadId)) {
+         try {
+           await this.client.request("thread/unarchive", { threadId });
+@@ -4415,6 +4453,7 @@ export class CodexAppServerAgentSession implements AgentSession {
+         throw new Error("Codex turn start was interrupted before reaching Codex");
+       }
+       await this.client.request("turn/start", turnStart.params, TURN_START_TIMEOUT_MS);
++      this.hasStartedTurn = true;
+       return { turnId };
+     } catch (error) {
+       this.pendingForegroundTurnIdentification?.resolve(null);
+@@ -4931,6 +4970,7 @@ export class CodexAppServerAgentSession implements AgentSession {
+         cwd: this.config.cwd,
+         title: this.config.title ?? null,
+         threadId: this.currentThreadId,
++        emptyThread: !this.hasStartedTurn,
+         modeId: this.config.modeId,
+         model: this.config.model ?? null,
+         thinkingOptionId,
+@@ -5315,6 +5355,7 @@ export class CodexAppServerAgentSession implements AgentSession {
+       this.cachedRuntimeInfo = null;
+     }
+     this.currentThreadId = threadId;
++    this.hasStartedTurn = false;
+   }
+ 
+   private buildThreadStartRequest(model: string): {
+-- 
+2.50.1 (Apple Git-155)
+

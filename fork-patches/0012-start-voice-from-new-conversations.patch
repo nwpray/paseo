@@ -1,0 +1,634 @@
+From 69cbf612efa1c884ef1b930700c7cb516ddb4f5e Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 20:24:57 -0600
+Subject: [PATCH] fork: start voice from new conversations
+
+---
+ .../src/composer/draft/create-flow.test.ts    | 42 ++++++++++++
+ .../app/src/composer/draft/create-flow.ts     | 67 ++++++++++++++-----
+ .../app/src/composer/draft/workspace-tab.tsx  | 40 ++++++++++-
+ packages/app/src/composer/index.tsx           | 25 +++++--
+ packages/app/src/composer/input/input.tsx     |  9 +++
+ .../src/screens/new-workspace-empty.test.ts   |  8 ++-
+ .../app/src/screens/new-workspace-empty.ts    |  7 ++
+ .../app/src/screens/new-workspace-screen.tsx  | 57 ++++++++++++++--
+ 8 files changed, 225 insertions(+), 30 deletions(-)
+
+diff --git a/packages/app/src/composer/draft/create-flow.test.ts b/packages/app/src/composer/draft/create-flow.test.ts
+index 8587fa3db..590f06413 100644
+--- a/packages/app/src/composer/draft/create-flow.test.ts
++++ b/packages/app/src/composer/draft/create-flow.test.ts
+@@ -250,4 +250,46 @@ describe("useDraftAgentCreateFlow", () => {
+     });
+     expect(onCreateSuccess).toHaveBeenCalledTimes(1);
+   });
++
++  it("creates a voice-start agent without a blank initial user message", async () => {
++    let finishCreate!: (result: { agentId: string; result: { id: string } }) => void;
++    const createRequest = vi.fn(
++      () =>
++        new Promise<{ agentId: string; result: { id: string } }>((resolve) => {
++          finishCreate = resolve;
++        }),
++    );
++    const onCreateSuccess = vi.fn();
++    const { result } = renderHook(() =>
++      useDraftAgentCreateFlow({
++        draftId: "draft-voice",
++        getPendingServerId: () => "server-1",
++        buildDraftAgent: () => ({ id: "draft-voice" }),
++        createRequest,
++        onCreateSuccess,
++      }),
++    );
++
++    let create!: Promise<void>;
++    await act(async () => {
++      create = result.current.handleCreateFromInput({
++        text: "",
++        attachments: [],
++        cwd: "/repo",
++        allowEmptyText: true,
++      });
++    });
++    expect(result.current.isSubmitting).toBe(true);
++    expect(result.current.submittedStreamItems).toEqual([]);
++    expect(result.current.pendingMessageSubmissions).toEqual([]);
++    expect(createRequest).toHaveBeenCalledWith(
++      expect.objectContaining({ text: "", images: undefined, attachments: undefined }),
++    );
++
++    await act(async () => {
++      finishCreate({ agentId: "agent-voice", result: { id: "agent-voice" } });
++      await create;
++    });
++    expect(onCreateSuccess).toHaveBeenCalledTimes(1);
++  });
+ });
+diff --git a/packages/app/src/composer/draft/create-flow.ts b/packages/app/src/composer/draft/create-flow.ts
+index bd4d0fe95..9e3ff02ad 100644
+--- a/packages/app/src/composer/draft/create-flow.ts
++++ b/packages/app/src/composer/draft/create-flow.ts
+@@ -26,6 +26,24 @@ interface CreateAttempt {
+   attachments?: AgentAttachment[];
+ }
+ 
++function hasInitialMessageContent(attempt: CreateAttempt): boolean {
++  return Boolean(attempt.text.trim() || attempt.images?.length || attempt.attachments?.length);
++}
++
++function shouldRejectEmptySubmission(input: {
++  text: string;
++  hasAttachmentContent: boolean;
++  allowEmptyText: boolean;
++  allowEmptyTextForThisAttempt: boolean | undefined;
++}): boolean {
++  return !(
++    input.text ||
++    input.hasAttachmentContent ||
++    input.allowEmptyText ||
++    input.allowEmptyTextForThisAttempt
++  );
++}
++
+ type DraftAgentMachineState<TDraftAgent> =
+   | { tag: "draft"; errorMessage: string }
+   | { tag: "creating"; attempt: CreateAttempt; draftAgent: TDraftAgent };
+@@ -84,6 +102,7 @@ interface SubmitContext {
+   text: string;
+   attachments: ComposerAttachment[];
+   cwd: string;
++  allowEmptyText?: boolean;
+ }
+ 
+ interface CreateRequestContext {
+@@ -158,11 +177,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
+       return EMPTY_STREAM_ITEMS;
+     }
+ 
+-    if (
+-      !machine.attempt.text &&
+-      (!machine.attempt.images || machine.attempt.images.length === 0) &&
+-      (!machine.attempt.attachments || machine.attempt.attachments.length === 0)
+-    ) {
++    if (!hasInitialMessageContent(machine.attempt)) {
+       return EMPTY_STREAM_ITEMS;
+     }
+ 
+@@ -178,6 +193,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
+   }, [machine]);
+   const pendingMessageSubmissions = useMemo<readonly PendingMessageSubmission[]>(() => {
+     if (machine.tag !== "creating") return [];
++    if (!hasInitialMessageContent(machine.attempt)) return [];
+     return [
+       {
+         clientMessageId: machine.attempt.clientMessageId,
+@@ -225,17 +241,19 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
+ 
+         if (createResult.agentId) {
+           updatePendingAgentId({ draftId, agentId: createResult.agentId });
+-          handoffCreatedAgentMessageSubmission(
+-            pendingServerId,
+-            createResult.agentId,
+-            createUserMessage({
+-              clientMessageId: attempt.clientMessageId,
+-              text: attempt.text,
+-              timestamp: attempt.timestamp,
+-              images: attempt.images,
+-              attachments: attempt.attachments,
+-            }),
+-          );
++          if (hasInitialMessageContent(attempt)) {
++            handoffCreatedAgentMessageSubmission(
++              pendingServerId,
++              createResult.agentId,
++              createUserMessage({
++                clientMessageId: attempt.clientMessageId,
++                text: attempt.text,
++                timestamp: attempt.timestamp,
++                images: attempt.images,
++                attachments: attempt.attachments,
++              }),
++            );
++          }
+           markPendingCreateLifecycle({ draftId, lifecycle: "sent" });
+         }
+ 
+@@ -267,7 +285,12 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
+   );
+ 
+   const handleCreateFromInput = useCallback(
+-    async ({ text, attachments, cwd }: SubmitContext) => {
++    async ({
++      text,
++      attachments,
++      cwd,
++      allowEmptyText: allowEmptyTextForThisAttempt,
++    }: SubmitContext) => {
+       const existing = useCreateFlowStore.getState().pendingByDraftId[draftId];
+       if (
+         isSubmitting ||
+@@ -295,7 +318,14 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
+       const images = wirePayload.images;
+ 
+       const hasAttachmentContent = images.length > 0 || wirePayload.attachments.length > 0;
+-      if (!trimmedPrompt && !hasAttachmentContent && !allowEmptyText) {
++      if (
++        shouldRejectEmptySubmission({
++          text: trimmedPrompt,
++          hasAttachmentContent,
++          allowEmptyText,
++          allowEmptyTextForThisAttempt,
++        })
++      ) {
+         const error = new Error(t("composer.errors.initialPromptRequired"));
+         dispatch({ type: "DRAFT_SET_ERROR", message: error.message });
+         throw error;
+@@ -305,6 +335,7 @@ export function useDraftAgentCreateFlow<TDraftAgent, TCreateResult>({
+         text: trimmedPrompt,
+         attachments,
+         cwd,
++        ...(allowEmptyTextForThisAttempt ? { allowEmptyText: true } : {}),
+       });
+       if (validationError) {
+         const error = new Error(validationError);
+diff --git a/packages/app/src/composer/draft/workspace-tab.tsx b/packages/app/src/composer/draft/workspace-tab.tsx
+index d00b6f779..cc71615c0 100644
+--- a/packages/app/src/composer/draft/workspace-tab.tsx
++++ b/packages/app/src/composer/draft/workspace-tab.tsx
+@@ -49,6 +49,10 @@ import {
+ } from "@/workspace-tabs/model";
+ import { openWorkspaceChanges } from "@/workspace-tabs/open-supporting-view";
+ import { useSettings } from "@/hooks/use-settings";
++import { useVoiceOptional } from "@/contexts/voice-context";
++import { useToast } from "@/contexts/toast-context";
++import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
++import { useSessionStore } from "@/stores/session-store";
+ 
+ const EMPTY_PENDING_PERMISSIONS = new Map();
+ const DRAFT_CAPABILITIES: AgentCapabilityFlags = {
+@@ -304,6 +308,9 @@ export function WorkspaceDraftAgentTab({
+   onOpenImportSheet,
+ }: WorkspaceDraftAgentTabProps) {
+   const { t } = useTranslation();
++  const voice = useVoiceOptional();
++  const toast = useToast();
++  const voiceCreatePendingRef = useRef(false);
+   const client = useHostRuntimeClient(serverId);
+   const isConnected = useHostRuntimeIsConnected(serverId);
+   const workspaceFields = useWorkspaceFields(serverId, workspaceId, (w) => ({
+@@ -434,9 +441,9 @@ export function WorkspaceDraftAgentTab({
+     getPendingServerId: () => serverId,
+     initialAttempt: initialCreateAttempt,
+     allowEmptyText: allowsEmptyAutoSubmit,
+-    validateBeforeSubmit: ({ text, attachments }) => {
++    validateBeforeSubmit: ({ text, attachments, allowEmptyText }) => {
+       const allowsEmptyDraftText = shouldAllowEmptyDraftText({
+-        allowsEmptyAutoSubmit,
++        allowsEmptyAutoSubmit: allowsEmptyAutoSubmit || allowEmptyText === true,
+         attachments,
+       });
+       return validateDraftSubmission({
+@@ -487,12 +494,40 @@ export function WorkspaceDraftAgentTab({
+       });
+     },
+     onCreateSuccess: ({ result }) => {
++      const startVoiceAfterCreate = voiceCreatePendingRef.current;
++      voiceCreatePendingRef.current = false;
+       clearDraftInput("sent");
+       clearWorkspaceAttachments({ scopeKey: draftAttachmentScopeKey });
+       useWorkspaceDraftSubmissionStore.getState().clearDraftSetup({ draftId });
+       onCreated(result);
++      if (startVoiceAfterCreate) {
++        void voice?.startVoice(serverId, result.id).catch((error) => {
++          toast.error(error instanceof Error ? error.message : String(error));
++        });
++      }
+     },
+   });
++  const handleStartVoiceForDraft = useCallback(() => {
++    if (!voice || voiceCreatePendingRef.current || isSubmitting) return;
++    const unavailableMessage = resolveVoiceUnavailableMessage({
++      serverInfo: useSessionStore.getState().sessions[serverId]?.serverInfo,
++      mode: "voice",
++    });
++    if (unavailableMessage) {
++      toast.error(unavailableMessage);
++      return;
++    }
++    voiceCreatePendingRef.current = true;
++    void handleCreateFromInput({
++      text: "",
++      attachments: [],
++      cwd: composerState.workingDir,
++      allowEmptyText: true,
++    }).catch((error) => {
++      voiceCreatePendingRef.current = false;
++      toast.error(error instanceof Error ? error.message : String(error));
++    });
++  }, [composerState.workingDir, handleCreateFromInput, isSubmitting, serverId, toast, voice]);
+   const turnPresentation = useMemo(
+     () => resolveTurnPresentation(TURN_LIVENESS_IDLE, pendingMessageSubmissions.length > 0),
+     [pendingMessageSubmissions],
+@@ -647,6 +682,7 @@ export function WorkspaceDraftAgentTab({
+             workspaceId={workspaceId}
+             isPaneFocused={isPaneFocused}
+             onSubmitMessage={handleCreateFromInput}
++            onStartVoiceForDraft={handleStartVoiceForDraft}
+             isSubmitLoading={isSubmitting}
+             blurOnSubmit={true}
+             textSource={draftInput.textSource}
+diff --git a/packages/app/src/composer/index.tsx b/packages/app/src/composer/index.tsx
+index 32cf9c866..ec6cdc828 100644
+--- a/packages/app/src/composer/index.tsx
++++ b/packages/app/src/composer/index.tsx
+@@ -931,6 +931,8 @@ interface ComposerProps {
+   workspaceId?: string | null;
+   isPaneFocused: boolean;
+   onSubmitMessage?: (payload: MessagePayload) => Promise<void>;
++  /** Starts voice after a draft creates its agent. */
++  onStartVoiceForDraft?: () => void;
+   onClientSlashCommand?: (command: ClientSlashCommand) => Promise<void>;
+   /** When true, the submit button is enabled even without text or images (e.g. external attachment selected). */
+   hasExternalContent?: boolean;
+@@ -1143,6 +1145,7 @@ interface ComposerVoiceModeButtonProps {
+ interface ComposerRightControlsSlotProps extends ComposerVoiceModeButtonProps {
+   isVoiceModeForAgent: boolean;
+   hasAgent: boolean;
++  canCreateAgentForVoice: boolean;
+   isAgentRunning: boolean;
+   hasSendableContent: boolean;
+   isCompact: boolean;
+@@ -1152,6 +1155,7 @@ interface ComposerRightControlsSlotProps extends ComposerVoiceModeButtonProps {
+ function ComposerRightControlsSlot({
+   isVoiceModeForAgent,
+   hasAgent,
++  canCreateAgentForVoice,
+   isAgentRunning,
+   hasSendableContent,
+   isCompact,
+@@ -1160,7 +1164,11 @@ function ComposerRightControlsSlot({
+ }: ComposerRightControlsSlotProps) {
+   const hideVoiceForCompactInput = isCompact && hasSendableContent;
+   const showVoiceModeButton =
+-    showVoice && !isVoiceModeForAgent && hasAgent && !isAgentRunning && !hideVoiceForCompactInput;
++    showVoice &&
++    !isVoiceModeForAgent &&
++    (hasAgent || canCreateAgentForVoice) &&
++    !isAgentRunning &&
++    !hideVoiceForCompactInput;
+   if (!showVoiceModeButton) return null;
+   return (
+     <View style={styles.rightControls}>
+@@ -1241,6 +1249,7 @@ function ComposerContentImpl({
+   serverId,
+   workspaceId,
+   onSubmitMessage,
++  onStartVoiceForDraft,
+   onClientSlashCommand,
+   hasExternalContent = false,
+   allowEmptySubmit = false,
+@@ -1942,6 +1951,10 @@ function ComposerContentImpl({
+   const isVoiceModeForAgent = resolveIsVoiceModeForAgent(voice, serverId, agentId);
+ 
+   const handleToggleRealtimeVoice = useCallback(() => {
++    if (!hasAgent && onStartVoiceForDraft) {
++      onStartVoiceForDraft();
++      return;
++    }
+     attemptStartRealtimeVoice({
+       voice,
+       isConnected,
+@@ -1951,7 +1964,7 @@ function ComposerContentImpl({
+       toastErrorRef,
+       exitFullscreen: () => editingSession.setFullscreen(false),
+     });
+-  }, [agentId, editingSession, hasAgent, isConnected, serverId, voice]);
++  }, [agentId, editingSession, hasAgent, isConnected, onStartVoiceForDraft, serverId, voice]);
+ 
+   const handleEditQueuedMessage = useCallback(
+     (id: string) => {
+@@ -2034,7 +2047,8 @@ function ComposerContentImpl({
+     [isConnected, isCancellingAgent],
+   );
+ 
+-  const isVoiceSwitching = voice?.isVoiceSwitching ?? false;
++  const isVoiceSwitching =
++    (voice?.isVoiceSwitching ?? false) || (Boolean(onStartVoiceForDraft) && isSubmitLoading);
+   const voiceButtonDisabled = !isConnected || isVoiceSwitching;
+   const realtimeVoiceButtonStyle = useCallback(
+     (state: PressableStateCallbackType & { hovered?: boolean }) =>
+@@ -2070,6 +2084,7 @@ function ComposerContentImpl({
+       <ComposerRightControlsSlot
+         isVoiceModeForAgent={isVoiceModeForAgent}
+         hasAgent={hasAgent}
++        canCreateAgentForVoice={Boolean(onStartVoiceForDraft) && !hasSendableContent}
+         isAgentRunning={isAgentRunning}
+         hasSendableContent={hasSendableContent}
+         isCompact={isCompactLayout}
+@@ -2087,6 +2102,7 @@ function ComposerContentImpl({
+       buttonIconSize,
+       handleToggleRealtimeVoice,
+       hasAgent,
++      onStartVoiceForDraft,
+       hasSendableContent,
+       isAgentRunning,
+       isConnected,
+@@ -2517,7 +2533,8 @@ function ComposerContentImpl({
+                   rightContent={rightContent}
+                   activeActionContent={activeActionContent}
+                   voiceServerId={serverId}
+-                  voiceAgentId={agentId}
++                  voiceAgentId={hasAgent ? agentId : undefined}
++                  onStartVoiceForDraft={hasSendableContent ? undefined : onStartVoiceForDraft}
+                   voiceAgentProvider={agentProvider}
+                   isAgentRunning={isAgentRunning}
+                   defaultSendBehavior={activeSendBehavior}
+diff --git a/packages/app/src/composer/input/input.tsx b/packages/app/src/composer/input/input.tsx
+index 6ba47fc73..530280897 100644
+--- a/packages/app/src/composer/input/input.tsx
++++ b/packages/app/src/composer/input/input.tsx
+@@ -156,6 +156,7 @@ export interface MessageInputProps {
+   activeActionContent?: React.ReactNode;
+   voiceServerId?: string;
+   voiceAgentId?: string;
++  onStartVoiceForDraft?: () => void;
+   /** The agent's provider id, for the voice mode agent tab's name and icon. */
+   voiceAgentProvider?: string;
+   /** When true and there's sendable content, calls onQueue instead of onSubmit */
+@@ -1075,6 +1076,7 @@ interface ResolvedMessageInputProps {
+   activeActionContent: React.ReactNode;
+   voiceServerId: string | undefined;
+   voiceAgentId: string | undefined;
++  onStartVoiceForDraft: (() => void) | undefined;
+   voiceAgentProvider: string | undefined;
+   isAgentRunning: boolean;
+   defaultSendBehavior: "interrupt" | "steer" | "queue";
+@@ -1123,6 +1125,7 @@ function resolveMessageInputProps(props: MessageInputProps): ResolvedMessageInpu
+     activeActionContent: props.activeActionContent,
+     voiceServerId: props.voiceServerId,
+     voiceAgentId: props.voiceAgentId,
++    onStartVoiceForDraft: props.onStartVoiceForDraft,
+     voiceAgentProvider: props.voiceAgentProvider,
+     isAgentRunning: props.isAgentRunning ?? false,
+     defaultSendBehavior: props.defaultSendBehavior,
+@@ -1201,6 +1204,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+       activeActionContent,
+       voiceServerId,
+       voiceAgentId,
++      onStartVoiceForDraft,
+       voiceAgentProvider,
+       isAgentRunning,
+       defaultSendBehavior,
+@@ -1593,6 +1597,10 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+     }, [client, isAgentRunning, isRealtimeVoiceForCurrentAgent, toast, voice, voiceAgentId]);
+ 
+     const handleToggleRealtimeVoiceShortcut = useCallback(() => {
++      if (!voiceAgentId && onStartVoiceForDraft && isConnected && !disabled) {
++        onStartVoiceForDraft();
++        return;
++      }
+       toggleRealtimeVoiceImpl({
+         voice,
+         voiceServerId,
+@@ -1615,6 +1623,7 @@ export const MessageInput = forwardRef<MessageInputRef, MessageInputProps>(
+       toast,
+       voice,
+       voiceAgentId,
++      onStartVoiceForDraft,
+       voiceServerId,
+     ]);
+ 
+diff --git a/packages/app/src/screens/new-workspace-empty.test.ts b/packages/app/src/screens/new-workspace-empty.test.ts
+index 28c5ddbe6..032ef38d5 100644
+--- a/packages/app/src/screens/new-workspace-empty.test.ts
++++ b/packages/app/src/screens/new-workspace-empty.test.ts
+@@ -1,7 +1,11 @@
+ import { describe, expect, it, vi } from "vitest";
+ import type { ComposerAttachment } from "@/attachments/types";
+ import type { MessagePayload } from "@/composer/types";
+-import { isEmptyWorkspaceSubmission, runCreateEmptyWorkspace } from "./new-workspace-empty";
++import {
++  isEmptyWorkspaceSubmission,
++  runCreateEmptyWorkspace,
++  shouldCreateEmptyWorkspace,
++} from "./new-workspace-empty";
+ 
+ function payload(
+   input: { text?: string; attachments?: ComposerAttachment[] } = {},
+@@ -58,5 +62,7 @@ describe("isEmptyWorkspaceSubmission", () => {
+ 
+     expect(isEmptyWorkspaceSubmission(payload({ text: " \n\t " }))).toBe(true);
+     expect(isEmptyWorkspaceSubmission(payload({ attachments: [attachment] }))).toBe(false);
++    expect(shouldCreateEmptyWorkspace(payload(), false)).toBe(true);
++    expect(shouldCreateEmptyWorkspace(payload(), true)).toBe(false);
+   });
+ });
+diff --git a/packages/app/src/screens/new-workspace-empty.ts b/packages/app/src/screens/new-workspace-empty.ts
+index 1c1566b6d..1247e2b47 100644
+--- a/packages/app/src/screens/new-workspace-empty.ts
++++ b/packages/app/src/screens/new-workspace-empty.ts
+@@ -6,6 +6,13 @@ export function isEmptyWorkspaceSubmission(payload: MessagePayload): boolean {
+   return !payload.text.trim() && payload.attachments.length === 0;
+ }
+ 
++export function shouldCreateEmptyWorkspace(
++  payload: MessagePayload,
++  startVoiceAfterCreate: boolean,
++): boolean {
++  return isEmptyWorkspaceSubmission(payload) && !startVoiceAfterCreate;
++}
++
+ export interface CreateEmptyWorkspaceInput {
+   payload: MessagePayload;
+   ensureWorkspace: (input: {
+diff --git a/packages/app/src/screens/new-workspace-screen.tsx b/packages/app/src/screens/new-workspace-screen.tsx
+index 3cb01ae9d..d43a53364 100644
+--- a/packages/app/src/screens/new-workspace-screen.tsx
++++ b/packages/app/src/screens/new-workspace-screen.tsx
+@@ -25,6 +25,7 @@ import { TitlebarDragRegion } from "@/components/desktop/titlebar-drag-region";
+ import { MenuHeader } from "@/components/headers/menu-header";
+ import { useIsCompactFormFactor } from "@/constants/layout";
+ import { useToast } from "@/contexts/toast-context";
++import { useVoiceOptional } from "@/contexts/voice-context";
+ import { useAgentInputDraft } from "@/composer/draft/input-draft";
+ import { useForgeSearchQuery } from "@/git/use-forge-search-query";
+ import { useCheckoutStatusQuery } from "@/git/use-status-query";
+@@ -48,7 +49,11 @@ import {
+   navigateToWorkspace,
+   useLastWorkspaceSelection,
+ } from "@/stores/navigation-active-workspace-store";
+-import { normalizeWorkspaceDescriptor, type WorkspaceDescriptor } from "@/stores/session-store";
++import {
++  normalizeWorkspaceDescriptor,
++  useSessionStore,
++  type WorkspaceDescriptor,
++} from "@/stores/session-store";
+ import { useWorkspace } from "@/stores/session-store-hooks";
+ import { buildNewWorkspaceDraftKey, generateDraftId } from "@/stores/draft-keys";
+ import { useOpenAddProject } from "@/hooks/use-open-add-project";
+@@ -62,6 +67,7 @@ import type { KeyboardActionId } from "@/keyboard/keyboard-action-dispatcher";
+ import { useFormPreferences } from "@/hooks/use-form-preferences";
+ import type { CreateAgentInitialValues } from "@/hooks/use-agent-form-state";
+ import { toErrorMessage } from "@/utils/error-messages";
++import { resolveVoiceUnavailableMessage } from "@/utils/server-info-capabilities";
+ import { buildSettingsAddHostRoute } from "@/utils/host-routes";
+ import {
+   getHostProjectId,
+@@ -81,7 +87,7 @@ import type { AgentAttachment, ForgeSearchItem } from "@getpaseo/protocol/messag
+ import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+ import type { AgentProvider } from "@getpaseo/protocol/agent-types";
+ import type { WorkspaceDraftTabSetup, WorkspaceTabTarget } from "@/workspace-tabs/model";
+-import { isEmptyWorkspaceSubmission, runCreateEmptyWorkspace } from "./new-workspace-empty";
++import { runCreateEmptyWorkspace, shouldCreateEmptyWorkspace } from "./new-workspace-empty";
+ import {
+   getWorkspaceNamingAttachments,
+   remapDraftCwdToWorkspace,
+@@ -357,6 +363,7 @@ interface CreateChatAgentInput {
+   supportsForgeSearch: boolean;
+   resolveClient: () => DaemonClient;
+   isStillOnCreateScreen: () => boolean;
++  onAgentCreated?: (agentId: string) => void;
+   labels: {
+     composerStateRequired: string;
+     selectModel: string;
+@@ -518,7 +525,8 @@ async function createWorkspaceChatAgent(input: CreateChatAgentInput): Promise<Su
+         attachments: request.attachments,
+       }),
+   };
+-  await agentCreation.result;
++  const agent = await agentCreation.result;
++  input.onAgentCreated?.(agent.id);
+   if (outcome === "background") clearConsumedDraft();
+   return outcome;
+ }
+@@ -857,6 +865,8 @@ export function NewWorkspaceScreen({
+   const { t } = useTranslation();
+   const isCompact = useIsCompactFormFactor();
+   const toast = useToast();
++  const voice = useVoiceOptional();
++  const voiceCreatePendingRef = useRef(false);
+   const composerEditing = useNewWorkspaceComposerEditing();
+   const { leaveFullscreen } = composerEditing;
+   const mergeWorkspaces = useCallback(
+@@ -1287,12 +1297,12 @@ export function NewWorkspaceScreen({
+   );
+ 
+   const handleSubmitNewWorkspace = useCallback(
+-    async (payload: MessagePayload) => {
++    async (payload: MessagePayload, startVoiceAfterCreate = false) => {
+       try {
+         setErrorMessage(null);
+         await composerState?.persistFormPreferences();
+         await updateFormPreferences({ launchTarget });
+-        if (isEmptyWorkspaceSubmission(payload)) {
++        if (shouldCreateEmptyWorkspace(payload, startVoiceAfterCreate)) {
+           setPendingAction("empty");
+           let outcome: SubmitOutcome = "background";
+           await runCreateEmptyWorkspace({
+@@ -1330,6 +1340,15 @@ export function NewWorkspaceScreen({
+           supportsForgeSearch,
+           resolveClient: withConnectedClient,
+           isStillOnCreateScreen,
++          ...(startVoiceAfterCreate && voice
++            ? {
++                onAgentCreated: (agentId: string) => {
++                  void voice.startVoice(selectedServerId, agentId).catch((error) => {
++                    toast.error(toErrorMessage(error));
++                  });
++                },
++              }
++            : {}),
+           labels: {
+             composerStateRequired: t("newWorkspace.errors.composerStateRequired"),
+             selectModel: t("newWorkspace.errors.selectModel"),
+@@ -1360,11 +1379,38 @@ export function NewWorkspaceScreen({
+       supportsForgeSearch,
+       t,
+       toast,
++      voice,
+       updateFormPreferences,
+       withConnectedClient,
+     ],
+   );
+ 
++  const handleStartVoiceForDraft = useCallback(() => {
++    if (!voice || voiceCreatePendingRef.current || isPending) return;
++    const unavailableMessage = resolveVoiceUnavailableMessage({
++      serverInfo: useSessionStore.getState().sessions[selectedServerId]?.serverInfo,
++      mode: "voice",
++    });
++    if (unavailableMessage) {
++      toast.error(unavailableMessage);
++      return;
++    }
++    voiceCreatePendingRef.current = true;
++    void handleSubmitNewWorkspace(
++      { text: "", attachments: [], cwd: selectedSourceDirectory ?? "" },
++      true,
++    ).finally(() => {
++      voiceCreatePendingRef.current = false;
++    });
++  }, [
++    handleSubmitNewWorkspace,
++    isPending,
++    selectedServerId,
++    selectedSourceDirectory,
++    toast,
++    voice,
++  ]);
++
+   const handleSubmitTerminalLaunch = useCallback(async () => {
+     try {
+       setErrorMessage(null);
+@@ -1559,6 +1605,7 @@ export function NewWorkspaceScreen({
+       serverId={selectedServerId}
+       isPaneFocused={true}
+       onSubmitMessage={handleSubmitNewWorkspace}
++      onStartVoiceForDraft={handleStartVoiceForDraft}
+       allowEmptySubmit={true}
+       submitButtonAccessibilityLabel={t("newWorkspace.create")}
+       submitButtonTestID="workspace-create-submit"
+-- 
+2.50.1 (Apple Git-155)
+

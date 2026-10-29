@@ -1,0 +1,256 @@
+From 052ba5ad9e4cca4ff7b89a842b6965673256165c Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 20:54:15 -0600
+Subject: [PATCH] fork: read voice-mode replies without speak calls
+
+---
+ packages/server/src/server/session.ts         |   2 +
+ .../server/src/server/session/voice/index.ts  |   9 ++
+ .../session/voice/voice-session.test.ts       | 105 ++++++++++++++++++
+ .../src/server/session/voice/voice-session.ts |  39 ++++++-
+ 4 files changed, 154 insertions(+), 1 deletion(-)
+
+diff --git a/packages/server/src/server/session.ts b/packages/server/src/server/session.ts
+index bcff76582..c1149f554 100644
+--- a/packages/server/src/server/session.ts
++++ b/packages/server/src/server/session.ts
+@@ -2039,6 +2039,8 @@ export class Session {
+             });
+         }
+ 
++        this.voiceSessions.handleAgentStreamEvent(event.agentId, event.event);
++
+         const serializedEvent = serializeAgentStreamEvent(event.event);
+         if (!serializedEvent) {
+           return;
+diff --git a/packages/server/src/server/session/voice/index.ts b/packages/server/src/server/session/voice/index.ts
+index 922fa9c68..2ccbb8e69 100644
+--- a/packages/server/src/server/session/voice/index.ts
++++ b/packages/server/src/server/session/voice/index.ts
+@@ -1,6 +1,7 @@
+ import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
+ import type { OwnedOperation, SessionDelivery } from "../owned-subscriptions/index.js";
+ import { VoiceSession, type VoiceSessionOptions } from "./voice-session.js";
++import type { AgentStreamEvent } from "../../agent/agent-sdk-types.js";
+ 
+ type VoiceMessage = Extract<
+   SessionInboundMessage,
+@@ -46,6 +47,14 @@ export class VoiceSessions {
+     );
+   }
+ 
++  handleAgentStreamEvent(agentId: string, event: AgentStreamEvent): void {
++    for (const source of this.sources.values()) {
++      if (!source.closing && source.voice.isActiveForAgent(agentId)) {
++        source.voice.handleAgentStreamEvent(event);
++      }
++    }
++  }
++
+   /** Fork 0009: silence the assistant's speech for this agent; the agent is untouched. */
+   stopAssistantSpeechForAgent(agentId: string, reason: string): void {
+     for (const source of this.sources.values()) {
+diff --git a/packages/server/src/server/session/voice/voice-session.test.ts b/packages/server/src/server/session/voice/voice-session.test.ts
+index 45d4e2919..422f6ae29 100644
+--- a/packages/server/src/server/session/voice/voice-session.test.ts
++++ b/packages/server/src/server/session/voice/voice-session.test.ts
+@@ -142,6 +142,10 @@ function isAudioOutput(message: SessionOutboundMessage): boolean {
+   return message.type === "audio_output";
+ }
+ 
++function isCanceledReplay(message: SessionOutboundMessage): boolean {
++  return message.type === "speech_replay_finished" && message.payload.status === "canceled";
++}
++
+ async function waitForAudioOutput(host: FakeVoiceHost): Promise<void> {
+   await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(1));
+ }
+@@ -431,6 +435,107 @@ describe("VoiceSession speech replay (fork)", () => {
+   });
+ });
+ 
++describe("VoiceSession automatic voice playback (fork)", () => {
++  test("reads every streamed assistant delta and final suffix when speak was not used", async () => {
++    const spoken: string[] = [];
++    const tts: TextToSpeechProvider = {
++      async synthesizeSpeech(text) {
++        spoken.push(text);
++        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
++      },
++    };
++    const { voiceSession, host } = createVoiceSession(tts);
++    host.emit = (message) => {
++      host.emitted.push(message);
++      if (message.type === "audio_output") voiceSession.handleAudioPlayed(message.payload.id);
++    };
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
++    voiceSession.handleAgentStreamEvent({ type: "turn_started", provider: "codex" });
++    voiceSession.handleAgentStreamEvent({
++      type: "timeline",
++      provider: "codex",
++      item: { type: "assistant_message", messageId: "m1", text: "**Hello" },
++    });
++    voiceSession.handleAgentStreamEvent({
++      type: "timeline",
++      provider: "codex",
++      item: { type: "assistant_message", messageId: "m1", text: "**, Nick" },
++    });
++    voiceSession.handleAgentStreamEvent({
++      type: "timeline",
++      provider: "codex",
++      item: { type: "assistant_message", messageId: "m1", text: "." },
++    });
++    voiceSession.handleAgentStreamEvent({ type: "turn_completed", provider: "codex" });
++
++    await vi.waitFor(() => expect(spoken).toEqual(["Hello, Nick."]));
++    await waitForAudioOutput(host);
++    expect(
++      host.emitted.some(
++        (message) => message.type === "audio_output" && message.payload.isVoiceMode,
++      ),
++    ).toBe(true);
++    await voiceSession.cleanup();
++  });
++
++  test("starting the next turn cancels a previous automatic reply", async () => {
++    const tts: TextToSpeechProvider = {
++      async synthesizeSpeech() {
++        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
++      },
++    };
++    const { voiceSession, host } = createVoiceSession(tts);
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
++    voiceSession.handleAgentStreamEvent({ type: "turn_started", provider: "codex" });
++    voiceSession.handleAgentStreamEvent({
++      type: "timeline",
++      provider: "codex",
++      item: { type: "assistant_message", messageId: "m1", text: "Old reply." },
++    });
++    voiceSession.handleAgentStreamEvent({ type: "turn_completed", provider: "codex" });
++    await waitForAudioOutput(host);
++
++    voiceSession.handleAgentStreamEvent({ type: "turn_started", provider: "codex" });
++    await vi.waitFor(() => expect(host.emitted.some(isCanceledReplay)).toBe(true));
++    voiceSession.handleAgentStreamEvent({
++      type: "timeline",
++      provider: "codex",
++      item: { type: "assistant_message", messageId: "m2", text: "New reply." },
++    });
++    voiceSession.handleAgentStreamEvent({ type: "turn_completed", provider: "codex" });
++    await vi.waitFor(() => expect(host.emitted.filter(isAudioOutput)).toHaveLength(2));
++    await voiceSession.cleanup();
++  });
++
++  test("does not read a turn again after the speak tool was used", async () => {
++    const spoken: string[] = [];
++    const tts: TextToSpeechProvider = {
++      async synthesizeSpeech(text) {
++        spoken.push(text);
++        return { stream: Readable.from([Buffer.from("audio")]), format: "pcm;rate=24000" };
++      },
++    };
++    const { voiceSession, host, speak } = createVoiceSession(tts);
++    host.emit = (message) => {
++      host.emitted.push(message);
++      if (message.type === "audio_output") voiceSession.handleAudioPlayed(message.payload.id);
++    };
++    await voiceSession.handleSetVoiceMode(true, VOICE_AGENT_ID);
++    voiceSession.handleAgentStreamEvent({ type: "turn_started", provider: "codex" });
++    await speak({ text: "I said this aloud." });
++    voiceSession.handleAgentStreamEvent({
++      type: "timeline",
++      provider: "codex",
++      item: { type: "assistant_message", text: "I said this aloud." },
++    });
++    voiceSession.handleAgentStreamEvent({ type: "turn_completed", provider: "codex" });
++    await settle();
++
++    expect(spoken).toEqual(["I said this aloud."]);
++    await voiceSession.cleanup();
++  });
++});
++
+ describe("VoiceSession send behaviour (fork 0009)", () => {
+   const sentenceTts: TextToSpeechProvider = {
+     async synthesizeSpeech() {
+diff --git a/packages/server/src/server/session/voice/voice-session.ts b/packages/server/src/server/session/voice/voice-session.ts
+index 080a5bcf1..b40bb9e07 100644
+--- a/packages/server/src/server/session/voice/voice-session.ts
++++ b/packages/server/src/server/session/voice/voice-session.ts
+@@ -22,7 +22,7 @@ import { createVoiceTurnController, type VoiceTurnController } from "./voice-tur
+ import { buildVoiceModeSystemPrompt, stripVoiceModeSystemPrompt } from "../../voice-config.js";
+ import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
+ import type { ManagedAgent } from "../../agent/agent-manager.js";
+-import type { AgentSessionConfig } from "../../agent/agent-sdk-types.js";
++import type { AgentSessionConfig, AgentStreamEvent } from "../../agent/agent-sdk-types.js";
+ import type { LocalSpeechModelId } from "../../speech/providers/local/models.js";
+ import { toResolver, type Resolvable } from "../../speech/provider-resolver.js";
+ import { sanitizeTextForSpeech } from "../../speech/speech-replay-text.js";
+@@ -227,6 +227,11 @@ export class VoiceSession {
+   private voiceModeAgentId: string | null = null;
+   private voiceModeBaseConfig: VoiceModeBaseConfig | null = null;
+   private speechReplay: { requestId: string; controller: AbortController } | null = null;
++  private assistantTurn: {
++    messages: Map<string, string>;
++    nextMessage: number;
++    spoke: boolean;
++  } | null = null;
+ 
+   constructor(options: VoiceSessionOptions) {
+     const { host, logger, sessionId, sttLanguage, tts, stt, voice, voiceBridge, dictation } =
+@@ -275,6 +280,36 @@ export class VoiceSession {
+     return this.isVoiceMode && this.voiceModeAgentId === agentId;
+   }
+ 
++  /** Read a completed voice turn if its agent never used the speak tool. */
++  handleAgentStreamEvent(event: AgentStreamEvent): void {
++    if (!this.isVoiceMode || !this.voiceModeAgentId) return;
++    if (event.type === "turn_started") {
++      this.cancelSpeechReplay(undefined, "new agent turn");
++      this.assistantTurn = { messages: new Map(), nextMessage: 0, spoke: false };
++      return;
++    }
++    const turn = this.assistantTurn;
++    if (!turn) return;
++    if (event.type === "timeline" && event.item.type === "assistant_message") {
++      const key = event.item.messageId ?? `message-${turn.nextMessage++}`;
++      turn.messages.set(key, (turn.messages.get(key) ?? "") + event.item.text);
++      return;
++    }
++    if (event.type === "turn_completed") {
++      this.assistantTurn = null;
++      const text = [...turn.messages.values()].join("\n\n");
++      if (!turn.spoke && text.trim()) {
++        this.sessionLogger.info(
++          { agentId: this.voiceModeAgentId, textLength: text.length },
++          "Reading assistant turn without a speak tool call",
++        );
++        void this.handleSpeechReplay(uuidv4(), text);
++      }
++    } else if (event.type === "turn_canceled" || event.type === "turn_failed") {
++      this.assistantTurn = null;
++    }
++  }
++
+   handleDictationChunk(params: {
+     dictationId: string;
+     seq: number;
+@@ -559,6 +594,7 @@ export class VoiceSession {
+ 
+   private async disableVoiceModeForActiveAgent(restoreAgentConfig: boolean): Promise<void> {
+     await this.stopVoiceTurnController();
++    this.assistantTurn = null;
+ 
+     const agentId = this.voiceModeAgentId;
+     if (!agentId) {
+@@ -1129,6 +1165,7 @@ export class VoiceSession {
+ 
+   private registerVoiceBridgeForAgent(agentId: string): void {
+     this.registerVoiceSpeakHandler?.(agentId, async ({ text, signal }) => {
++      if (this.assistantTurn) this.assistantTurn.spoke = true;
+       this.sessionLogger.info(
+         {
+           agentId,
+-- 
+2.50.1 (Apple Git-155)
+

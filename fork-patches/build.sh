@@ -8,11 +8,10 @@
 #
 # WHAT IT DOES
 #   1. Resolves TAG (fetches it from the `upstream` remote if it is not local).
-#   2. Recreates a detached git worktree of TAG at $FORK_BUILD_DIR/<TAG>
-#      (default: <repo>/.fork-build/<TAG>, gitignored). Any previous worktree
-#      at that path is removed first, so every build starts clean.
-#   3. Applies fork-patches/*.patch in lexical order with `git am --3way`.
-#      Any patch that does not apply aborts the build (exit 1).
+#   2. Prepares or verifies a detached worktree at $FORK_BUILD_DIR/<TAG>
+#      (default: <repo>/.fork-build/<TAG>, gitignored). Existing source edits
+#      are preserved; a mismatched patch stack aborts the build.
+#   3. Applies fork-patches/*.patch in lexical order on first creation.
 #      Patches in fork-patches/wip/ are not applied.
 #   4. Runs `npm ci` (upstream's postinstall patch-package step runs as usual)
 #      and `npm run build:desktop` for macOS, unsigned-for-distribution:
@@ -63,9 +62,6 @@ esac
 TAG="${1:-v0.13.2}"
 ARCH="${FORK_BUILD_ARCH:-arm64}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
-BUILD_ROOT="${FORK_BUILD_DIR:-$REPO_ROOT/.fork-build}"
-WORKTREE="$BUILD_ROOT/$TAG"
 
 die() { echo "error: $*" >&2; exit 1; }
 log() { printf '\n==> %s\n' "$*"; }
@@ -76,36 +72,11 @@ command -v node >/dev/null || die "node not found"
 node_major="$(node -p 'process.versions.node.split(".")[0]')"
 [[ "$node_major" == 22 ]] || die "need Node 22.x (upstream pins 22.20.0), found $(node -v)"
 
-shopt -s nullglob
-patches=("$SCRIPT_DIR"/*.patch)
-shopt -u nullglob
-(( ${#patches[@]} > 0 )) || die "no patches found in $SCRIPT_DIR"
-
-log "Resolving $TAG"
-if ! git -C "$REPO_ROOT" rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-  git -C "$REPO_ROOT" fetch upstream "refs/tags/$TAG:refs/tags/$TAG" ||
-    die "tag $TAG not found locally or on the upstream remote"
-fi
-TAG_SHA="$(git -C "$REPO_ROOT" rev-parse "$TAG^{commit}")"
-echo "$TAG -> $TAG_SHA"
-
-log "Creating clean worktree at $WORKTREE"
-if [[ -e "$WORKTREE" ]]; then
-  git -C "$REPO_ROOT" worktree remove --force "$WORKTREE" 2>/dev/null || rm -rf "$WORKTREE"
-fi
-git -C "$REPO_ROOT" worktree prune
-mkdir -p "$BUILD_ROOT"
-git -C "$REPO_ROOT" worktree add --detach "$WORKTREE" "$TAG_SHA"
-
-log "Applying ${#patches[@]} patch(es)"
-for p in "${patches[@]}"; do
-  echo "  $(basename "$p")"
-  if ! git -C "$WORKTREE" -c commit.gpgsign=false am --3way --quiet "$p"; then
-    git -C "$WORKTREE" am --abort 2>/dev/null || true
-    die "patch $(basename "$p") does not apply to $TAG; rebase it and regenerate"
-  fi
-done
-git -C "$WORKTREE" log --oneline "$TAG_SHA..HEAD"
+log "Preparing patch-applied $TAG worktree"
+WORKTREE="$("$SCRIPT_DIR/prepare.sh" "$TAG")"
+[[ -z "$(git -C "$WORKTREE" status --porcelain)" ]] ||
+  die "$WORKTREE has uncommitted source changes; commit them as a fork patch before packaging"
+git -C "$WORKTREE" log --oneline "$(git -C "$WORKTREE" rev-parse "$TAG^{commit}")..HEAD"
 
 cd "$WORKTREE"
 
@@ -137,10 +108,14 @@ start=$SECONDS
 # mac.hardenedRuntime=false: hardened runtime + ad-hoc breaks library validation.
 # mac.notarize=false: no Apple credentials. PASEO_DESKTOP_SMOKE unset: the
 # afterSign/afterPack smoke test would launch the packaged app.
+build_script="build:desktop"
+if node -e 'process.exit(require("./package.json").scripts["build:desktop:raw"] ? 0 : 1)'; then
+  build_script="build:desktop:raw"
+fi
 env -u PASEO_DESKTOP_SMOKE \
   CSC_IDENTITY_AUTO_DISCOVERY=false \
   NODE_OPTIONS="--max-old-space-size=${NODE_HEAP_MB:-4096}" \
-  npm run build:desktop -- \
+  npm run "$build_script" -- \
   --publish never --mac "--$ARCH" \
   -c.mac.identity=- \
   -c.mac.hardenedRuntime=false \

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Paseo · Message boundaries mock</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #141716;
+        color: #f1f3f2;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; }
+      .page { max-width: 1312px; margin: auto; padding: 52px 38px 90px; }
+      .intro { display: flex; justify-content: space-between; align-items: end; gap: 32px; padding-bottom: 28px; border-bottom: 1px solid #2f3534; }
+      h1 { margin: 0 0 10px; font-size: 28px; font-weight: 450; letter-spacing: -.025em; }
+      .intro p, .note { margin: 0; color: #a1a5a4; font-size: 14px; line-height: 1.55; }
+      .intro p { max-width: 650px; }
+      .tag { flex: none; color: #a1a5a4; font-size: 13px; }
+      .sample { margin-top: 42px; }
+      .sample h2 { font-size: 15px; font-weight: 500; margin: 0 0 18px; }
+      .frame { background: #181b1a; border: 1px solid #2f3534; border-radius: 14px; overflow: hidden; }
+      .frame-head { padding: 13px 28px; border-bottom: 1px solid #252b2a; color: #a1a5a4; font-size: 13px; }
+      .conversation { max-width: 960px; margin: auto; padding: 32px 36px 38px; }
+      .message { padding: 12px 0 20px; }
+      .message + .message { border-top: 1px solid #2f3534; padding-top: 25px; }
+      .status { display: flex; align-items: center; gap: 10px; min-height: 22px; margin-bottom: 12px; color: #a1a5a4; font-size: 14px; }
+      .status svg { width: 17px; height: 17px; stroke: currentColor; stroke-width: 1.7; fill: none; }
+      .content { font-size: 16px; line-height: 1.62; letter-spacing: -.008em; }
+      .content p { margin: 0 0 16px; }
+      .content p:last-child { margin-bottom: 0; }
+      .actions { display: flex; align-items: center; gap: 17px; min-height: 24px; margin-top: 19px; color: #a1a5a4; }
+      .action { display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 21px; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+      .action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+      .action:focus-visible { outline: 2px solid #7ccba0; outline-offset: 4px; border-radius: 3px; }
+      .work { margin-left: 2px; font-size: 13px; white-space: nowrap; }
+      .streaming .status { color: #7ccba0; }
+      .streaming .actions { color: #717574; }
+      .pulse { display: inline-flex; gap: 4px; align-items: center; height: 17px; }
+      .pulse i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+      .mobile-wrap { max-width: 420px; }
+      .mobile-wrap .frame-head { padding-inline: 18px; }
+      .mobile-wrap .conversation { padding: 17px 20px 25px; }
+      .mobile-wrap .content { font-size: 15px; line-height: 1.58; }
+      .mobile-wrap .message + .message { padding-top: 20px; }
+      .mobile-wrap .actions { margin-top: 16px; }
+      .samples-bottom { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 24px; }
+      .notes { margin: 28px 0 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+      .note { border-top: 1px solid #2f3534; padding-top: 12px; }
+      .note strong { display: block; color: #f1f3f2; font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+      @media (max-width: 900px) { .samples-bottom { grid-template-columns: 1fr; } .notes { grid-template-columns: 1fr; } }
+      @media (max-width: 600px) { .page { padding: 28px 16px 50px; } .intro { display: block; } .tag { display: block; margin-top: 14px; } .conversation { padding: 16px 20px 24px; } .frame-head { padding-inline: 20px; } .content { font-size: 15px; } }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="intro">
+        <div>
+          <h1>Separate assistant messages</h1>
+          <p>Each response keeps its own actions. A quiet rule begins the next message, so a spoken answer and its follow-up no longer read as one continuous block.</p>
+        </div>
+        <span class="tag">Static design review · no app code</span>
+      </header>
+
+      <section class="sample" aria-labelledby="complete-title">
+        <h2 id="complete-title">Completed messages · desktop</h2>
+        <div class="frame">
+          <div class="frame-head">Claude · Conversation</div>
+          <div class="conversation">
+            <article class="message">
+              <div class="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17V6a3 3 0 0 1 6 0v11a3 3 0 0 1-6 0Z"/><path d="M6 12v5a6 6 0 0 0 12 0v-5M12 23v-3"/></svg>Spoke</div>
+              <div class="content"><p>The term is “on-us.” It’s when the same bank is on both sides of a transaction, issuing the customer’s card and acquiring for the merchant.</p></div>
+              <div class="actions" aria-label="Actions for the first message"><button class="action" aria-label="Copy first message"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="13" height="13" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg></button><button class="action" aria-label="Play first message"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4ZM17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12"/></svg></button><button class="action" aria-label="Branch from first message"><svg viewBox="0 0 24 24"><path d="M6 18V8h12M13 4h5v5M18 8l-8 8"/></svg></button></div>
+            </article>
+            <article class="message">
+              <div class="content"><p>Yes, banks can process on-us card transactions internally without sending them through Visa’s switch. The bank approves the payment and moves the money inside its own books.</p><p>There are two catches. Visa’s rules still apply to a Visa-branded card, and a smaller bank may use an outside card processor.</p></div>
+              <div class="actions" aria-label="Actions for the second message"><button class="action" aria-label="Copy second message"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="13" height="13" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg></button><button class="action" aria-label="Play second message"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4ZM17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12"/></svg></button><button class="action" aria-label="Branch from second message"><svg viewBox="0 0 24 24"><path d="M6 18V8h12M13 4h5v5M18 8l-8 8"/></svg></button></div>
+            </article>
+            <article class="message">
+              <div class="content"><p>The cleaner option skips the card: the customer pays from a checking account at the same bank. It works when both parties bank there and needs integration with the bank’s core system.</p></div>
+              <div class="actions" aria-label="Actions for the third message"><button class="action" aria-label="Copy third message"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="13" height="13" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg></button><button class="action" aria-label="Play third message"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4ZM17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12"/></svg></button><button class="action" aria-label="Branch from third message"><svg viewBox="0 0 24 24"><path d="M6 18V8h12M13 4h5v5M18 8l-8 8"/></svg></button><span class="work">Worked for 7m 27s</span></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <div class="samples-bottom">
+        <section class="sample" aria-labelledby="stream-title">
+          <h2 id="stream-title">Streaming and next-message handoff</h2>
+          <div class="frame">
+            <div class="frame-head">Claude · Conversation</div>
+            <div class="conversation">
+              <article class="message">
+                <div class="content"><p>The term is “on-us.” The bank is on both sides of the payment.</p></div>
+                <div class="actions" aria-label="Actions for completed message"><button class="action" aria-label="Copy message"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="13" height="13" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg></button><button class="action" aria-label="Play message"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4ZM17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12"/></svg></button></div>
+              </article>
+              <article class="message streaming">
+                <div class="status"><span class="pulse" aria-hidden="true"><i></i><i></i><i></i></span>Responding</div>
+                <div class="content"><p>A Visa-branded card still follows Visa’s rules, even when the bank processes the payment internally…</p></div>
+                <div class="actions" aria-label="Actions appear on completion"><span class="work">Actions appear when this message finishes</span></div>
+              </article>
+            </div>
+          </div>
+        </section>
+        <section class="sample mobile-wrap" aria-labelledby="compact-title">
+          <h2 id="compact-title">Compact width</h2>
+          <div class="frame">
+            <div class="frame-head">Claude · Conversation</div>
+            <div class="conversation">
+              <article class="message">
+                <div class="status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17V6a3 3 0 0 1 6 0v11a3 3 0 0 1-6 0Z"/><path d="M6 12v5a6 6 0 0 0 12 0v-5M12 23v-3"/></svg>Spoke</div>
+                <div class="content"><p>“On-us” means the same bank sits on both sides of the transaction.</p></div>
+                <div class="actions"><button class="action" aria-label="Copy"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="13" height="13" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg></button><button class="action" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4ZM17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12"/></svg></button><button class="action" aria-label="Branch"><svg viewBox="0 0 24 24"><path d="M6 18V8h12M13 4h5v5M18 8l-8 8"/></svg></button></div>
+              </article>
+              <article class="message">
+                <div class="content"><p>For a smaller bank, an outside processor may handle its cards.</p></div>
+                <div class="actions"><button class="action" aria-label="Copy"><svg viewBox="0 0 24 24"><rect x="7" y="7" width="13" height="13" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2"/></svg></button><button class="action" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4ZM17 9a5 5 0 0 1 0 6M19 6a9 9 0 0 1 0 12"/></svg></button><button class="action" aria-label="Branch"><svg viewBox="0 0 24 24"><path d="M6 18V8h12M13 4h5v5M18 8l-8 8"/></svg></button></div>
+              </article>
+            </div>
+          </div>
+        </section>
+      </div>
+      <aside class="notes" aria-label="Design decisions">
+        <p class="note"><strong>Boundary</strong>A single low-contrast rule begins each new assistant message. No card around the text.</p>
+        <p class="note"><strong>Ownership</strong>Actions sit directly below the message they operate on. “Worked for” stays with the final message of the turn.</p>
+        <p class="note"><strong>Streaming</strong>The previous message keeps its actions while the next one grows. The new row gains actions when complete.</p>
+      </aside>
+    </main>
+  </body>
+</html>

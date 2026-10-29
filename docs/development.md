@@ -5,15 +5,57 @@
 - Node.js (see `.tool-versions` for exact version)
 - npm workspaces (comes with Node)
 
-## Running the dev server
+## Running the fork dev build
 
 ```bash
 npm run dev:server
 npm run dev:app
 npm run dev:desktop
+npm run dev:android
+npm run dev:ios
+npm run web
+npm run build:desktop  # patched, unsigned macOS release build
 ```
 
-Root checkout dev is intentionally split across terminals:
+These root commands prepare or verify `.fork-build/v0.13.2` and run from that
+patch-applied worktree. The tag is the base for `fork-patches/*.patch`; `main`
+does not include those patches. The worktree is reused, including any source
+edits you have made there. New patches apply to an existing worktree only when
+its source tree is clean and the already applied patches still match. A changed
+patch stops with an error instead of deleting the worktree. Run `npm ci` inside
+a newly prepared worktree before dev. `build:desktop` requires a clean source
+tree and installs dependencies itself.
+Use `FORK_BUILD_DIR` for a separate patch worktree when you need to keep the
+existing one.
+
+If `npm ci` cannot install the shared Git `lefthook` hook, install dependencies
+without lifecycle scripts, then run the patch and Electron install steps
+explicitly inside the fork worktree:
+
+```bash
+npm ci --ignore-scripts
+node scripts/postinstall-patches.mjs
+node node_modules/electron/install.js
+```
+
+For upstream source without the fork patches, use the explicit `:raw` commands:
+
+```bash
+npm run dev:server:raw
+npm run dev:app:raw
+npm run dev:desktop:raw
+npm run dev:android:raw
+npm run dev:ios:raw
+npm run web:raw
+npm run build:desktop:raw -- --publish never --mac --arm64
+```
+
+The `android`, `android:development`, and `ios` aliases use the patched dev
+commands. `android:production`, `android:release`, `build:apk`, and other release
+pipelines still use raw source; review their fork packaging separately before
+shipping an artifact from them.
+
+Fork dev is intentionally split across terminals:
 
 - `npm run dev:server` runs the daemon on `127.0.0.1:6768`.
 - `npm run dev:app` runs Expo on `http://localhost:8081` and connects to the dev daemon.
@@ -27,7 +69,7 @@ The web and desktop dev launchers pass the current Git branch to Metro as
 `EXPO_PUBLIC_PASEO_DEV_BUILD_LABEL`. The expanded desktop sidebar shows it in
 the titlebar row. Production builds leave the variable unset and show no label.
 
-`npm run dev` is only a shorthand for `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
+`npm run dev` is only a shorthand for the patched `npm run dev:server`. Keep `127.0.0.1:6767` for the packaged app and production-style `~/.paseo` state.
 
 ## Nix desktop package
 

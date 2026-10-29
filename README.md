@@ -202,14 +202,22 @@ Quick monorepo package map:
 Common commands:
 
 ```bash
-# run all local dev services
+# run the local dev daemon from the fork patch worktree
 npm run dev
 
-# run individual surfaces
+# run individual surfaces from the v0.13.2 fork patch worktree
 npm run dev:server
 npm run dev:app
 npm run dev:desktop
+npm run dev:android
+npm run dev:ios
+npm run web
+
+# website dev still runs from the root checkout
 npm run dev:website
+
+# build the patched macOS desktop app
+npm run build:desktop
 
 # build the server stack
 npm run build:server
@@ -217,6 +225,10 @@ npm run build:server
 # repo-wide checks
 npm run typecheck
 ```
+
+The root app dev and desktop build commands reuse `.fork-build/v0.13.2` and
+verify `fork-patches/*.patch` before running. Explicit `:raw` variants run
+unpatched upstream source. See [development docs](docs/development.md).
 
 ## Support Paseo
 

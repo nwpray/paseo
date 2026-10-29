@@ -97,9 +97,13 @@ Do not:
 ## Quick start
 
 ```bash
-npm run dev                          # Start the dev daemon
-npm run dev:app                      # Start Expo against the dev daemon
-npm run dev:desktop                  # Start Electron desktop dev
+npm run dev                          # Start the patched fork dev daemon
+npm run dev:app                      # Start patched Expo against the dev daemon
+npm run dev:desktop                  # Start patched Electron desktop dev
+npm run dev:android                  # Build and run the patched Android dev app
+npm run dev:ios                      # Build and run the patched iOS dev app
+npm run web                          # Start patched browser web dev
+npm run build:desktop                # Build the patched fork desktop app
 npm run cli -- ls -a -g              # List all agents
 npm run cli -- daemon status         # Check daemon status
 npm run typecheck                    # Always run after changes
@@ -107,6 +111,12 @@ npm run lint                         # Always run after changes
 npm run format                       # Auto-format with Biome
 npm run format:check                 # Check formatting without writing
 ```
+
+The root dev and desktop build commands use `.fork-build/v0.13.2`, with
+`fork-patches/*.patch` applied. Use `dev:server:raw`, `dev:app:raw`,
+`dev:desktop:raw`, `dev:android:raw`, `dev:ios:raw`, `web:raw`, or
+`build:desktop:raw` only when testing unpatched source.
+See [docs/development.md](docs/development.md) for worktree setup and reuse.
 
 Repo dev commands use checkout-local state by default. In this checkout, `PASEO_HOME` resolves to `.dev/paseo-home`, and `npm run cli -- ...` targets that same dev home automatically. The packaged desktop app and production-style daemon keep using `~/.paseo` on port `6767`.
 

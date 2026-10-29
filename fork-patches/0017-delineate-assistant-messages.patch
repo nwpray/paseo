@@ -1,0 +1,396 @@
+From 2ac688b336fbbe6d1e1deb153f5f76153961f4b9 Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Wed, 28 Oct 2026 21:36:03 -0600
+Subject: [PATCH] fork: delineate assistant messages and attach per-message
+ actions
+
+---
+ packages/app/src/agent-stream/layout.test.ts  | 17 ++++++
+ packages/app/src/agent-stream/layout.ts       |  7 ++-
+ .../src/agent-stream/turn-boundary.test.ts    | 42 ++++++++++++-
+ .../app/src/agent-stream/turn-boundary.ts     | 10 ++++
+ packages/app/src/agent-stream/turn-footer.tsx | 55 ++++++++++++++++-
+ packages/app/src/agent-stream/view.tsx        | 59 +++++++++++++++++--
+ packages/app/src/components/message.tsx       | 16 +++--
+ 7 files changed, 193 insertions(+), 13 deletions(-)
+
+diff --git a/packages/app/src/agent-stream/layout.test.ts b/packages/app/src/agent-stream/layout.test.ts
+index f10fde2cb..1e24dbb79 100644
+--- a/packages/app/src/agent-stream/layout.test.ts
++++ b/packages/app/src/agent-stream/layout.test.ts
+@@ -148,6 +148,23 @@ function findLayoutItem(layout: StreamLayout, id: string): StreamLayoutItem {
+ }
+ 
+ describe("layoutStream", () => {
++  it.each(["web", "android"] as const)(
++    "completes an earlier live message while the next message streams on %s",
++    (platform) => {
++      const first = assistantMessage("first", 1);
++      const next = assistantMessage("next", 2);
++      const layout = layoutFor({
++        platform,
++        isTurnActive: true,
++        tail: [],
++        head: [first, next],
++      });
++
++      expect(findLayoutItem(layout, first.id).phase).toBe("complete");
++      expect(findLayoutItem(layout, next.id).phase).toBe("streaming");
++    },
++  );
++
+   it("places one response footer after an adjacent tagged tool-only turn", () => {
+     const priorAssistant = assistantMessage("prior", 1, undefined, "turn-1");
+     const nextTool = toolCall("next-tool", 2, "turn-2");
+diff --git a/packages/app/src/agent-stream/layout.ts b/packages/app/src/agent-stream/layout.ts
+index 82ef98db5..eaadfac71 100644
+--- a/packages/app/src/agent-stream/layout.ts
++++ b/packages/app/src/agent-stream/layout.ts
+@@ -330,7 +330,12 @@ function layoutSegmentItem(
+       isToolSequenceItem(item) &&
+       !(isToolSequenceItem(belowItem) && continuesTurn(item, belowItem)),
+     frameOrder: input.frameOrder,
+-    phase: input.phase,
++    // Once another row follows a live assistant message, that message has finished
++    // and can own its copy/playback actions while the next message streams.
++    phase:
++      input.phase === "streaming" && item.kind === "assistant_message" && belowItem !== null
++        ? "complete"
++        : input.phase,
+   });
+ }
+ 
+diff --git a/packages/app/src/agent-stream/turn-boundary.test.ts b/packages/app/src/agent-stream/turn-boundary.test.ts
+index 14e5ea776..982e0010a 100644
+--- a/packages/app/src/agent-stream/turn-boundary.test.ts
++++ b/packages/app/src/agent-stream/turn-boundary.test.ts
+@@ -1,6 +1,6 @@
+ import { describe, expect, it } from "vitest";
+ import type { StreamItem } from "@/types/stream";
+-import { resolveAssistantTurnForkBoundary } from "./turn-boundary";
++import { resolveAssistantTurnForkBoundary, resolveSpokenToolForkBoundary } from "./turn-boundary";
+ 
+ function timestamp(seed: number): Date {
+   return new Date(`2026-01-01T00:00:${seed.toString().padStart(2, "0")}.000Z`);
+@@ -113,3 +113,43 @@ describe("resolveAssistantTurnForkBoundary", () => {
+     ).toBeUndefined();
+   });
+ });
++
++describe("resolveSpokenToolForkBoundary", () => {
++  const spokenTool: Extract<StreamItem, { kind: "tool_call" }> = {
++    kind: "tool_call",
++    id: "speak-1",
++    timestamp: timestamp(2),
++    timelineCursor: { epoch: "timeline-1", seq: 42 },
++    payload: {
++      source: "agent",
++      data: {
++        provider: "claude",
++        callId: "speak-1",
++        name: "speak",
++        detail: { type: "unknown", input: "Hello", output: null },
++        status: "completed",
++        error: null,
++      },
++    },
++  };
++
++  it("forks a spoken tool row from its canonical cursor", () => {
++    expect(
++      resolveSpokenToolForkBoundary({ item: spokenTool, supportsTimelineCursor: true }),
++    ).toEqual({
++      boundaryCursor: { epoch: "timeline-1", seq: 42 },
++    });
++  });
++
++  it("does not offer an unsupported or missing cursor", () => {
++    expect(
++      resolveSpokenToolForkBoundary({ item: spokenTool, supportsTimelineCursor: false }),
++    ).toBeUndefined();
++    expect(
++      resolveSpokenToolForkBoundary({
++        item: { ...spokenTool, timelineCursor: undefined },
++        supportsTimelineCursor: true,
++      }),
++    ).toBeUndefined();
++  });
++});
+diff --git a/packages/app/src/agent-stream/turn-boundary.ts b/packages/app/src/agent-stream/turn-boundary.ts
+index f7cbe8c00..40589197e 100644
+--- a/packages/app/src/agent-stream/turn-boundary.ts
++++ b/packages/app/src/agent-stream/turn-boundary.ts
+@@ -21,3 +21,13 @@ export function resolveAssistantTurnForkBoundary(input: {
+   }
+   return item.messageId ? { boundaryMessageId: item.messageId } : undefined;
+ }
++
++/** A spoken tool row can be a fork checkpoint when the host supplies timeline cursors. */
++export function resolveSpokenToolForkBoundary(input: {
++  item: Extract<StreamItem, { kind: "tool_call" }>;
++  supportsTimelineCursor: boolean;
++}): AssistantTurnForkBoundary | undefined {
++  return input.supportsTimelineCursor && input.item.timelineCursor
++    ? { boundaryCursor: input.item.timelineCursor }
++    : undefined;
++}
+diff --git a/packages/app/src/agent-stream/turn-footer.tsx b/packages/app/src/agent-stream/turn-footer.tsx
+index 05f58aa5e..f612b07f2 100644
+--- a/packages/app/src/agent-stream/turn-footer.tsx
++++ b/packages/app/src/agent-stream/turn-footer.tsx
+@@ -8,7 +8,11 @@ import {
+   collectAssistantResponseContentForStreamRenderStrategy,
+   type StreamStrategy,
+ } from "./strategy";
+-import { resolveAssistantTurnForkBoundary, type AssistantTurnForkBoundary } from "./turn-boundary";
++import {
++  resolveAssistantTurnForkBoundary,
++  resolveSpokenToolForkBoundary,
++  type AssistantTurnForkBoundary,
++} from "./turn-boundary";
+ import {
+   AssistantTurnFooter,
+   LiveElapsed,
+@@ -104,6 +108,7 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
+   onForkAssistantTurn?: AssistantTurnForkHandler;
+   speechReplayScope?: SpeechReplayScope;
+ }) {
++  if (timing?.completedAt === undefined && timing?.durationMs === undefined) return null;
+   return (
+     <TurnFooterRow>
+       <CompletedTurnFooter
+@@ -119,6 +124,49 @@ export const CompletedTurnFooterRow = memo(function CompletedTurnFooterRow({
+   );
+ });
+ 
++/** Actions belong to the source assistant message, even when a turn emits several messages. */
++export const AssistantMessageActionRow = memo(function AssistantMessageActionRow({
++  item,
++  text,
++  supportsTimelineCursor,
++  onForkAssistantTurn,
++  speechReplayScope,
++}: {
++  item: StreamItem;
++  text: string;
++  supportsTimelineCursor: boolean;
++  onForkAssistantTurn?: AssistantTurnForkHandler;
++  speechReplayScope?: SpeechReplayScope;
++}) {
++  const getContent = useCallback(() => text, [text]);
++  let boundary: AssistantTurnForkBoundary | undefined;
++  if (item.kind === "assistant_message") {
++    boundary = resolveAssistantTurnForkBoundary({
++      items: [item],
++      startIndex: 0,
++      supportsTimelineCursor,
++    });
++  } else if (item.kind === "tool_call") {
++    boundary = resolveSpokenToolForkBoundary({ item, supportsTimelineCursor });
++  }
++  const handleFork = useCallback(
++    (target: AssistantForkTarget) => {
++      if (boundary) return onForkAssistantTurn?.({ target, boundary });
++    },
++    [boundary, onForkAssistantTurn],
++  );
++  return (
++    <View style={[stylesheet.streamItemWrapper, stylesheet.messageActionsRow]}>
++      <AssistantTurnFooter
++        getContent={getContent}
++        onFork={boundary && onForkAssistantTurn ? handleFork : undefined}
++        speechReplayScope={speechReplayScope}
++        turnKey={item.id}
++      />
++    </View>
++  );
++});
++
+ const WorkingIndicator = memo(function WorkingIndicator({
+   inFlightTurnStartedAt = null,
+   onForkInFlightTurn,
+@@ -212,6 +260,7 @@ function CompletedTurnFooter({
+         onFork={boundary && onForkAssistantTurn ? handleFork : undefined}
+         speechReplayScope={speechReplayScope}
+         turnKey={items[startIndex]?.id ?? String(startIndex)}
++        showActions={false}
+       />
+     </View>
+   );
+@@ -232,6 +281,10 @@ const stylesheet = StyleSheet.create((theme) => ({
+   turnFooterRow: {
+     marginTop: theme.spacing[2] + 5,
+   },
++  messageActionsRow: {
++    marginTop: theme.spacing[2],
++    paddingBottom: theme.spacing[3],
++  },
+   turnFooterSlot: {
+     flexDirection: "row",
+     alignItems: "center",
+diff --git a/packages/app/src/agent-stream/view.tsx b/packages/app/src/agent-stream/view.tsx
+index 755cfbe7a..f93c9cf42 100644
+--- a/packages/app/src/agent-stream/view.tsx
++++ b/packages/app/src/agent-stream/view.tsx
+@@ -73,6 +73,7 @@ import { getHostRuntimeStore } from "@/runtime/host-runtime";
+ import { planTimelineTailFetch } from "@/timeline/timeline-sync-plan";
+ import {
+   CompletedTurnFooterRow,
++  AssistantMessageActionRow,
+   TurnFooter,
+   TURN_FOOTER_BOTTOM_SPACING,
+   type AssistantTurnForkHandler,
+@@ -173,8 +174,33 @@ function renderStreamItemWithTurnFooter(input: {
+       speechReplayScope={input.speechReplayScope}
+     />
+   ) : null;
++  const item = input.layoutItem.item;
++  const spokenText = getSpokenMessageText(item);
++  const messageActions =
++    (item.kind === "assistant_message" &&
++      item.text.trim().length > 0 &&
++      input.layoutItem.phase === "complete") ||
++    (spokenText !== null &&
++      spokenText.trim().length > 0 &&
++      item.kind === "tool_call" &&
++      item.payload.data.status === "completed") ? (
++      <AssistantMessageActionRow
++        item={item}
++        text={item.kind === "assistant_message" ? item.text : (spokenText ?? "")}
++        supportsTimelineCursor={input.supportsTimelineCursor}
++        onForkAssistantTurn={input.onForkAssistantTurn}
++        speechReplayScope={input.speechReplayScope}
++      />
++    ) : null;
++  const beginsMessage = item.kind === "assistant_message" || spokenText !== null;
++  const followsPriorContent =
++    input.layoutItem.aboveItem !== null && input.layoutItem.aboveItem.kind !== "user_message";
+   const content = (
+-    <StreamItemWrapper itemId={input.layoutItem.item.id} gapBelow={input.layoutItem.gapBelow}>
++    <StreamItemWrapper
++      itemId={item.id}
++      gapBelow={input.layoutItem.gapBelow}
++      messageBoundary={beginsMessage && followsPriorContent}
++    >
+       {input.content}
+     </StreamItemWrapper>
+   );
+@@ -183,6 +209,7 @@ function renderStreamItemWithTurnFooter(input: {
+     return (
+       <>
+         {footer}
++        {messageActions}
+         {content}
+       </>
+     );
+@@ -191,11 +218,20 @@ function renderStreamItemWithTurnFooter(input: {
+   return (
+     <>
+       {content}
++      {messageActions}
+       {footer}
+     </>
+   );
+ }
+ 
++function getSpokenMessageText(item: StreamItem | null): string | null {
++  if (item?.kind !== "tool_call" || item.payload.source !== "agent") return null;
++  const { name, detail } = item.payload.data;
++  return name === "speak" && detail.type === "unknown" && typeof detail.input === "string"
++    ? detail.input
++    : null;
++}
++
+ function renderListEmptyComponent(input: {
+   renderModel: AgentStreamRenderModel;
+   emptyStateStyle: StyleProp<ViewStyle>;
+@@ -1665,6 +1701,12 @@ const stylesheet = StyleSheet.create((theme) => ({
+     alignSelf: "center",
+     paddingHorizontal: theme.spacing[2],
+   },
++  messageBoundary: {
++    borderTopWidth: theme.borderWidth[1],
++    borderTopColor: theme.colors.border,
++    paddingTop: theme.spacing[4],
++    marginTop: theme.spacing[2],
++  },
+   emptyState: {
+     flex: 1,
+     alignItems: "center",
+@@ -1792,13 +1834,22 @@ const permissionStyles = StyleSheet.create((theme) => ({
+ interface StreamItemWrapperProps {
+   itemId: string;
+   gapBelow: number;
++  messageBoundary?: boolean;
+   children: ReactNode;
+ }
+ 
+-function StreamItemWrapper({ gapBelow, children }: StreamItemWrapperProps) {
++function StreamItemWrapper({
++  gapBelow,
++  messageBoundary = false,
++  children,
++}: StreamItemWrapperProps) {
+   const wrapperStyle = useMemo(
+-    () => [stylesheet.streamItemWrapper, { marginBottom: gapBelow }],
+-    [gapBelow],
++    () => [
++      stylesheet.streamItemWrapper,
++      messageBoundary && stylesheet.messageBoundary,
++      { marginBottom: gapBelow },
++    ],
++    [gapBelow, messageBoundary],
+   );
+   return <View style={wrapperStyle}>{children}</View>;
+ }
+diff --git a/packages/app/src/components/message.tsx b/packages/app/src/components/message.tsx
+index c00eddc14..c91e3d250 100644
+--- a/packages/app/src/components/message.tsx
++++ b/packages/app/src/components/message.tsx
+@@ -553,6 +553,7 @@ interface AssistantTurnFooterProps {
+   onFork?: (target: AssistantForkTarget) => Promise<void> | void;
+   speechReplayScope?: SpeechReplayScope;
+   turnKey?: string;
++  showActions?: boolean;
+ }
+ 
+ const assistantTurnFooterStylesheet = StyleSheet.create((theme) => ({
+@@ -599,6 +600,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
+   onFork,
+   speechReplayScope,
+   turnKey,
++  showActions = true,
+ }: AssistantTurnFooterProps) {
+   const { t } = useTranslation();
+   const [hovered, setHovered] = useState(false);
+@@ -651,11 +653,13 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
+ 
+   return (
+     <View style={assistantTurnFooterStylesheet.container}>
+-      <TurnCopyButton
+-        getContent={getContent}
+-        containerStyle={assistantTurnFooterStylesheet.copyButton}
+-      />
+-      {speechReplayScope && turnKey ? (
++      {showActions ? (
++        <TurnCopyButton
++          getContent={getContent}
++          containerStyle={assistantTurnFooterStylesheet.copyButton}
++        />
++      ) : null}
++      {showActions && speechReplayScope && turnKey ? (
+         <TurnSpeakButton
+           scope={speechReplayScope}
+           turnKey={turnKey}
+@@ -663,7 +667,7 @@ export const AssistantTurnFooter = memo(function AssistantTurnFooter({
+           containerStyle={assistantTurnFooterStylesheet.copyButton}
+         />
+       ) : null}
+-      {canFork ? <AssistantForkMenu onFork={handleFork} /> : null}
++      {showActions && canFork ? <AssistantForkMenu onFork={handleFork} /> : null}
+       {primaryLabel ? (
+         <Pressable
+           onPress={handlePress}
+-- 
+2.50.1 (Apple Git-155)
+
