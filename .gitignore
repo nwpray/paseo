@@ -99,5 +99,8 @@ app.json
 # Project-local Serena configuration and memories.
 .serena/
 
+# Generated graft repository index.
+/graft/
+
 # Fork patch-stack build worktrees (fork-patches/build.sh).
 .fork-build/
