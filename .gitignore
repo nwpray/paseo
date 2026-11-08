@@ -104,3 +104,6 @@ app.json
 
 # Fork patch-stack build worktrees (fork-patches/build.sh).
 .fork-build/
+
+# Gradle caches from local Android module builds.
+.gradle/
