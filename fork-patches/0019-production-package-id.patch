@@ -1,0 +1,28 @@
+From 48c62190afce0c5c71cfe2b75a6c29586bcecc8b Mon Sep 17 00:00:00 2001
+From: Nick Pray <nickwpray@gmail.com>
+Date: Sat, 7 Nov 2026 21:50:20 -0700
+Subject: [PATCH] fork: build production apps as com.nicholasdigital.paseo
+
+The fork's iOS release builds used this id as a local edit in their
+release worktrees. Carry it as a patch so every patched production build
+uses it. The development variant keeps sh.paseo.debug.
+---
+ packages/app/app.config.js | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/packages/app/app.config.js b/packages/app/app.config.js
+index 7ddfc9502..3579a268b 100644
+--- a/packages/app/app.config.js
++++ b/packages/app/app.config.js
+@@ -70,7 +70,7 @@ function resolveSecretFile(params) {
+ const variants = {
+   production: {
+     name: "Paseo",
+-    packageId: "sh.paseo",
++    packageId: "com.nicholasdigital.paseo",
+     googleServicesFile: resolveSecretFile({
+       envKey: "GOOGLE_SERVICES_FILE_PROD",
+       fallbackRelativePath: "./.secrets/google-services.prod.json",
+-- 
+2.50.1 (Apple Git-155)
+
