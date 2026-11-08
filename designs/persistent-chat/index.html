@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Paseo · Persistent teammates and group chat mock</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="intro">
+        <div>
+          <h1>Teammates: persistent named agents and group chat</h1>
+          <p>
+            Alex is a teammate with a permanent name, memory, and one durable chat. Agent sessions
+            come and go underneath it. Group chats bring familiar teammates into one conversation.
+            Use Create teammate, the Chats + menu, or an empty state's Create button to walk through
+            setting one up. Add a picture in the form or in About; it stays in this tab's memory.
+            Exploratory design only, not an approved implementation. Review notes are in
+            <a href="REVIEW.md">REVIEW.md</a>.
+          </p>
+        </div>
+        <span class="tag">Local mock · no app code</span>
+      </header>
+
+      <nav class="switcher" aria-label="Mock controls">
+        <div class="switch-group">
+          <span class="switch-label" id="surface-label">Surface</span>
+          <div class="segmented" role="group" aria-labelledby="surface-label">
+            <button type="button" data-surface="direct">Direct chat</button>
+            <button type="button" data-surface="memory">About and memory</button>
+            <button type="button" data-surface="group">Group chat</button>
+            <button type="button" data-surface="create">Create teammate</button>
+          </div>
+        </div>
+        <div class="switch-group" id="state-group">
+          <span class="switch-label" id="state-label">State</span>
+          <div class="segmented" role="group" aria-labelledby="state-label">
+            <button type="button" data-state="ready">Ready</button>
+            <button type="button" data-state="empty">Empty</button>
+            <button type="button" data-state="loading">Loading</button>
+            <button type="button" data-state="working">Working</button>
+            <button type="button" data-state="offline">Offline</button>
+            <button type="button" data-state="error">Error</button>
+            <button type="button" data-state="unavailable">Unavailable member</button>
+          </div>
+        </div>
+        <div class="switch-group" id="scenario-group" hidden>
+          <span class="switch-label" id="scenario-label">Scenario</span>
+          <div class="segmented" role="group" aria-labelledby="scenario-label">
+            <button type="button" data-scenario="ready">Options loaded</button>
+            <button type="button" data-scenario="loading">Loading options</button>
+            <button type="button" data-scenario="host-offline">Host offline</button>
+            <button type="button" data-scenario="provider-missing">Provider unavailable</button>
+            <button type="button" data-scenario="no-providers">No providers</button>
+            <button type="button" data-scenario="create-fails">Create fails once</button>
+          </div>
+        </div>
+        <p class="state-caption" id="caption" aria-live="polite"></p>
+      </nav>
+
+      <section class="stage" aria-labelledby="desktop-title">
+        <h2 id="desktop-title">
+          Desktop <span>· 1280 × 780, sidebar pinned</span>
+          <span id="future" hidden>· group chat is a later phase</span>
+        </h2>
+        <div class="scroller" id="desktop"></div>
+      </section>
+
+      <section class="stage" aria-labelledby="mobile-title">
+        <h2 id="mobile-title">Compact <span>· 390 wide, sidebar overlaid, detail pushed</span></h2>
+        <div class="phones" id="mobile"></div>
+      </section>
+    </main>
+    <p class="sr-only" id="pic-live" role="status" aria-live="polite"></p>
+    <script src="picture.js"></script>
+    <script src="create-flow.js"></script>
+    <script src="mock.js"></script>
+  </body>
+</html>
